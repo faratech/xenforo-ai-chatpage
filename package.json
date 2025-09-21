@@ -1,0 +1,73 @@
+{
+  "name": "xenforo-chatpage",
+  "version": "0.1.0",
+  "private": true,
+  "homepage": "/chatpage",
+  "dependencies": {
+    "@chakra-ui/color-mode": "^2.2.0",
+    "@chakra-ui/react": "^3.15.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@fortawesome/fontawesome-svg-core": "^6.7.2",
+    "@fortawesome/free-solid-svg-icons": "^6.7.2",
+    "@fortawesome/react-fontawesome": "^0.2.2",
+    "@mui/material": "^7.0.1",
+    "@nlux/react": "^2.17.1",
+    "@nlux/themes": "^2.17.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^14.6.1",
+    "dompurify": "^3.2.4",
+    "emoji-mart": "^5.6.0",
+    "emoji-picker-react": "^4.12.2",
+    "framer-motion": "^12.6.2",
+    "lodash.debounce": "^4.0.8",
+    "marked": "^15.0.7",
+    "mui": "^0.0.1",
+    "react": "^19.1.0",
+    "react-chatbot-kit": "^2.2.2",
+    "react-chatbotify": "^2.0.0-beta.32",
+    "react-dom": "^19.1.0",
+    "react-draggable": "^4.4.6",
+    "react-icons": "^5.5.0",
+    "react-native": "^0.78.1",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-paper": "^5.13.1",
+    "react-scripts": "^5.0.1",
+    "react-virtuoso": "^4.12.6",
+    "react-window": "^1.8.11",
+    "web-vitals": "^4.2.4"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
+    "@babel/preset-env": "^7.26.9",
+    "@babel/preset-react": "^7.26.3",
+    "ajv": "^8.17.1",
+    "ajv-keywords": "^5.1.0",
+    "yarn-upgrade-all": "^0.7.5"
+  }
+}
