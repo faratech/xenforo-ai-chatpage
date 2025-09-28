@@ -119,13 +119,12 @@ const Message = React.memo(({
   isStreaming,
   onFeedback
 }) => {
-  const theme = useTheme();
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
   const [showCopied, setShowCopied] = useState(false);
   const [feedback, setFeedback] = useState(null);
-  const aiBg = theme.palette.mode === 'light' ? '#f7f7f8' : '#2a2b32';
-  const userBg = theme.palette.mode === 'light' ? '#fff' : '#343541';
+  const aiBg = useColorValue('#f7f7f8', '#2a2b32');
+  const userBg = useColorValue('#fff', '#343541');
 
   const handleCopy = useCallback(() => {
     const tempDiv = document.createElement('div');
@@ -179,7 +178,7 @@ const Message = React.memo(({
                 variant="subtitle2"
                 sx={{
                   fontWeight: 600,
-                  color: theme.palette.mode === 'light' ? '#000' : '#fff'
+                  color: useColorValue('#000', '#fff')
                 }}
               >
                 {msg.role === 'user' ? userName : 'Assistant'}
@@ -218,13 +217,13 @@ const Message = React.memo(({
                   dangerouslySetInnerHTML={{ __html: msg.content }}
                   sx={{
                     '& pre': {
-                      backgroundColor: theme.palette.mode === 'light' ? '#f6f8fa' : '#0d1117',
+                      backgroundColor: useColorValue('#f6f8fa', '#0d1117'),
                       padding: 2,
                       borderRadius: 1,
                       overflow: 'auto',
                     },
                     '& code': {
-                      backgroundColor: theme.palette.mode === 'light' ? '#f6f8fa' : '#0d1117',
+                      backgroundColor: useColorValue('#f6f8fa', '#0d1117'),
                       padding: '2px 4px',
                       borderRadius: '3px',
                       fontSize: '0.875em',
@@ -309,7 +308,6 @@ const Message = React.memo(({
 const generateConversationId = () => `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
 const ChatWindow = ({ userAvatar, userName, userId }) => {
-  const theme = useTheme();
   const isGuest = !userId || (typeof userId === 'string' && userId.startsWith('guest_'));
   const welcomeMessage = isGuest
     ? 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology! For best results please <a href="/register">register</a> or <a href="/login">log-in</a> to the Windows Forum'
@@ -372,9 +370,9 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
   const chatContainerRef = useRef(null);
   const textFieldRef = useRef(null);
 
-  const containerBg = theme.palette.mode === 'light' ? '#fff' : '#343541';
-  const inputBg = theme.palette.mode === 'light' ? '#fff' : '#40414f';
-  const borderColor = theme.palette.mode === 'light' ? '#e5e7eb' : '#565869';
+  const containerBg = useColorValue('#fff', '#343541');
+  const inputBg = useColorValue('#fff', '#40414f');
+  const borderColor = useColorValue('#e5e7eb', '#565869');
 
   // Save conversations to localStorage
   useEffect(() => {
@@ -522,17 +520,11 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
       });
 
       if (!response.ok) {
-        let errorData;
-        try {
-          errorData = await response.json();
-        } catch (jsonError) {
-          console.error('Failed to parse error response:', jsonError);
-          throw new Error(`Server error: ${response.status} ${response.statusText}`);
-        }
+        const errorData = await response.json();
         if (errorData.captcha_required) {
           throw new Error('CAPTCHA_REQUIRED');
         }
-        throw new Error(errorData.error || `Server error: ${response.status}`);
+        throw new Error('Network response was not ok');
       }
 
       if (!response.body) throw new Error('ReadableStream not supported');
@@ -542,13 +534,11 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
       let done = false;
       let partialText = '';
       let annotations = [];
-      let hasReceivedData = false;
 
       while (!done) {
         const { value, done: streamDone } = await reader.read();
         done = streamDone;
         if (value) {
-          hasReceivedData = true;
           const chunk = decoder.decode(value, { stream: true });
           const lines = chunk.split('\n');
           for (const line of lines) {
@@ -587,23 +577,15 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
                     break;
                 }
               } catch (error) {
-                console.error('Error parsing streaming data:', error, 'Line:', line);
-                // Continue processing other lines instead of failing silently
+                console.error('Error parsing streaming data:', error);
               }
             }
           }
         }
       }
-
-      // Check if we received any data at all
-      if (!hasReceivedData && !partialText) {
-        throw new Error('No data received from server');
-      }
-
       return { text: partialText, annotations };
     } catch (error) {
       if (error.name !== 'AbortError') throw error;
-      return null; // Return null instead of undefined for aborted requests
     }
   };
 
@@ -685,14 +667,6 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
         });
         setStreamingMessage(null);
         playAudioResponse(result.text);
-      } else if (result === null) {
-        // Request was aborted - clean up streaming message
-        setStreamingMessage(null);
-      } else {
-        // No result received - show error
-        setErrorMessage('No response received from server. Please try again.');
-        setStreamingMessage(null);
-        console.error('Empty result from sendChatMessage:', result);
       }
     } catch (error) {
       if (error.name !== 'AbortError') {
@@ -705,25 +679,11 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
           });
           setInput(content);
         } else {
-          const errorMsg = error.message || 'Unknown error';
-          console.error('Chat error:', error);
-
-          let userMessage = 'Failed to send message. Please try again.';
-          if (errorMsg.includes('Server error')) {
-            userMessage = `Server error: ${errorMsg}. Please try again later.`;
-          } else if (errorMsg.includes('No data received')) {
-            userMessage = 'No response from server. The server may be experiencing issues.';
-          } else if (errorMsg.includes('Network')) {
-            userMessage = 'Network error. Please check your connection.';
-          } else if (errorMsg.includes('ReadableStream')) {
-            userMessage = 'Your browser does not support streaming responses. Please try a modern browser.';
-          }
-
-          setErrorMessage(userMessage);
-          // Clean up any orphaned streaming message
-          if (streamingMessage) {
-            setStreamingMessage(null);
-          }
+          setErrorMessage(
+            error.message === 'Network response was not ok'
+              ? 'Network error. Please check your connection.'
+              : 'Failed to send message. Please try again.'
+          );
         }
       }
     } finally {
@@ -876,7 +836,7 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
         sx={{
           '& .MuiDrawer-paper': {
             width: 280,
-            backgroundColor: theme.palette.mode === 'light' ? '#f7f7f8' : '#202123',
+            backgroundColor: useColorValue('#f7f7f8', '#202123'),
           }
         }}
       >
@@ -1043,7 +1003,7 @@ const ChatWindow = ({ userAvatar, userName, userId }) => {
                           cursor: 'pointer',
                           mb: 1,
                           '&:hover': {
-                            backgroundColor: theme.palette.mode === 'light' ? '#e5e7eb' : '#4b4f60',
+                            backgroundColor: useColorValue('#e5e7eb', '#4b4f60'),
                           }
                         }}
                       />
