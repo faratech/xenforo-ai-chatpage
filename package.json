@@ -13,12 +13,17 @@
     "@testing-library/jest-dom": "*",
     "@testing-library/react": "*",
     "@testing-library/user-event": "*",
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.1.15",
+    "@types/react-dom": "^19.1.9",
     "dompurify": "*",
     "marked": "*",
     "react": "*",
     "react-dom": "*",
     "react-refresh": "*",
     "react-scripts": "*",
+    "typescript": "^5.9.2",
     "web-vitals": "*"
   },
   "scripts": {
