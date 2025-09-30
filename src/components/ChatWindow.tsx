@@ -239,6 +239,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     abortControllerRef.current = abortController;
 
     if (content.toLowerCase() === '/clear') {
+      setIsLoading(false);
       handleNewConversation();
       return;
     }

@@ -124,60 +124,94 @@ export class ChatAPI {
     let partialText = '';
     let annotations: Annotation[] = [];
     let hasReceivedData = false;
+    let chunkCount = 0;
 
-    while (!done) {
-      const { value, done: streamDone } = await reader.read();
-      done = streamDone;
+    try {
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        done = streamDone;
 
-      if (value) {
-        hasReceivedData = true;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        if (value) {
+          hasReceivedData = true;
+          chunkCount++;
+          const chunk = decoder.decode(value, { stream: true });
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.substring(6).trim();
-            if (!jsonStr) continue;
+          const lines = chunk.split('\n');
 
-            try {
-              const parsedData = JSON.parse(jsonStr);
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const jsonStr = line.substring(6).trim();
+              if (!jsonStr) continue;
 
-              switch (parsedData.type) {
-                case 'response.output_text.delta':
-                  partialText += parsedData.delta;
-                  if (onChunk) onChunk(partialText, annotations);
-                  break;
+              try {
+                const parsedData = JSON.parse(jsonStr);
 
-                case 'response.output_text.done':
-                  if (onChunk) onChunk(partialText, annotations);
-                  break;
+                // Check for backend errors first
+                if (parsedData.type === 'error') {
+                  const errorDetail = parsedData.detail || parsedData.message || 'Unknown error from backend';
+                  console.error('[API] Backend error:', errorDetail);
+                  // Create a custom error and rethrow to outer catch
+                  const backendError: any = new Error(`AI service error: ${errorDetail}`);
+                  backendError.isBackendError = true;
+                  throw backendError;
+                }
 
-                case 'response.output_text.annotation.added':
-                  if (parsedData.annotation?.type === 'file_citation') {
-                    annotations.push({
-                      index: parsedData.annotation_index,
-                      filename: parsedData.annotation.filename,
-                      fileId: parsedData.annotation.file_id
-                    });
-                  }
-                  break;
+                switch (parsedData.type) {
+                  case 'response.output_text.delta':
+                    partialText += parsedData.delta;
+                    if (onChunk) onChunk(partialText, annotations);
+                    break;
 
-                case 'response.content_part.done':
-                  if (parsedData.part?.annotations) {
-                    annotations = parsedData.part.annotations.map((ann: any, idx: number) => ({
-                      index: idx,
-                      filename: ann.filename,
-                      fileId: ann.file_id
-                    }));
-                  }
-                  break;
+                  case 'response.output_text.done':
+                    if (onChunk) onChunk(partialText, annotations);
+                    break;
+
+                  case 'response.output_text.annotation.added':
+                    if (parsedData.annotation?.type === 'file_citation') {
+                      annotations.push({
+                        index: parsedData.annotation_index,
+                        filename: parsedData.annotation.filename,
+                        fileId: parsedData.annotation.file_id
+                      });
+                    }
+                    break;
+
+                  case 'response.content_part.done':
+                    if (parsedData.part?.annotations) {
+                      annotations = parsedData.part.annotations.map((ann: any, idx: number) => ({
+                        index: idx,
+                        filename: ann.filename,
+                        fileId: ann.file_id
+                      }));
+                    }
+                    break;
+
+                  case 'response.completed':
+                    // Stream completed successfully
+                    break;
+
+                  default:
+                    // Ignore other event types
+                    break;
+                }
+              } catch (error: any) {
+                // Rethrow backend errors to outer catch
+                if (error.isBackendError) {
+                  throw error;
+                }
+                // Silently continue on parse errors
               }
-            } catch (error) {
-              console.error('Error parsing streaming data:', error, 'Line:', line);
             }
           }
         }
       }
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        console.log('Stream aborted by user');
+        // Return what we have so far
+        return { text: partialText, annotations };
+      }
+      throw error;
     }
 
     if (!hasReceivedData && !partialText) {

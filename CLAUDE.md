@@ -161,6 +161,59 @@ REACT_APP_MAX_CONVERSATIONS=50
 
 Access via `ENV` object, never directly via `process.env` in components.
 
+## Troubleshooting
+
+### Tool Registration Mismatch (CRITICAL)
+
+**Issue**: "No tool output found for function call" errors causing empty responses.
+
+**Root Cause**: Tools registered in `/web/fastapi_app/tool_handler.py` must have corresponding handlers in `/web/fastapi_app/responses_router.py` `run_local_function()`.
+
+**Fix**: When adding new tools:
+1. Add tool definition to `tool_handler.py` `get_tools()` function
+2. Add handler to `responses_router.py` `run_local_function()`
+3. Restart service: `systemctl restart aiapi.service`
+
+**Previously Missing Tools** (fixed 2025-09-30):
+- `searchThreads` - Now aliases to `searchWindowsForum`
+- `search` - MCP-compliant, aliases to `searchWindowsForum`
+- `fetch` - MCP-compliant, returns placeholder
+- `autoModerateContent` - Returns safe placeholder (moderation should be manual)
+
+### Debugging SSE Stream Issues
+
+If messages are returning empty responses:
+
+1. **Enable Debug Logging**: In browser console, run:
+   ```javascript
+   localStorage.setItem('debug_sse', 'true');
+   ```
+   Then send a message. This will log:
+   - Each chunk received with size
+   - All SSE event types
+   - Delta text as it arrives
+   - Final stream statistics
+
+2. **Test SSE Directly**: Visit `https://windowsforum.com/test-sse.html` to test the chat.php endpoint directly without the React app. This helps isolate whether the issue is in:
+   - The backend SSE stream (Python → PHP → browser)
+   - The frontend React/TypeScript parsing logic
+
+3. **Check Console for Warnings**:
+   - `"Received X chunks but extracted no text"` - SSE connection works but no text deltas found
+   - `"No data received from server"` - SSE connection failed entirely
+   - `"Error parsing streaming data"` - Malformed JSON in SSE events
+
+4. **Common SSE Issues**:
+   - **Buffering**: PHP may buffer output - check `ob_flush()` and `flush()` calls
+   - **CORS/Credentials**: Requests must include `credentials: 'include'` for session cookies
+   - **Early Termination**: Component unmounting or AbortController can stop stream
+   - **Event Format Mismatch**: Backend sends `response.output_text.delta` with `delta` field
+
+5. **Disable Debug Logging**:
+   ```javascript
+   localStorage.removeItem('debug_sse');
+   ```
+
 ## Important Implementation Notes
 
 ### Voice Features
