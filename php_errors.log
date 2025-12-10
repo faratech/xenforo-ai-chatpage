@@ -1,9 +1,0 @@
-[02-Oct-2025 13:37:10 UTC] PHP Warning:  Failed loading Zend extension 'opcache.so' (tried: /usr/local/lib/php/extensions/no-debug-non-zts-20250925/opcache.so (/usr/local/lib/php/extensions/no-debug-non-zts-20250925/opcache.so: cannot open shared object file: No such file or directory), /usr/local/lib/php/extensions/no-debug-non-zts-20250925/opcache.so.so (/usr/local/lib/php/extensions/no-debug-non-zts-20250925/opcache.so.so: cannot open shared object file: No such file or directory)) in Unknown on line 0
-[02-Oct-2025 13:37:10 UTC] PHP Fatal error:  Uncaught XF\Db\Exception: MySQL query error [1048]: Column 'previous_response_id' cannot be null in /web/public_html/src/XF/Db/AbstractStatement.php:230
-Stack trace:
-#0 /web/public_html/src/XF/Db/Mysqli/Statement.php(207): XF\Db\AbstractStatement->getException('MySQL query err...', 1048, '23000')
-#1 /web/public_html/src/XF/Db/Mysqli/Statement.php(83): XF\Db\Mysqli\Statement->getException('MySQL query err...', 1048, '23000')
-#2 /web/public_html/src/XF/Db/AbstractAdapter.php(96): XF\Db\Mysqli\Statement->execute()
-#3 Command line code(1): XF\Db\AbstractAdapter->query('UPDATE openai_t...')
-#4 {main}
-  thrown in /web/public_html/src/XF/Db/AbstractStatement.php on line 230
