@@ -55,7 +55,7 @@
   },
   "devDependencies": {
     "@babel/plugin-proposal-private-property-in-object": "*",
-    "@babel/preset-env": "^7.28.6",
+    "@babel/preset-env": "^7.29.0",
     "@babel/preset-react": "*",
     "ajv": "*",
     "ajv-keywords": "*",
