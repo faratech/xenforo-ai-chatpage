@@ -57,7 +57,7 @@
     "@babel/plugin-proposal-private-property-in-object": "*",
     "@babel/preset-env": "^7.29.0",
     "@babel/preset-react": "*",
-    "ajv": "*",
+    "ajv": "^8.18.0",
     "ajv-keywords": "*",
     "yarn-upgrade-all": "*"
   },
