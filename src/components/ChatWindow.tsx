@@ -8,8 +8,9 @@ import IconButton from '@mui/material/IconButton';
 import Chip from '@mui/material/Chip';
 import Fade from '@mui/material/Fade';
 import { useTheme } from '@mui/material/styles';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faPlus, faBars, faLightbulb } from '@fortawesome/free-solid-svg-icons';
+import AddIcon from '@mui/icons-material/Add';
+import MenuIcon from '@mui/icons-material/Menu';
+import LightbulbIcon from '@mui/icons-material/Lightbulb';
 
 import type {
   ChatWindowProps,
@@ -29,15 +30,33 @@ import {
 import { ChatAPI, AudioService, CaptchaRequiredError } from '../services/api';
 import { ENV } from '../config/env';
 
+const createNewConversation = (id: string, welcomeMsg: string): Conversation => ({
+  id,
+  title: 'New Chat',
+  messages: [{
+    id: `msg_${Date.now()}`,
+    role: 'ai',
+    content: sanitizeAndParse(welcomeMsg),
+    timestamp: Date.now(),
+  }],
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+});
+
+const noopEdit = (_id: string, _content: string) => {};
+const noopRegenerate = () => {};
+
 /**
  * ChatWindow Component - Main chat interface
  */
 export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
   const theme = useTheme();
   const isGuest = !userId || (typeof userId === 'string' && userId.startsWith('guest_'));
-  const welcomeMessage = isGuest
+  const welcomeMessage = useMemo(() => isGuest
     ? 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology! For best results please <a href="/register">register</a> or <a href="/login">log-in</a> to the Windows Forum'
-    : 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology!';
+    : 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology!',
+    [isGuest]
+  );
 
   // Conversation management states
   const [conversations, setConversations] = useState<ConversationMap>(() => {
@@ -54,21 +73,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   // Initialize current conversation if it doesn't exist
   useEffect(() => {
     if (!conversations[currentConversationId]) {
-      const newConversation: Conversation = {
-        id: currentConversationId,
-        title: 'New Chat',
-        messages: [{
-          id: `msg_${Date.now()}`,
-          role: 'ai',
-          content: sanitizeAndParse(welcomeMessage),
-          timestamp: Date.now(),
-        }],
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
       setConversations(prev => ({
         ...prev,
-        [currentConversationId]: newConversation,
+        [currentConversationId]: createNewConversation(currentConversationId, welcomeMessage),
       }));
     }
   }, [currentConversationId, conversations, welcomeMessage]);
@@ -157,21 +164,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   const handleNewConversation = useCallback(() => {
     const newId = generateConversationId();
-    const newConversation: Conversation = {
-      id: newId,
-      title: 'New Chat',
-      messages: [{
-        id: `msg_${Date.now()}`,
-        role: 'ai',
-        content: sanitizeAndParse(welcomeMessage),
-        timestamp: Date.now(),
-      }],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
     setConversations(prev => ({
       ...prev,
-      [newId]: newConversation,
+      [newId]: createNewConversation(newId, welcomeMessage),
     }));
     setCurrentConversationId(newId);
     setStreamingMessage(null);
@@ -487,14 +482,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           }}
         >
           <IconButton onClick={() => setDrawerOpen(true)}>
-            <FontAwesomeIcon icon={faBars} />
+            <MenuIcon />
           </IconButton>
           <Typography variant="h6" sx={{ flex: 1 }}>
             {currentConversation.title}
           </Typography>
           <Button
             size="small"
-            startIcon={<FontAwesomeIcon icon={faPlus} />}
+            startIcon={<AddIcon />}
             onClick={handleNewConversation}
           >
             New Chat
@@ -518,7 +513,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               userName={userName}
               onEdit={handleEditMessage}
               onRegenerate={handleRegenerateMessage}
-              onCopy={() => {}}
               isLastMessage={index === currentConversation.messages.length - 1}
               isStreaming={false}
             />
@@ -532,9 +526,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               }}
               userAvatar={userAvatar}
               userName={userName}
-              onEdit={() => {}}
-              onRegenerate={() => {}}
-              onCopy={() => {}}
+              onEdit={noopEdit}
+              onRegenerate={noopRegenerate}
               isLastMessage={true}
               isStreaming={true}
             />
@@ -564,7 +557,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               <Box sx={{ p: 4 }}>
                 <Stack spacing={2} alignItems="center">
                   <Typography variant="subtitle1" sx={{ opacity: 0.7 }}>
-                    <FontAwesomeIcon icon={faLightbulb} /> Try asking:
+                    <LightbulbIcon sx={{ fontSize: 'inherit', verticalAlign: 'middle', mr: 0.5 }} /> Try asking:
                   </Typography>
                   <Stack direction="row" flexWrap="wrap" spacing={1} justifyContent="center">
                     {EXAMPLE_PROMPTS.map((prompt, idx) => (

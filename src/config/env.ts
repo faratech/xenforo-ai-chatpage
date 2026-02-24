@@ -5,9 +5,8 @@
 
 export const ENV = {
   // Domain Configuration
-  DOMAIN: process.env.REACT_APP_DOMAIN || 'https://windowsforum.com',
-  TEST_DOMAIN: process.env.REACT_APP_TEST_DOMAIN || 'https://test.windowsforum.com',
-  DATA_DOMAIN: process.env.REACT_APP_DATA_DOMAIN || 'https://data.windowsforum.com',
+  DOMAIN: import.meta.env.VITE_DOMAIN || 'https://windowsforum.com',
+  TEST_DOMAIN: import.meta.env.VITE_TEST_DOMAIN || 'https://test.windowsforum.com',
 
   // Get the appropriate domain based on hostname
   getCurrentDomain: (): string => {
@@ -17,12 +16,7 @@ export const ENV = {
   },
 
   // Cloudflare Turnstile
-  TURNSTILE_SITE_KEY: process.env.REACT_APP_TURNSTILE_SITE_KEY || '0x4AAAAAAABiq2_hH-dGCkQi',
-
-  // Feature Flags
-  ENABLE_VOICE: process.env.REACT_APP_ENABLE_VOICE === 'true',
-  ENABLE_FEEDBACK: process.env.REACT_APP_ENABLE_FEEDBACK !== 'false',
-  MAX_CONVERSATIONS: parseInt(process.env.REACT_APP_MAX_CONVERSATIONS || '50', 10),
+  TURNSTILE_SITE_KEY: import.meta.env.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAABiq2_hH-dGCkQi',
 
   // API Endpoints
   ENDPOINTS: {
@@ -34,9 +28,9 @@ export const ENV = {
 } as const;
 
 // Validate required environment variables
-const requiredVars = ['REACT_APP_DOMAIN'];
+const requiredVars = ['VITE_DOMAIN'];
 const missingVars = requiredVars.filter(
-  varName => !process.env[varName]
+  varName => !import.meta.env[varName]
 );
 
 if (missingVars.length > 0) {

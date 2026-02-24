@@ -3,8 +3,8 @@ import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
 import Paper from '@mui/material/Paper';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faExclamationTriangle, faRotateRight } from '@fortawesome/free-solid-svg-icons';
+import WarningIcon from '@mui/icons-material/Warning';
+import RefreshIcon from '@mui/icons-material/Refresh';
 
 interface Props {
   children: ReactNode;
@@ -94,11 +94,7 @@ export class ErrorBoundary extends Component<Props, State> {
             }}
           >
             <Box sx={{ mb: 3 }}>
-              <FontAwesomeIcon
-                icon={faExclamationTriangle}
-                size="3x"
-                style={{ color: '#f44336' }}
-              />
+              <WarningIcon sx={{ fontSize: 64, color: '#f44336' }} />
             </Box>
 
             <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
@@ -109,7 +105,7 @@ export class ErrorBoundary extends Component<Props, State> {
               We're sorry for the inconvenience. The application encountered an unexpected error.
             </Typography>
 
-            {process.env.NODE_ENV === 'development' && this.state.error && (
+            {import.meta.env.DEV && this.state.error && (
               <Box
                 sx={{
                   mb: 3,
@@ -141,7 +137,7 @@ export class ErrorBoundary extends Component<Props, State> {
             <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
               <Button
                 variant="contained"
-                startIcon={<FontAwesomeIcon icon={faRotateRight} />}
+                startIcon={<RefreshIcon />}
                 onClick={this.handleReset}
                 sx={{
                   textTransform: 'none',

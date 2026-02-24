@@ -7,15 +7,12 @@ import Tooltip from '@mui/material/Tooltip';
 import Paper from '@mui/material/Paper';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import {
-  faMicrophone,
-  faMicrophoneSlash,
-  faVolumeMute,
-  faVolumeUp,
-  faPaperPlane,
-  faStop,
-} from '@fortawesome/free-solid-svg-icons';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+import VolumeOffIcon from '@mui/icons-material/VolumeOff';
+import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import SendIcon from '@mui/icons-material/Send';
+import StopIcon from '@mui/icons-material/Stop';
 import type { InputAreaProps } from '../types';
 
 /**
@@ -103,7 +100,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
             {isLoading ? (
               <Tooltip title="Stop generation">
                 <IconButton onClick={onStop} size="small">
-                  <FontAwesomeIcon icon={faStop} />
+                  <StopIcon />
                 </IconButton>
               </Tooltip>
             ) : (
@@ -113,7 +110,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
                   disabled={!input.trim()}
                   size="small"
                 >
-                  <FontAwesomeIcon icon={faPaperPlane} />
+                  <SendIcon />
                 </IconButton>
               </Tooltip>
             )}
@@ -125,14 +122,14 @@ export const InputArea: React.FC<InputAreaProps> = ({
                   size="small"
                   color={isListening ? "error" : "default"}
                 >
-                  <FontAwesomeIcon icon={isListening ? faMicrophoneSlash : faMicrophone} />
+                  {isListening ? <MicIcon /> : <MicOffIcon />}
                 </IconButton>
               </Tooltip>
             )}
 
             <Tooltip title={isMuted ? "Enable voice" : "Mute voice"}>
               <IconButton onClick={onToggleMute} size="small">
-                <FontAwesomeIcon icon={isMuted ? faVolumeMute : faVolumeUp} />
+                {isMuted ? <VolumeOffIcon /> : <VolumeUpIcon />}
               </IconButton>
             </Tooltip>
           </Stack>

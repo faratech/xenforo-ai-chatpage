@@ -124,7 +124,6 @@ export class ChatAPI {
     let partialText = '';
     let annotations: Annotation[] = [];
     let hasReceivedData = false;
-    let chunkCount = 0;
 
     try {
       while (!done) {
@@ -133,7 +132,6 @@ export class ChatAPI {
 
         if (value) {
           hasReceivedData = true;
-          chunkCount++;
           const chunk = decoder.decode(value, { stream: true });
 
           const lines = chunk.split('\n');
@@ -282,21 +280,7 @@ export class AudioService {
   }
 }
 
-/**
- * Error types for better error handling
- */
-export class APIError extends Error {
-  constructor(
-    message: string,
-    public statusCode?: number,
-    public originalError?: Error
-  ) {
-    super(message);
-    this.name = 'APIError';
-  }
-}
-
-export class CaptchaRequiredError extends APIError {
+export class CaptchaRequiredError extends Error {
   constructor() {
     super('CAPTCHA verification required');
     this.name = 'CaptchaRequiredError';

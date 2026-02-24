@@ -1,6 +1,5 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { ENV } from '../config/env';
 
 interface Citation {
   text: string;
@@ -60,18 +59,6 @@ export const generateConversationId = (): string => {
 };
 
 /**
- * Gets the domain based on current hostname
- */
-export const getDomain = (): string => {
-  return ENV.getCurrentDomain();
-};
-
-/**
- * Data domain constant
- */
-export const DATA_DOMAIN = ENV.DATA_DOMAIN;
-
-/**
  * Example prompts for new users
  */
 export const EXAMPLE_PROMPTS = [
@@ -91,15 +78,3 @@ export const extractTextFromHTML = (html: string): string => {
   return tempDiv.textContent || tempDiv.innerText || '';
 };
 
-/**
- * Copies text to clipboard
- */
-export const copyToClipboard = async (text: string): Promise<boolean> => {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch (error) {
-    console.error('Failed to copy to clipboard:', error);
-    return false;
-  }
-};

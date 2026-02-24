@@ -8,16 +8,13 @@ import Tooltip from '@mui/material/Tooltip';
 import TextField from '@mui/material/TextField';
 import Button from '@mui/material/Button';
 import { useTheme } from '@mui/material/styles';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import {
-  faCopy,
-  faRotateRight,
-  faEdit,
-  faCheck,
-  faTimes,
-  faThumbsUp,
-  faThumbsDown,
-} from '@fortawesome/free-solid-svg-icons';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import EditIcon from '@mui/icons-material/Edit';
+import CheckIcon from '@mui/icons-material/Check';
+import CloseIcon from '@mui/icons-material/Close';
+import ThumbUpIcon from '@mui/icons-material/ThumbUp';
+import ThumbDownIcon from '@mui/icons-material/ThumbDown';
 import type { MessageProps } from '../types';
 import { extractTextFromHTML } from '../utils/helpers';
 
@@ -32,7 +29,7 @@ export const Message = memo<MessageProps>(({
   onRegenerate,
   isLastMessage,
   isStreaming,
-  onFeedback
+  onFeedback,
 }) => {
   const theme = useTheme();
   const [isEditing, setIsEditing] = useState(false);
@@ -115,10 +112,10 @@ export const Message = memo<MessageProps>(({
                   size="small"
                 />
                 <Stack direction="row" spacing={1}>
-                  <Button size="small" onClick={handleEdit} startIcon={<FontAwesomeIcon icon={faCheck} />}>
+                  <Button size="small" onClick={handleEdit} startIcon={<CheckIcon />}>
                     Save
                   </Button>
-                  <Button size="small" onClick={() => setIsEditing(false)} startIcon={<FontAwesomeIcon icon={faTimes} />}>
+                  <Button size="small" onClick={() => setIsEditing(false)} startIcon={<CloseIcon />}>
                     Cancel
                   </Button>
                 </Stack>
@@ -164,22 +161,22 @@ export const Message = memo<MessageProps>(({
                   >
                     <Tooltip title={showCopied ? "Copied!" : "Copy"}>
                       <IconButton size="small" onClick={handleCopy}>
-                        <FontAwesomeIcon icon={showCopied ? faCheck : faCopy} size="sm" />
+                        {showCopied ? <CheckIcon fontSize="small" /> : <ContentCopyIcon fontSize="small" />}
                       </IconButton>
                     </Tooltip>
 
                     {msg.role === 'user' && isLastMessage && (
                       <Tooltip title="Edit">
                         <IconButton size="small" onClick={handleEdit}>
-                          <FontAwesomeIcon icon={faEdit} size="sm" />
+                          <EditIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
                     )}
 
                     {msg.role === 'ai' && isLastMessage && (
                       <Tooltip title="Regenerate">
-                        <IconButton size="small" onClick={() => onRegenerate(msg.id)}>
-                          <FontAwesomeIcon icon={faRotateRight} size="sm" />
+                        <IconButton size="small" onClick={() => onRegenerate()}>
+                          <RefreshIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
                     )}
@@ -192,7 +189,7 @@ export const Message = memo<MessageProps>(({
                             onClick={() => handleFeedback('up')}
                             sx={{ color: feedback === 'up' ? '#10a37f' : 'inherit' }}
                           >
-                            <FontAwesomeIcon icon={faThumbsUp} size="sm" />
+                            <ThumbUpIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
                         <Tooltip title="Bad response">
@@ -201,7 +198,7 @@ export const Message = memo<MessageProps>(({
                             onClick={() => handleFeedback('down')}
                             sx={{ color: feedback === 'down' ? '#ef4444' : 'inherit' }}
                           >
-                            <FontAwesomeIcon icon={faThumbsDown} size="sm" />
+                            <ThumbDownIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
                       </>

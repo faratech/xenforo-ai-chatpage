@@ -4,13 +4,14 @@
 
 echo "Starting deployment process..."
 
-# Run the build with consistent filenames
+# Run the Vite build
 echo "Building application..."
-./build.sh
+npx vite build
 
 # Copy files to deployment directory
 echo "Deploying to /web/public_html/chatpage/..."
-cp -r build/* /web/public_html/chatpage/
+rm -rf /web/public_html/chatpage/*
+cp -r dist/* /web/public_html/chatpage/
 
 # Set proper permissions
 chmod -R 755 /web/public_html/chatpage/

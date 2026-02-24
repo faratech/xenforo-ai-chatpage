@@ -31,13 +31,6 @@ export interface StreamingResponse {
   annotations: Annotation[];
 }
 
-export interface ChatMessagePayload {
-  message: string;
-  captcha_token?: string;
-  action?: string;
-  token?: string;
-}
-
 export interface UserData {
   avatar?: string;
   name?: string;
@@ -49,8 +42,7 @@ export interface MessageProps {
   userAvatar: string;
   userName: string;
   onEdit: (messageId: string, newContent: string) => void;
-  onRegenerate: (messageId: string) => void;
-  onCopy: () => void;
+  onRegenerate: () => void;
   isLastMessage: boolean;
   isStreaming: boolean;
   onFeedback?: (messageId: string, type: 'up' | 'down') => void;
@@ -87,4 +79,3 @@ export interface ChatWindowProps {
   userId: string | null;
 }
 
-export type FeedbackType = 'up' | 'down';

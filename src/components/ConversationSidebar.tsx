@@ -8,8 +8,8 @@ import ListItemButton from '@mui/material/ListItemButton';
 import ListItemText from '@mui/material/ListItemText';
 import IconButton from '@mui/material/IconButton';
 import { useTheme } from '@mui/material/styles';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faPlus, faTrash } from '@fortawesome/free-solid-svg-icons';
+import AddIcon from '@mui/icons-material/Add';
+import DeleteIcon from '@mui/icons-material/Delete';
 import type { ConversationSidebarProps } from '../types';
 
 /**
@@ -42,7 +42,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
         <Button
           fullWidth
           variant="outlined"
-          startIcon={<FontAwesomeIcon icon={faPlus} />}
+          startIcon={<AddIcon />}
           onClick={() => {
             onNewConversation();
             onClose();
@@ -90,7 +90,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
                   }}
                   sx={{ opacity: 0, transition: 'opacity 0.2s' }}
                 >
-                  <FontAwesomeIcon icon={faTrash} size="sm" />
+                  <DeleteIcon fontSize="small" />
                 </IconButton>
               </ListItemButton>
             </React.Fragment>
