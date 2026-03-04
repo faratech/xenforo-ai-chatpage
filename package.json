@@ -12,7 +12,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "dompurify": "*",
-    "marked": "^17.0.3",
+    "marked": "^17.0.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "typescript": "^5.9.3"
