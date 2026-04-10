@@ -24,8 +24,16 @@ export default defineConfig({
           }
           return 'static/media/[name][extname]';
         },
-        manualChunks: {
-          vendor: ['react', 'react-dom', '@mui/material', '@emotion/react', '@emotion/styled'],
+        manualChunks(id) {
+          if (
+            id.includes('node_modules/react/') ||
+            id.includes('node_modules/react-dom/') ||
+            id.includes('node_modules/@mui/material/') ||
+            id.includes('node_modules/@emotion/react/') ||
+            id.includes('node_modules/@emotion/styled/')
+          ) {
+            return 'vendor';
+          }
         },
       },
     },

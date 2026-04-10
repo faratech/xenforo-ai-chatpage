@@ -6,20 +6,20 @@
   "dependencies": {
     "@emotion/react": "*",
     "@emotion/styled": "*",
-    "@mui/icons-material": "^7.3.9",
-    "@mui/material": "^7.3.9",
-    "@types/node": "^25.5.0",
+    "@mui/icons-material": "^9.0.0",
+    "@mui/material": "^9.0.0",
+    "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "dompurify": "^3.3.3",
-    "marked": "^17.0.5",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "marked": "^18.0.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
     "typescript": "^6.0.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.1",
-    "vite": "^8.0.3"
+    "vite": "^8.0.8"
   },
   "scripts": {
     "dev": "vite",
