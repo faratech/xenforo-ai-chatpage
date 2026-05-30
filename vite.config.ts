@@ -25,12 +25,15 @@ export default defineConfig({
           return 'static/media/[name][extname]';
         },
         manualChunks(id) {
+          if (id.includes('node_modules/@mui/')) {
+            return 'mui';
+          }
+          if (id.includes('node_modules/@emotion/')) {
+            return 'emotion';
+          }
           if (
             id.includes('node_modules/react/') ||
-            id.includes('node_modules/react-dom/') ||
-            id.includes('node_modules/@mui/material/') ||
-            id.includes('node_modules/@emotion/react/') ||
-            id.includes('node_modules/@emotion/styled/')
+            id.includes('node_modules/react-dom/')
           ) {
             return 'vendor';
           }

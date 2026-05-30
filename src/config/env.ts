@@ -18,6 +18,11 @@ export const ENV = {
   // Cloudflare Turnstile
   TURNSTILE_SITE_KEY: import.meta.env.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAABiq2_hH-dGCkQi',
 
+  // Feature flags
+  ENABLE_VOICE: import.meta.env.VITE_ENABLE_VOICE !== 'false',
+  ENABLE_FEEDBACK: import.meta.env.VITE_ENABLE_FEEDBACK !== 'false',
+  MAX_CONVERSATIONS: Number.parseInt(import.meta.env.VITE_MAX_CONVERSATIONS || '50', 10),
+
   // API Endpoints
   ENDPOINTS: {
     CHAT: '/chat.php',
@@ -34,7 +39,13 @@ const missingVars = requiredVars.filter(
 );
 
 if (missingVars.length > 0) {
-  console.warn(
-    `Missing environment variables: ${missingVars.join(', ')}. Using defaults.`
-  );
+  if (import.meta.env.PROD) {
+    throw new Error(
+      `Critical configuration error: Missing required environment variables: ${missingVars.join(', ')}.`
+    );
+  } else {
+    console.warn(
+      `Missing environment variables: ${missingVars.join(', ')}. Using defaults.`
+    );
+  }
 }

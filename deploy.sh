@@ -6,7 +6,7 @@ echo "Starting deployment process..."
 
 # Run the Vite build
 echo "Building application..."
-npx vite build
+npx vite build || { echo "Build failed! Aborting deploy."; exit 1; }
 
 # Copy files to deployment directory
 echo "Deploying to /web/public_html/chatpage/..."

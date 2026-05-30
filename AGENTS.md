@@ -1,23 +1,21 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Development Commands
 
 ### Build and Run
-- `npm run dev` - Start Vite development server at http://localhost:5173
-- `npm run build` - Production build (`vite build` → `dist/`, consistent filenames, no content hashes)
-- `npm run preview` - Preview the production build locally
-- `npm run typecheck` - Type-check without emitting (`tsc --noEmit`)
+- `npm run dev` - Start development server at http://localhost:5173
+- `npm run build` - Standard production build with hashed filenames
 - `npm run deploy` - Build and deploy to `/web/public_html/chatpage/` (production)
 
 ### Deployment
-The app is deployed to `/web/public_html/chatpage/` which serves `https://windowsforum.com/chatpage`. Consistent filenames (no content hashes) are produced by the `vite.config.ts` `rollupOptions` output config; there is no `build.sh`.
+The app is deployed to `/web/public_html/chatpage/` which serves `https://windowsforum.com/chatpage`.
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
-- **Build Output**: `dist/` directory (consistent filenames, no content hashes)
-- **Base Path**: `/chatpage` (configured in `vite.config.ts` `base` field)
+- **Build Output**: `dist/` directory
+- **Base Path**: `/chatpage` (configured in package.json homepage)
 - **Environment**: Variables in `.env` must be prefixed with `VITE_`
 
 ## Architecture Overview
@@ -236,17 +234,17 @@ Citations rendered in "Sources" section at message end.
 
 1. **Never bypass the service layer** - All API calls must go through `ChatAPI`
 2. **Don't hardcode domains** - Use `ENV.getCurrentDomain()`
-3. **React imports are optional for JSX** - Vite `@vitejs/plugin-react` with `jsx: react-jsx` in `tsconfig.json` enables the automatic JSX transform; still import React (or its hooks) when you use them.
+3. **Don't use `React` import in TypeScript** - CRA handles JSX transform
 4. **Mark unused callback params** - Prefix with `_` to satisfy TypeScript
 5. **Don't forget useMemo** - Wrap objects/arrays used in dependency arrays
-6. **Environment variables** - Must start with `VITE_` to be accessible (e.g., `VITE_DOMAIN`)
+6. **Environment variables** - Must start with `VITE_` to be accessible
 
 ## Testing Deployment Locally
 
 Before deploying:
 1. Test build: `npm run build`
-2. Verify output: Check `dist/static/js/main.js` exists (no hash)
-3. Test locally: `npm run preview`
+2. Verify output: Check `dist/` contains the built assets
+3. Test locally: `npx serve -s dist -l 5173`
 4. Deploy: `npm run deploy` (requires server access)
 
 ## Integration with XenForo
@@ -265,9 +263,9 @@ The app expects:
 
 ## Build Artifacts
 
-The `vite.config.ts` `rollupOptions` output config ensures consistent filenames for XenForo template integration:
-- Emits `static/js/main.js`, `static/css/main.css`, and `static/media/[name][extname]`
-- No content hashes in filenames
-- Allows hardcoded paths in XenForo templates without cache busting
+The Vite build emits to the `dist/` directory for XenForo template integration:
+- Produces hashed JS/CSS files for cache busting
+- Generates `index.html` with the correct asset references
+- Output is deployed to `/web/public_html/chatpage/`
 
 This is intentional for XenForo integration and should not be "fixed".

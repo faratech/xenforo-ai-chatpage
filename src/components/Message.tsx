@@ -28,6 +28,7 @@ export const Message = memo<MessageProps>(({
   onEdit,
   onRegenerate,
   isLastMessage,
+  isLastUserMessage,
   isStreaming,
   onFeedback,
 }) => {
@@ -44,7 +45,7 @@ export const Message = memo<MessageProps>(({
     const text = extractTextFromHTML(msg.content);
     navigator.clipboard.writeText(text);
     setShowCopied(true);
-    setTimeout(() => setShowCopied(false), 2000);
+    setTimeout(() => setShowCopied(false), 3500);
   }, [msg.content]);
 
   const handleEdit = useCallback(() => {
@@ -75,7 +76,7 @@ export const Message = memo<MessageProps>(({
       }}
     >
       <Box sx={{ maxWidth: '48rem', mx: 'auto' }}>
-        <Stack direction="row" spacing={3} alignItems="flex-start">
+        <Stack direction="row" spacing={3} sx={{ alignItems: 'flex-start' }}>
           {msg.role === 'user' && (
             <Avatar
               src={userAvatar}
@@ -83,7 +84,7 @@ export const Message = memo<MessageProps>(({
             />
           )}
           <Box sx={{ flex: 1 }}>
-            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
               <Typography
                 variant="subtitle2"
                 sx={{
@@ -138,13 +139,6 @@ export const Message = memo<MessageProps>(({
                       borderRadius: '3px',
                       fontSize: '0.875em',
                     },
-                    '& a': {
-                      color: '#4299E1',
-                      textDecoration: 'none',
-                      '&:hover': {
-                        textDecoration: 'underline',
-                      }
-                    }
                   }}
                 />
 
@@ -160,14 +154,14 @@ export const Message = memo<MessageProps>(({
                     }}
                   >
                     <Tooltip title={showCopied ? "Copied!" : "Copy"}>
-                      <IconButton size="small" onClick={handleCopy}>
+                      <IconButton size="small" onClick={handleCopy} aria-label="Copy message content">
                         {showCopied ? <CheckIcon fontSize="small" /> : <ContentCopyIcon fontSize="small" />}
                       </IconButton>
                     </Tooltip>
 
-                    {msg.role === 'user' && isLastMessage && (
+                    {msg.role === 'user' && isLastUserMessage && (
                       <Tooltip title="Edit">
-                        <IconButton size="small" onClick={handleEdit}>
+                        <IconButton size="small" onClick={handleEdit} aria-label="Edit message">
                           <EditIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
@@ -175,7 +169,7 @@ export const Message = memo<MessageProps>(({
 
                     {msg.role === 'ai' && isLastMessage && (
                       <Tooltip title="Regenerate">
-                        <IconButton size="small" onClick={() => onRegenerate()}>
+                        <IconButton size="small" onClick={() => onRegenerate()} aria-label="Regenerate response">
                           <RefreshIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
@@ -187,6 +181,7 @@ export const Message = memo<MessageProps>(({
                           <IconButton
                             size="small"
                             onClick={() => handleFeedback('up')}
+                            aria-label="Good response"
                             sx={{ color: feedback === 'up' ? '#10a37f' : 'inherit' }}
                           >
                             <ThumbUpIcon fontSize="small" />
@@ -196,6 +191,7 @@ export const Message = memo<MessageProps>(({
                           <IconButton
                             size="small"
                             onClick={() => handleFeedback('down')}
+                            aria-label="Bad response"
                             sx={{ color: feedback === 'down' ? '#ef4444' : 'inherit' }}
                           >
                             <ThumbDownIcon fontSize="small" />

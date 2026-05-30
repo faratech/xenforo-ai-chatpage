@@ -11,44 +11,57 @@ interface Citation {
  * Sanitizes and parses markdown content with citation extraction
  */
 export const sanitizeAndParse = (content: string): string => {
+  if (!content) return content;
+
   let processedContent = content;
   const citations: Citation[] = [];
   let citationIndex = 1;
 
+  const escapeMarkdown = (s: string) => s.replace(/[\\[\]()]/g, '\\$&');
+
   const citationPattern = /\(?\[([^\]]*)\]\((https?:\/\/[^)]+)\)\)?/g;
 
-  processedContent = processedContent.replace(citationPattern, (_match, text, url) => {
-    if (text.includes('.com') || text.includes('.org') || text.includes('.net')) {
-      citations.push({ text: text, url: url, index: citationIndex });
-      const ref = `<sup>[${citationIndex}]</sup>`;
-      citationIndex++;
-      return ref;
-    }
-    return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
-  });
+  if (content.includes('[')) {
+    processedContent = processedContent.replace(citationPattern, (_match, text, url) => {
+      if (text.includes('.com') || text.includes('.org') || text.includes('.net')) {
+        citations.push({ text: text, url: url, index: citationIndex });
+        const ref = `<sup>[${citationIndex}]</sup>`;
+        citationIndex++;
+        return ref;
+      }
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    });
+  }
 
   const bareDomainPattern = /\(([a-zA-Z0-9.-]+\.(com|org|net|io|gov|edu)[^)]*)\)/g;
-  processedContent = processedContent.replace(bareDomainPattern, (_match, domain) => {
-    if (!citations.some(c => c.text === domain)) {
-      citations.push({ text: domain, url: `https://${domain}`, index: citationIndex });
-      const ref = `<sup>[${citationIndex}]</sup>`;
-      citationIndex++;
-      return ref;
-    }
-    return _match;
-  });
+  if (processedContent.includes('(')) {
+    processedContent = processedContent.replace(bareDomainPattern, (_match, domain) => {
+      if (!citations.some(c => c.text === domain)) {
+        citations.push({ text: domain, url: `https://${domain}`, index: citationIndex });
+        const ref = `<sup>[${citationIndex}]</sup>`;
+        citationIndex++;
+        return ref;
+      }
+      return _match;
+    });
+  }
 
   if (citations.length > 0) {
     const citationList = citations.map(c =>
-      `<div style="margin: 4px 0;"><small>[${c.index}] <a href="${c.url}" target="_blank" rel="noopener" style="color: #4299E1;">${c.text}</a></small></div>`
+      `<div style="margin: 4px 0;"><small>[${c.index}] <a href="${c.url}" target="_blank" rel="noopener noreferrer" style="color: #4299E1;">${escapeMarkdown(c.text)}</a></small></div>`
     ).join('');
-    processedContent += `<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.2);">
+    processedContent += `<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(128,128,128,0.35);">
       <small style="opacity: 0.8;">Sources:</small>
       ${citationList}
     </div>`;
   }
 
-  return marked(DOMPurify.sanitize(processedContent)) as string;
+  const rendered = marked(processedContent) as string;
+  let sanitized = DOMPurify.sanitize(rendered, { ADD_ATTR: ['aria-hidden'] });
+  if (sanitized.trim() === '<p>▍</p>') {
+    sanitized = '<p><span aria-hidden="true">▍</span></p>';
+  }
+  return sanitized;
 };
 
 /**
@@ -77,4 +90,3 @@ export const extractTextFromHTML = (html: string): string => {
   tempDiv.innerHTML = html;
   return tempDiv.textContent || tempDiv.innerText || '';
 };
-

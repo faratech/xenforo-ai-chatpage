@@ -74,20 +74,22 @@ export const InputArea: React.FC<InputAreaProps> = ({
             maxRows={5}
             variant="standard"
             fullWidth
-            InputProps={{
-              disableUnderline: true,
-              sx: {
-                px: 1.5,
-                fontSize: '1rem',
-                '& textarea': {
-                  resize: 'none',
-                  overflowY: 'auto',
-                  '&::-webkit-scrollbar': {
-                    width: '8px',
-                  },
-                  '&::-webkit-scrollbar-thumb': {
-                    backgroundColor: 'rgba(0,0,0,0.2)',
-                    borderRadius: '4px',
+            slotProps={{
+              input: {
+                disableUnderline: true,
+                sx: {
+                  px: 1.5,
+                  fontSize: '1rem',
+                  '& textarea': {
+                    resize: 'none',
+                    overflowY: 'auto',
+                    '&::-webkit-scrollbar': {
+                      width: '8px',
+                    },
+                    '&::-webkit-scrollbar-thumb': {
+                      backgroundColor: 'rgba(0,0,0,0.2)',
+                      borderRadius: '4px',
+                    }
                   }
                 }
               }

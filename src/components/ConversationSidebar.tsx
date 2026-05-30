@@ -73,16 +73,19 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
                 <ListItemText
                   primary={conv.title}
                   secondary={new Date(conv.updatedAt).toLocaleDateString()}
-                  primaryTypographyProps={{
-                    noWrap: true,
-                    fontSize: '0.875rem',
-                  }}
-                  secondaryTypographyProps={{
-                    fontSize: '0.75rem',
+                  slotProps={{
+                    primary: {
+                      noWrap: true,
+                      sx: { fontSize: '0.875rem' },
+                    },
+                    secondary: {
+                      sx: { fontSize: '0.75rem' },
+                    },
                   }}
                 />
                 <IconButton
                   className="delete-btn"
+                  aria-label="Delete conversation"
                   size="small"
                   onClick={(e) => {
                     e.stopPropagation();

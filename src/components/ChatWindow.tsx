@@ -13,6 +13,7 @@ import MenuIcon from '@mui/icons-material/Menu';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
 
 import type {
+  ChatMessageHistoryItem,
   ChatWindowProps,
   Conversation,
   ConversationMap,
@@ -37,6 +38,7 @@ const createNewConversation = (id: string, welcomeMsg: string): Conversation => 
     id: `msg_${Date.now()}`,
     role: 'ai',
     content: sanitizeAndParse(welcomeMsg),
+    rawContent: extractTextFromHTML(welcomeMsg),
     timestamp: Date.now(),
   }],
   createdAt: Date.now(),
@@ -45,6 +47,67 @@ const createNewConversation = (id: string, welcomeMsg: string): Conversation => 
 
 const noopEdit = (_id: string, _content: string) => {};
 const noopRegenerate = () => {};
+
+type ConversationUpdate = Partial<Conversation> | ((conversation: Conversation) => Partial<Conversation>);
+
+const getMessageText = (message: Message): string => {
+  return (message.rawContent || extractTextFromHTML(message.content)).trim();
+};
+
+const serializeConversationHistory = (messages: Message[]): ChatMessageHistoryItem[] => {
+  return messages
+    .filter((message, index) => {
+      const text = getMessageText(message);
+      return Boolean(text) && !(index === 0 && message.role === 'ai' && text.startsWith('Welcome to WindowsForum.com'));
+    })
+    .map((message) => ({
+      role: message.role === 'ai' ? 'assistant' : 'user',
+      content: getMessageText(message),
+    }));
+};
+
+const pruneConversations = (conversationMap: ConversationMap, keepConversationId: string): ConversationMap => {
+  const maxConversations = Number.isFinite(ENV.MAX_CONVERSATIONS) && ENV.MAX_CONVERSATIONS > 0
+    ? ENV.MAX_CONVERSATIONS
+    : 50;
+  const entries = Object.entries(conversationMap).sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
+  const keep = new Set(entries.slice(0, maxConversations).map(([id]) => id));
+  keep.add(keepConversationId);
+
+  return entries.reduce<ConversationMap>((acc, [id, conversation]) => {
+    if (keep.has(id)) acc[id] = conversation;
+    return acc;
+  }, {});
+};
+
+const loadSavedConversations = (): ConversationMap => {
+  try {
+    const saved = localStorage.getItem('chat_conversations');
+    if (!saved) return {};
+    const parsed = JSON.parse(saved);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const sanitized: ConversationMap = {};
+    for (const [id, conv] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof id !== 'string' || id === '__proto__' || id === 'constructor' || id === 'prototype') continue;
+      const c = conv as Partial<Conversation>;
+      if (
+        c &&
+        typeof c === 'object' &&
+        typeof c.id === 'string' &&
+        typeof c.title === 'string' &&
+        Array.isArray(c.messages) &&
+        typeof c.createdAt === 'number' &&
+        typeof c.updatedAt === 'number'
+      ) {
+        sanitized[id] = c as Conversation;
+      }
+    }
+    return sanitized;
+  } catch (error) {
+    console.warn('Ignoring invalid saved conversations:', error);
+    return {};
+  }
+};
 
 /**
  * ChatWindow Component - Main chat interface
@@ -60,8 +123,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   // Conversation management states
   const [conversations, setConversations] = useState<ConversationMap>(() => {
-    const saved = localStorage.getItem('chat_conversations');
-    return saved ? JSON.parse(saved) : {};
+    return loadSavedConversations();
   });
 
   const [currentConversationId, setCurrentConversationId] = useState<string>(() => {
@@ -80,24 +142,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }
   }, [currentConversationId, conversations, welcomeMessage]);
 
+  const defaultConversation = useMemo<Conversation>(() => ({
+    id: currentConversationId,
+    title: 'New Chat',
+    messages: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  }), [currentConversationId]);
+
   const currentConversation = useMemo(() =>
-    conversations[currentConversationId] || {
-      messages: [],
-      title: 'New Chat',
-      id: currentConversationId,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    },
-    [conversations, currentConversationId]
+    conversations[currentConversationId] || defaultConversation,
+    [conversations, currentConversationId, defaultConversation]
   );
 
   const [streamingMessage, setStreamingMessage] = useState<Message | null>(null);
   const [input, setInput] = useState('');
   const [isListening, setIsListening] = useState(false);
-  const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] = useState(true);
+  const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] = useState(ENV.ENABLE_VOICE);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const [isMuted, setIsMuted] = useState(true);
+  const [isMuted, setIsMuted] = useState<boolean>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('chat_mute') ?? 'true');
+    } catch {
+      return true;
+    }
+  });
   const [showCaptcha, setShowCaptcha] = useState(false);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -107,14 +177,41 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const abortControllerRef = useRef<AbortController | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const textFieldRef = useRef<HTMLDivElement>(null);
+  const turnstileWidgetRef = useRef<string | null>(null);
+  const inputRef = useRef(input);
+
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
+
+  const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const h = (e: MediaQueryListEvent) => setReduceMotion(e.matches);
+    mq.addEventListener('change', h);
+    return () => mq.removeEventListener('change', h);
+  }, []);
+
+  const streamingMessageRef = useRef(streamingMessage);
+  useEffect(() => {
+    streamingMessageRef.current = streamingMessage;
+  }, [streamingMessage]);
 
   const containerBg = theme.palette.mode === 'light' ? '#fff' : '#343541';
   const borderColor = theme.palette.mode === 'light' ? '#e5e7eb' : '#565869';
 
   // Save conversations to localStorage
   useEffect(() => {
-    localStorage.setItem('chat_conversations', JSON.stringify(conversations));
-    localStorage.setItem('current_conversation_id', currentConversationId);
+    try {
+      localStorage.setItem('chat_conversations', JSON.stringify(pruneConversations(conversations, currentConversationId)));
+      localStorage.setItem('current_conversation_id', currentConversationId);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'QuotaExceededError') {
+        setErrorMessage('Storage quota exceeded. Your conversation may not persist across page reloads.');
+      } else {
+        console.error('Failed to save conversations to localStorage:', error);
+      }
+    }
   }, [conversations, currentConversationId]);
 
   // Auto-resize textarea
@@ -145,29 +242,38 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     scrollToBottom();
   }, [currentConversation.messages, streamingMessage, scrollToBottom]);
 
-  const updateConversation = useCallback((updates: Partial<Conversation>) => {
-    setConversations(prev => ({
-      ...prev,
-      [currentConversationId]: {
-        ...prev[currentConversationId],
-        ...updates,
-        updatedAt: Date.now(),
-      }
-    }));
-  }, [currentConversationId]);
+  const updateConversationById = useCallback((conversationId: string, update: ConversationUpdate) => {
+    setConversations(prev => {
+      const existing = prev[conversationId] || createNewConversation(conversationId, welcomeMessage);
+      const updates = typeof update === 'function' ? update(existing) : update;
 
-  const addMessage = useCallback((message: Message) => {
-    updateConversation({
-      messages: [...(conversations[currentConversationId]?.messages || []), message],
+      return pruneConversations({
+        ...prev,
+        [conversationId]: {
+          ...existing,
+          ...updates,
+          updatedAt: Date.now(),
+        }
+      }, conversationId);
     });
-  }, [conversations, currentConversationId, updateConversation]);
+  }, [welcomeMessage]);
+
+  const updateConversation = useCallback((updates: ConversationUpdate) => {
+    updateConversationById(currentConversationId, updates);
+  }, [currentConversationId, updateConversationById]);
+
+  const addMessage = useCallback((conversationId: string, message: Message) => {
+    updateConversationById(conversationId, conversation => ({
+      messages: [...(conversation.messages || []), message],
+    }));
+  }, [updateConversationById]);
 
   const handleNewConversation = useCallback(() => {
     const newId = generateConversationId();
-    setConversations(prev => ({
+    setConversations(prev => pruneConversations({
       ...prev,
       [newId]: createNewConversation(newId, welcomeMessage),
-    }));
+    }, newId));
     setCurrentConversationId(newId);
     setStreamingMessage(null);
     setInput('');
@@ -175,6 +281,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   }, [welcomeMessage]);
 
   const handleDeleteConversation = useCallback((convId: string) => {
+    void ChatAPI.deleteConversation(convId).catch(error => {
+      console.error('Failed to delete server conversation:', error);
+    });
     setConversations(prev => {
       const newConvs = { ...prev };
       delete newConvs[convId];
@@ -200,6 +309,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         await AudioService.playTTS(text);
       } catch (error) {
         console.error('Error playing TTS:', error);
+        setErrorMessage('Failed to play audio. Please try again later.');
       }
     },
     [isMuted]
@@ -209,21 +319,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       setIsLoading(false);
-      if (streamingMessage) {
-        addMessage({
-          ...streamingMessage,
-          content: sanitizeAndParse(streamingMessage.content + ' [Generation stopped]'),
+      const currentStreaming = streamingMessageRef.current;
+      if (currentStreaming) {
+        addMessage(currentConversationId, {
+          ...currentStreaming,
+          content: sanitizeAndParse(currentStreaming.content + ' [Generation stopped]'),
+          rawContent: `${getMessageText(currentStreaming)} [Generation stopped]`,
         });
         setStreamingMessage(null);
       }
     }
-  }, [streamingMessage, addMessage]);
+  }, [addMessage, currentConversationId]);
 
   // Using API service - sendChatMessage is now handled by ChatAPI.sendMessage
 
-  const handleSendMessage = useCallback(async (messageContent: string | null = null) => {
+  const handleSendMessage = useCallback(async (
+    messageContent: string | null = null,
+    options: {
+      conversationId?: string;
+      resetConversation?: boolean;
+      history?: ChatMessageHistoryItem[];
+    } = {}
+  ) => {
     const content = messageContent || input.trim();
     if (!content) return;
+    const activeConversationId = options.conversationId || currentConversationId;
+    const activeConversation = conversations[activeConversationId] || currentConversation;
 
     setIsLoading(true);
     setErrorMessage('');
@@ -235,6 +356,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
     if (content.toLowerCase() === '/clear') {
       setIsLoading(false);
+      void ChatAPI.clearConversation(activeConversationId).catch(error => {
+        console.error('Failed to clear server conversation:', error);
+      });
       handleNewConversation();
       return;
     }
@@ -244,15 +368,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       id: `msg_${Date.now()}`,
       role: 'user',
       content: sanitizeAndParse(content),
+      rawContent: content,
       timestamp: Date.now(),
     };
-    addMessage(userMessage);
+    addMessage(activeConversationId, userMessage);
     setInput('');
 
     // Update conversation title if it's the first real message
-    if (currentConversation.messages.length === 1) {
+    if (activeConversation.messages.length === 1) {
       const title = content.slice(0, 50) + (content.length > 50 ? '...' : '');
-      updateConversation({ title });
+      updateConversationById(activeConversationId, { title });
     }
 
     try {
@@ -266,6 +391,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       const result = await ChatAPI.sendMessage(content, {
         signal: abortController.signal,
         captchaToken: captchaToken || undefined,
+        conversationId: activeConversationId,
+        resetConversation: options.resetConversation,
+        history: options.history,
         onChunk: (partialText, annotations) => {
           let formattedText = partialText;
           if (annotations && annotations.length > 0) {
@@ -274,7 +402,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               .join(' ');
             formattedText = `${partialText} ${citationText}`;
           }
-          setStreamingMessage({ ...streamingMsg, content: formattedText, annotations });
+          setStreamingMessage({ ...streamingMsg, content: formattedText, rawContent: partialText, annotations });
         },
       });
 
@@ -290,17 +418,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
             .map((ann, idx) => `<div><small>[${idx + 1}] ${ann.filename || 'Source'}</small></div>`)
             .join('');
 
-          finalContent = `${result.text} ${citationList}<div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.2);">${citationDetails}</div>`;
+          finalContent = `${result.text} ${citationList}<div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid ${borderColor};">${citationDetails}</div>`;
         }
 
-        addMessage({
+        addMessage(activeConversationId, {
           ...streamingMsg,
           content: sanitizeAndParse(finalContent),
+          rawContent: result.text,
+          annotations: result.annotations,
         });
         setStreamingMessage(null);
         playAudioResponse(result.text);
-      } else if (result === null) {
-        setStreamingMessage(null);
       } else {
         setErrorMessage('No response received from server. Please try again.');
         setStreamingMessage(null);
@@ -311,9 +439,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         if (error instanceof CaptchaRequiredError || error.message === 'CAPTCHA_REQUIRED') {
           setShowCaptcha(true);
           setErrorMessage('Please complete the captcha to continue.');
-          updateConversation({
-            messages: currentConversation.messages.slice(0, -1),
-          });
+          updateConversationById(activeConversationId, conversation => ({
+            messages: conversation.messages.filter(message => message.id !== userMessage.id),
+          }));
           setInput(content);
         } else {
           const errorMsg = error.message || 'Unknown error';
@@ -331,53 +459,77 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           }
 
           setErrorMessage(userMessage);
-          if (streamingMessage) {
+          if (streamingMessageRef.current) {
             setStreamingMessage(null);
           }
         }
       }
     } finally {
       setIsLoading(false);
-      abortControllerRef.current = null;
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
     }
-  }, [input, playAudioResponse, captchaToken, addMessage, currentConversation, updateConversation, handleNewConversation, streamingMessage]);
+  }, [
+    input,
+    currentConversationId,
+    conversations,
+    currentConversation,
+    borderColor,
+    playAudioResponse,
+    captchaToken,
+    addMessage,
+    updateConversationById,
+    handleNewConversation
+  ]);
 
   const handleEditMessage = useCallback((messageId: string, newContent: string) => {
     const messageIndex = currentConversation.messages.findIndex(m => m.id === messageId);
     if (messageIndex >= 0) {
       const newMessages = currentConversation.messages.slice(0, messageIndex);
+      const history = serializeConversationHistory(newMessages);
       updateConversation({ messages: newMessages });
-      handleSendMessage(newContent);
+      handleSendMessage(newContent, {
+        conversationId: currentConversationId,
+        resetConversation: true,
+        history,
+      });
     }
-  }, [currentConversation, updateConversation, handleSendMessage]);
+  }, [currentConversation, currentConversationId, updateConversation, handleSendMessage]);
 
   const handleRegenerateMessage = useCallback(() => {
-    const lastUserMessage = [...currentConversation.messages].reverse().find(m => m.role === 'user');
+    const lastUserIndex = currentConversation.messages.map(m => m.role).lastIndexOf('user');
+    const lastUserMessage = lastUserIndex >= 0 ? currentConversation.messages[lastUserIndex] : undefined;
     if (lastUserMessage) {
-      const newMessages = currentConversation.messages.slice(0, -1);
+      const newMessages = currentConversation.messages.slice(0, lastUserIndex);
+      const history = serializeConversationHistory(newMessages);
       updateConversation({ messages: newMessages });
-      const text = extractTextFromHTML(lastUserMessage.content);
-      handleSendMessage(text);
+      const text = getMessageText(lastUserMessage);
+      handleSendMessage(text, {
+        conversationId: currentConversationId,
+        resetConversation: true,
+        history,
+      });
     }
-  }, [currentConversation, updateConversation, handleSendMessage]);
+  }, [currentConversation, currentConversationId, updateConversation, handleSendMessage]);
 
-  const [speechRecognition, setSpeechRecognition] = useState<any>(null);
+  const [speechRecognition, setSpeechRecognition] = useState<SpeechRecognition | null>(null);
 
   useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const recognition = new SpeechRecognition();
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognitionCtor) {
+      const recognition = new SpeechRecognitionCtor();
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
-      recognition.onresult = (event: any) => {
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
         const transcript = Array.from(event.results)
-          .map((result: any) => result[0].transcript)
+          .map((result) => result[0].transcript)
           .join('');
         setInput(transcript);
       };
 
-      recognition.onerror = (event: any) => {
+      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.error('Speech recognition error:', event.error);
         setIsListening(false);
       };
@@ -404,23 +556,38 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }
   }, [speechRecognition]);
 
-  const toggleMute = useCallback(() => setIsMuted((prev) => !prev), []);
+  const toggleMute = useCallback(() => {
+    setIsMuted(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('chat_mute', JSON.stringify(next));
+      } catch { /* ignore persistence failures */ }
+      return next;
+    });
+  }, []);
 
   // Load Turnstile script
   useEffect(() => {
+    const existing = document.querySelector('script[src*="turnstile"]');
+    if (existing) return;
     const script = document.createElement('script');
     script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
     script.async = true;
     document.body.appendChild(script);
     return () => {
-      document.body.removeChild(script);
+      if (document.body.contains(script)) document.body.removeChild(script);
     };
   }, []);
 
   // Handle Turnstile
   useEffect(() => {
-    if (showCaptcha && (window as any).turnstile) {
-      (window as any).turnstile.render('#turnstile-container', {
+    if (showCaptcha && window.turnstile) {
+      if (turnstileWidgetRef.current) {
+        window.turnstile.reset(turnstileWidgetRef.current);
+        return;
+      }
+
+      turnstileWidgetRef.current = window.turnstile.render('#turnstile-container', {
         sitekey: ENV.TURNSTILE_SITE_KEY,
         callback: async (token: string) => {
           try {
@@ -428,14 +595,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
             if (result.success) {
               setCaptchaToken(token);
               setShowCaptcha(false);
+              turnstileWidgetRef.current = null;
               setErrorMessage('');
-              if (input) {
-                handleSendMessage();
+              if (inputRef.current) {
+                handleSendMessage(inputRef.current);
               }
             } else {
               setErrorMessage('Captcha verification failed. Please try again.');
             }
-          } catch (error) {
+          } catch {
             setErrorMessage('Failed to verify captcha. Please try again.');
           }
         },
@@ -448,6 +616,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     return Object.values(conversations)
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [conversations]);
+
+  const lastUserMessageId = useMemo(() => {
+    for (let i = currentConversation.messages.length - 1; i >= 0; i--) {
+      if (currentConversation.messages[i].role === 'user') return currentConversation.messages[i].id;
+    }
+    return undefined;
+  }, [currentConversation.messages]);
+
+  const streamingDisplayMsg = useMemo(() => streamingMessage
+    ? { ...streamingMessage, content: sanitizeAndParse(streamingMessage.content || '▍') }
+    : null,
+    [streamingMessage]
+  );
 
   return (
     <Box
@@ -499,6 +680,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         {/* Messages Area */}
         <Box
           className="chat-messages-container"
+          role="log"
+          aria-live="polite"
+          aria-label="Chat messages"
           sx={{
             flex: 1,
             overflowY: 'auto',
@@ -514,16 +698,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               onEdit={handleEditMessage}
               onRegenerate={handleRegenerateMessage}
               isLastMessage={index === currentConversation.messages.length - 1}
+              isLastUserMessage={msg.id === lastUserMessageId}
               isStreaming={false}
             />
           ))}
 
-          {streamingMessage && (
+          {streamingDisplayMsg && (
             <MessageComponent
-              msg={{
-                ...streamingMessage,
-                content: sanitizeAndParse(streamingMessage.content || '▍')
-              }}
+              msg={streamingDisplayMsg}
               userAvatar={userAvatar}
               userName={userName}
               onEdit={noopEdit}
@@ -553,17 +735,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
           {/* Example Prompts */}
           {showExamples && currentConversation.messages.length === 1 && !isLoading && (
-            <Fade in={true}>
+            <Fade in={true} timeout={reduceMotion ? 0 : undefined}>
               <Box sx={{ p: 4 }}>
-                <Stack spacing={2} alignItems="center">
+                <Stack spacing={2} sx={{ alignItems: 'center' }}>
                   <Typography variant="subtitle1" sx={{ opacity: 0.7 }}>
                     <LightbulbIcon sx={{ fontSize: 'inherit', verticalAlign: 'middle', mr: 0.5 }} /> Try asking:
                   </Typography>
-                  <Stack direction="row" flexWrap="wrap" spacing={1} justifyContent="center">
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', justifyContent: 'center' }}>
                     {EXAMPLE_PROMPTS.map((prompt, idx) => (
                       <Chip
                         key={idx}
                         label={prompt}
+                        clickable
                         onClick={() => handleSendMessage(prompt)}
                         sx={{
                           cursor: 'pointer',
