@@ -11,7 +11,7 @@
     "@types/node": "^25.9.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "dompurify": "^3.4.8",
+    "dompurify": "^3.4.9",
     "marked": "^18.0.5",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
