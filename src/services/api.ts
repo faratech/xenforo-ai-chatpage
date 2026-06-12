@@ -250,9 +250,27 @@ export class ChatAPI {
       }
     };
 
+    // Inactivity watchdog: reject if the server sends no data for this long.
+    // Generous so it never cuts off a legitimately slow (e.g. reasoning) response.
+    const READ_INACTIVITY_TIMEOUT_MS = 120_000;
+    const readChunk = () => {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error('Stream timed out (no data received)')),
+            READ_INACTIVITY_TIMEOUT_MS
+          );
+        }),
+      ]).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+      });
+    };
+
     try {
       while (!done) {
-        const { value, done: streamDone } = await reader.read();
+        const { value, done: streamDone } = await readChunk();
         done = streamDone;
 
         if (value) {
@@ -279,6 +297,9 @@ export class ChatAPI {
         return { text: partialText, annotations, responseId };
       }
       throw error;
+    } finally {
+      // Always release the stream/reader (normal end, abort, error, or timeout).
+      void reader.cancel().catch(() => {});
     }
 
     if (!hasReceivedData && !partialText) {
