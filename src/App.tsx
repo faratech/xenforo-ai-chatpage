@@ -19,7 +19,11 @@ const App: React.FC = () => {
         const data = await ChatAPI.getUserData();
         if (data.avatar) setUserAvatar(data.avatar);
         if (data.name) setUserName(data.name);
-        if (data.user_id) setUserId(data.user_id);
+        if (data.user_id !== undefined && data.user_id !== null && String(data.user_id) !== '0') {
+          setUserId(String(data.user_id));
+        } else {
+          setUserId(null);
+        }
       } catch (error) {
         console.error('Error fetching user data:', error);
       }

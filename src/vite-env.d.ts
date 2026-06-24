@@ -8,6 +8,7 @@ declare global {
   interface SpeechRecognitionErrorEvent extends Event { readonly error: string }
   interface SpeechRecognition extends EventTarget {
     interimResults: boolean;
+    continuous: boolean;
     lang: string;
     onresult: ((event: SpeechRecognitionEvent) => void) | null;
     onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;

@@ -126,7 +126,10 @@ export class ChatAPI {
         throw new CaptchaRequiredError();
       }
 
-      throw new Error(errorData.error || `Server error: ${response.status}`);
+      const serverMessage = errorData.message || errorData.error || errorData.detail;
+      throw new Error(typeof serverMessage === 'string' && serverMessage
+        ? serverMessage
+        : `Server error: ${response.status}`);
     }
 
     if (!response.body) {

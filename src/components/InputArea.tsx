@@ -4,19 +4,19 @@ import TextField from '@mui/material/TextField';
 import Stack from '@mui/material/Stack';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
-import Paper from '@mui/material/Paper';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import MicIcon from '@mui/icons-material/Mic';
-import MicOffIcon from '@mui/icons-material/MicOff';
+import MicNoneIcon from '@mui/icons-material/MicNone';
 import VolumeOffIcon from '@mui/icons-material/VolumeOff';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import SendIcon from '@mui/icons-material/Send';
 import StopIcon from '@mui/icons-material/Stop';
 import type { InputAreaProps } from '../types';
+import { ASSISTANT_NAME } from '../config/brand';
 
 /**
- * InputArea Component - Handles message input and controls
+ * InputArea Component — WindowsForum "Ask the AI" composer.
  */
 export const InputArea: React.FC<InputAreaProps> = ({
   input,
@@ -33,9 +33,7 @@ export const InputArea: React.FC<InputAreaProps> = ({
   textFieldRef,
 }) => {
   const theme = useTheme();
-  const containerBg = theme.palette.mode === 'light' ? '#fff' : '#343541';
-  const inputBg = theme.palette.mode === 'light' ? '#fff' : '#40414f';
-  const borderColor = theme.palette.mode === 'light' ? '#e5e7eb' : '#565869';
+  const canSend = !!input.trim() && !isLoading;
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -46,108 +44,124 @@ export const InputArea: React.FC<InputAreaProps> = ({
 
   return (
     <Box
+      className="wf-input-area"
       sx={{
-        borderTop: `1px solid ${borderColor}`,
-        p: 2,
-        backgroundColor: inputBg,
+        borderTop: `1px solid ${theme.palette.divider}`,
+        p: { xs: 1.5, sm: 2 },
+        backgroundColor: 'background.paper',
       }}
     >
-      <Box sx={{ maxWidth: '48rem', mx: 'auto' }}>
-        <Paper
-          elevation={0}
+      <Box sx={{ maxWidth: '52rem', mx: 'auto' }}>
+        <Box
           sx={{
             display: 'flex',
             alignItems: 'flex-end',
-            p: 1,
-            border: `1px solid ${borderColor}`,
-            borderRadius: 2,
-            backgroundColor: containerBg,
+            gap: 0.5,
+            p: 0.75,
+            pl: 1,
+            border: `1px solid ${theme.palette.divider}`,
+            borderRadius: '14px',
+            backgroundColor: 'background.paper',
+            transition: 'border-color 0.12s, box-shadow 0.12s',
+            '&:focus-within': {
+              borderColor: 'primary.main',
+              boxShadow: '0 0 0 3px rgba(15,108,189,0.15)',
+            },
           }}
         >
+          {isSpeechRecognitionSupported && (
+            <Tooltip title={isListening ? 'Stop recording' : 'Voice input'}>
+              <IconButton
+                onClick={isListening ? onStopListening : onStartListening}
+                size="small"
+                sx={{
+                  color: isListening ? '#fff' : 'text.secondary',
+                  bgcolor: isListening ? 'error.main' : 'transparent',
+                  '&:hover': { bgcolor: isListening ? 'error.main' : 'action.hover' },
+                }}
+              >
+                {isListening ? <MicIcon fontSize="small" /> : <MicNoneIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+          )}
+
           <TextField
             ref={textFieldRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message Assistant..."
+            placeholder="Ask about Windows, drivers, updates…"
             multiline
-            maxRows={5}
+            maxRows={6}
             variant="standard"
             fullWidth
             slotProps={{
               input: {
                 disableUnderline: true,
                 sx: {
-                  px: 1.5,
+                  px: 1,
+                  py: 0.75,
                   fontSize: '1rem',
-                  '& textarea': {
-                    resize: 'none',
-                    overflowY: 'auto',
-                    '&::-webkit-scrollbar': {
-                      width: '8px',
-                    },
-                    '&::-webkit-scrollbar-thumb': {
-                      backgroundColor: 'rgba(0,0,0,0.2)',
-                      borderRadius: '4px',
-                    }
-                  }
-                }
-              }
+                  '& textarea': { resize: 'none', overflowY: 'auto' },
+                },
+              },
             }}
             disabled={isLoading}
             aria-label="Type your message"
           />
 
-          <Stack direction="row" spacing={0.5} sx={{ px: 1 }}>
-            {isLoading ? (
-              <Tooltip title="Stop generation">
-                <IconButton onClick={onStop} size="small">
-                  <StopIcon />
-                </IconButton>
-              </Tooltip>
-            ) : (
-              <Tooltip title="Send message">
-                <IconButton
-                  onClick={onSend}
-                  disabled={!input.trim()}
-                  size="small"
-                >
-                  <SendIcon />
-                </IconButton>
-              </Tooltip>
-            )}
+          <Tooltip title={isMuted ? 'Enable read-aloud' : 'Mute read-aloud'}>
+            <IconButton onClick={onToggleMute} size="small" sx={{ color: 'text.secondary' }}>
+              {isMuted ? <VolumeOffIcon fontSize="small" /> : <VolumeUpIcon fontSize="small" />}
+            </IconButton>
+          </Tooltip>
 
-            {isSpeechRecognitionSupported && (
-              <Tooltip title={isListening ? "Stop recording" : "Start recording"}>
-                <IconButton
-                  onClick={isListening ? onStopListening : onStartListening}
-                  size="small"
-                  color={isListening ? "error" : "default"}
-                >
-                  {isListening ? <MicIcon /> : <MicOffIcon />}
-                </IconButton>
-              </Tooltip>
-            )}
-
-            <Tooltip title={isMuted ? "Enable voice" : "Mute voice"}>
-              <IconButton onClick={onToggleMute} size="small">
-                {isMuted ? <VolumeOffIcon /> : <VolumeUpIcon />}
+          {isLoading ? (
+            <Tooltip title="Stop generation">
+              <IconButton
+                onClick={onStop}
+                size="small"
+                sx={{ bgcolor: 'action.hover', borderRadius: '10px', width: 38, height: 38 }}
+              >
+                <StopIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-          </Stack>
-        </Paper>
+          ) : (
+            <Tooltip title="Send message">
+              <span>
+                <IconButton
+                  onClick={onSend}
+                  disabled={!canSend}
+                  aria-label="Send message"
+                  sx={{
+                    borderRadius: '10px',
+                    width: 38,
+                    height: 38,
+                    color: '#fff',
+                    bgcolor: canSend ? 'primary.main' : 'action.disabledBackground',
+                    '&:hover': { bgcolor: 'primary.dark' },
+                    '&.Mui-disabled': { color: 'text.disabled' },
+                  }}
+                >
+                  <SendIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
+        </Box>
 
-        <Typography
-          variant="caption"
-          sx={{
-            display: 'block',
-            textAlign: 'center',
-            mt: 1,
-            opacity: 0.6,
-          }}
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          sx={{ mt: 1, px: 0.5, gap: 1, flexWrap: 'wrap' }}
         >
-          Press Enter to send, Shift+Enter for new line
-        </Typography>
+          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+            {isListening ? 'Listening… speak now' : 'Press Enter to send · Shift+Enter for new line'}
+          </Typography>
+          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+            {ASSISTANT_NAME} can make mistakes
+          </Typography>
+        </Stack>
       </Box>
     </Box>
   );

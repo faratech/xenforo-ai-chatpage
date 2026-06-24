@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
 import IconButton from '@mui/material/IconButton';
-import Chip from '@mui/material/Chip';
+import Avatar from '@mui/material/Avatar';
+import Tooltip from '@mui/material/Tooltip';
 import Fade from '@mui/material/Fade';
 import { useTheme } from '@mui/material/styles';
 import AddIcon from '@mui/icons-material/Add';
@@ -30,6 +30,7 @@ import {
 } from '../utils/helpers';
 import { ChatAPI, AudioService, CaptchaRequiredError } from '../services/api';
 import { ENV } from '../config/env';
+import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 
 const createNewConversation = (id: string, welcomeMsg: string): Conversation => ({
   id,
@@ -114,7 +115,7 @@ const loadSavedConversations = (): ConversationMap => {
  */
 export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
   const theme = useTheme();
-  const isGuest = !userId || (typeof userId === 'string' && userId.startsWith('guest_'));
+  const isGuest = !userId || String(userId) === '0' || (typeof userId === 'string' && userId.startsWith('guest_'));
   const welcomeMessage = useMemo(() => isGuest
     ? 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology! For best results please <a href="/register">register</a> or <a href="/login">log-in</a> to the Windows Forum'
     : 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology!',
@@ -179,6 +180,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const textFieldRef = useRef<HTMLDivElement>(null);
   const turnstileWidgetRef = useRef<string | null>(null);
   const inputRef = useRef(input);
+  const keepListeningRef = useRef(false);
 
   useEffect(() => {
     inputRef.current = input;
@@ -197,8 +199,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     streamingMessageRef.current = streamingMessage;
   }, [streamingMessage]);
 
-  const containerBg = theme.palette.mode === 'light' ? '#fff' : '#343541';
-  const borderColor = theme.palette.mode === 'light' ? '#e5e7eb' : '#565869';
+  const containerBg = theme.palette.background.paper;
+  const borderColor = theme.palette.divider;
 
   // Save conversations to localStorage
   useEffect(() => {
@@ -517,8 +519,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   useEffect(() => {
     const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition: SpeechRecognition | null = null;
+
     if (SpeechRecognitionCtor) {
-      const recognition = new SpeechRecognitionCtor();
+      recognition = new SpeechRecognitionCtor();
+      recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
@@ -531,26 +536,64 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.error('Speech recognition error:', event.error);
+        keepListeningRef.current = false;
         setIsListening(false);
       };
 
-      recognition.onend = () => setIsListening(false);
+      recognition.onend = () => {
+        if (keepListeningRef.current) {
+          try {
+            setIsListening(true);
+            recognition.start();
+            return;
+          } catch (error) {
+            console.error('Failed to restart speech recognition:', error);
+            keepListeningRef.current = false;
+            setIsListening(false);
+            return;
+          }
+        }
+
+        setIsListening(false);
+      };
 
       setSpeechRecognition(recognition);
     } else {
       setIsSpeechRecognitionSupported(false);
     }
+
+    return () => {
+      keepListeningRef.current = false;
+      if (recognition) {
+        recognition.onresult = null;
+        recognition.onend = null;
+        recognition.onerror = null;
+        try {
+          recognition.stop();
+        } catch {
+          // ignore cleanup errors
+        }
+      }
+    };
   }, []);
 
   const handleStartListening = useCallback(() => {
     if (speechRecognition) {
-      speechRecognition.start();
+      keepListeningRef.current = true;
       setIsListening(true);
+      try {
+        speechRecognition.start();
+      } catch (error) {
+        console.error('Speech recognition failed to start:', error);
+        keepListeningRef.current = false;
+        setIsListening(false);
+      }
     }
   }, [speechRecognition]);
 
   const handleStopListening = useCallback(() => {
     if (speechRecognition) {
+      keepListeningRef.current = false;
       speechRecognition.stop();
       setIsListening(false);
     }
@@ -656,24 +699,35 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         <Box
           sx={{
             borderBottom: `1px solid ${borderColor}`,
-            p: 2,
+            px: 2,
+            py: 1.25,
             display: 'flex',
             alignItems: 'center',
-            gap: 2,
+            gap: 1.5,
+            backgroundColor: 'background.paper',
+            flexShrink: 0,
           }}
         >
-          <IconButton onClick={() => setDrawerOpen(true)}>
+          <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history">
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" sx={{ flex: 1 }}>
-            {currentConversation.title}
-          </Typography>
-          <Button
-            size="small"
-            startIcon={<AddIcon />}
-            onClick={handleNewConversation}
-          >
-            New Chat
+          <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography
+              variant="h6"
+              sx={{ lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            >
+              {currentConversation.title}
+            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+              <Box sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: 'success.main' }} />
+              <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
+                {ASSISTANT_NAME} · online
+              </Typography>
+            </Box>
+          </Box>
+          <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={handleNewConversation}>
+            New chat
           </Button>
         </Box>
 
@@ -733,32 +787,70 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
             </Box>
           )}
 
-          {/* Example Prompts */}
+          {/* Example Prompts — branded empty-state cards */}
           {showExamples && currentConversation.messages.length === 1 && !isLoading && (
             <Fade in={true} timeout={reduceMotion ? 0 : undefined}>
-              <Box sx={{ p: 4 }}>
-                <Stack spacing={2} sx={{ alignItems: 'center' }}>
-                  <Typography variant="subtitle1" sx={{ opacity: 0.7 }}>
-                    <LightbulbIcon sx={{ fontSize: 'inherit', verticalAlign: 'middle', mr: 0.5 }} /> Try asking:
-                  </Typography>
-                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', justifyContent: 'center' }}>
-                    {EXAMPLE_PROMPTS.map((prompt, idx) => (
-                      <Chip
-                        key={idx}
-                        label={prompt}
-                        clickable
-                        onClick={() => handleSendMessage(prompt)}
+              <Box sx={{ maxWidth: '52rem', mx: 'auto', px: { xs: 2, sm: 3, md: 4 }, pb: 3 }}>
+                <Typography
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 0.75,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    color: 'text.secondary',
+                    mb: 1.5,
+                  }}
+                >
+                  <LightbulbIcon sx={{ fontSize: 16 }} /> Try asking
+                </Typography>
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.5 }}>
+                  {EXAMPLE_PROMPTS.map((prompt, idx) => (
+                    <Box
+                      key={idx}
+                      component="button"
+                      onClick={() => handleSendMessage(prompt)}
+                      sx={{
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        font: 'inherit',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1.25,
+                        p: 1.5,
+                        border: (t) => `1px solid ${t.palette.divider}`,
+                        borderRadius: 2.5,
+                        bgcolor: 'background.paper',
+                        color: 'text.primary',
+                        transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s',
+                        '&:hover': {
+                          borderColor: 'primary.main',
+                          boxShadow: 'var(--wf-shadow-block)',
+                          transform: 'translateY(-1px)',
+                        },
+                      }}
+                    >
+                      <Box
                         sx={{
-                          cursor: 'pointer',
-                          mb: 1,
-                          '&:hover': {
-                            backgroundColor: theme.palette.mode === 'light' ? '#e5e7eb' : '#4b4f60',
-                          }
+                          width: 32,
+                          height: 32,
+                          borderRadius: 2,
+                          flexShrink: 0,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          bgcolor: 'rgba(15,108,189,0.1)',
+                          color: 'primary.main',
                         }}
-                      />
-                    ))}
-                  </Stack>
-                </Stack>
+                      >
+                        <LightbulbIcon sx={{ fontSize: 16 }} />
+                      </Box>
+                      <Typography sx={{ fontSize: 14, fontWeight: 500 }}>{prompt}</Typography>
+                    </Box>
+                  ))}
+                </Box>
               </Box>
             </Fade>
           )}
