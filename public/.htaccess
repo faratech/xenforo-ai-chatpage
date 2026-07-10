@@ -1,0 +1,9 @@
+<IfModule mod_headers.c>
+  <FilesMatch "^(?:index\.html|manifest\.json|bot-avatar\.webp|main\.(?:js|css))$">
+    Header always set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+
+  <FilesMatch ".*-[A-Za-z0-9_-]{8,}\.(?:chunk\.js|css|avif|gif|ico|jpe?g|png|svg|webp|woff2?)$">
+    Header always set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>

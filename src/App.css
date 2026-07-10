@@ -1,94 +1,96 @@
-/* App.improved.css - Modern chat interface styling */
+/* WindowsForum.com — "Ask the AI" chat styling
+   Fluent-adjacent design system. Dark mode is keyed to [data-wf-theme="dark"]
+   (set in index.tsx) so CSS tokens track MUI's resolved palette exactly. */
 
-/* Reset and base styles */
-* {
-  box-sizing: border-box;
+:root {
+  --wf-primary: #0f6cbd;
+  --wf-primary-hover: #0c5aa0;
+  --wf-accent: #115ea3;
+  --wf-pressed: #07426f;
+
+  --wf-page: #eff5f6;
+  --wf-paper: #ffffff;
+  --wf-alt: #f8fafb;
+  --wf-border: #ebebeb;
+  --wf-text: #1a1b1b;
+  --wf-muted: #5f6060;
+  --wf-code-bg: #f6f8fa;
+  --wf-code-border: #e1e4e8;
+
+  --wf-shadow-block: rgba(0, 0, 0, 0.132) 0 1.6px 3.6px 0, rgba(0, 0, 0, 0.11) 0 0.3px 0.9px 0;
+  --wf-radius: 8px;
+  --wf-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Segoe UI Variable', Roboto, 'Helvetica Neue', Arial, 'Inter', sans-serif;
+  --wf-mono: Consolas, 'Lucida Console', ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
 }
+
+[data-wf-theme='dark'] {
+  --wf-primary: #75b6e7;
+  --wf-primary-hover: #8ac7f0;
+  --wf-page: #1f2021;
+  --wf-paper: #292929;
+  --wf-alt: #383a3a;
+  --wf-border: #272729;
+  --wf-text: #ffffff;
+  --wf-muted: #cfcfcf;
+  --wf-code-bg: #1c1c1c;
+  --wf-code-border: #383a3a;
+}
+
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Ubuntu', sans-serif;
+  font-family: var(--wf-font);
+  background-color: var(--wf-page);
+  color: var(--wf-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Light theme */
-body {
-  background-color: #ffffff;
-  color: #1a1a1a;
-}
-
-/* Dark theme */
-@media (prefers-color-scheme: dark) {
-  body {
-    background-color: #343541;
-    color: #ececf1;
-  }
-}
-
-/* Message content styling */
+/* ===== Rich message content (rendered via dangerouslySetInnerHTML) ===== */
 .message-content {
   line-height: 1.6;
   word-wrap: break-word;
+  font-size: 15px;
 }
 
-.message-content h1,
-.message-content h2,
-.message-content h3,
-.message-content h4,
-.message-content h5,
-.message-content h6 {
-  margin-top: 1.5em;
+.message-content h1, .message-content h2, .message-content h3,
+.message-content h4, .message-content h5, .message-content h6 {
+  margin-top: 1.4em;
   margin-bottom: 0.5em;
-  font-weight: 600;
+  font-weight: 700;
+  line-height: 1.25;
 }
-
-.message-content h1 { font-size: 1.5em; }
-.message-content h2 { font-size: 1.3em; }
+.message-content h1 { font-size: 1.4em; }
+.message-content h2 { font-size: 1.25em; }
 .message-content h3 { font-size: 1.1em; }
 
-.message-content p {
-  margin: 0.75em 0;
-}
+.message-content p { margin: 0.7em 0; }
+.message-content p:first-child { margin-top: 0; }
+.message-content p:last-child { margin-bottom: 0; }
 
-.message-content ul,
-.message-content ol {
-  margin: 0.75em 0;
-  padding-left: 1.5em;
-}
+.message-content ul, .message-content ol { margin: 0.6em 0; padding-left: 1.5em; }
+.message-content li { margin: 0.25em 0; }
 
-.message-content li {
-  margin: 0.25em 0;
-}
-
-/* Code styling */
+/* Code */
 .message-content pre {
-  background-color: #f6f8fa;
-  border: 1px solid #e1e4e8;
+  background-color: var(--wf-code-bg);
+  border: 1px solid var(--wf-code-border);
   border-radius: 6px;
-  padding: 16px;
+  padding: 12px 14px;
   overflow-x: auto;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 14px;
-  line-height: 1.45;
+  font-family: var(--wf-mono);
+  font-size: 13px;
+  line-height: 1.5;
 }
-
-@media (prefers-color-scheme: dark) {
-  .message-content pre {
-    background-color: #0d1117;
-    border-color: #30363d;
-  }
-}
-
 .message-content code {
-  background-color: rgba(175, 184, 193, 0.2);
-  padding: 0.2em 0.4em;
+  background-color: rgba(15, 108, 189, 0.1);
+  padding: 0.15em 0.4em;
   border-radius: 3px;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 85%;
+  font-family: var(--wf-mono);
+  font-size: 88%;
 }
-
 .message-content pre code {
   background-color: transparent;
   padding: 0;
@@ -98,278 +100,127 @@ body {
 
 /* Links */
 .message-content a {
-  color: #0969da;
+  color: var(--wf-primary);
   text-decoration: none;
-  transition: color 0.2s;
+  font-weight: 500;
+  transition: color 0.1s;
 }
-
-.message-content a:hover {
-  text-decoration: underline;
-}
-
-@media (prefers-color-scheme: dark) {
-  .message-content a {
-    color: #58a6ff;
-  }
-}
+.message-content a:hover { text-decoration: underline; color: var(--wf-accent); }
 
 /* Tables */
-.message-content table {
-  border-collapse: collapse;
-  margin: 1em 0;
-  width: 100%;
-}
-
-.message-content table th,
-.message-content table td {
-  border: 1px solid #d1d5db;
+.message-content table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+.message-content table th, .message-content table td {
+  border: 1px solid var(--wf-border);
   padding: 8px 12px;
 }
+.message-content table th { background-color: var(--wf-alt); font-weight: 700; }
 
-@media (prefers-color-scheme: dark) {
-  .message-content table th,
-  .message-content table td {
-    border-color: #4b5563;
-  }
-}
-
-.message-content table th {
-  background-color: #f3f4f6;
-  font-weight: 600;
-}
-
-@media (prefers-color-scheme: dark) {
-  .message-content table th {
-    background-color: #374151;
-  }
-}
-
-/* Blockquotes */
+/* Blockquotes — brand left accent (the one accepted colored left-border use) */
 .message-content blockquote {
-  margin: 1em 0;
-  padding: 0 1em;
-  border-left: 4px solid #d1d5db;
-  color: #6b7280;
+  margin: 0.8em 0;
+  padding: 6px 14px;
+  border-left: 3px solid var(--wf-primary);
+  background: var(--wf-alt);
+  color: var(--wf-muted);
+  border-radius: 0 6px 6px 0;
 }
 
-@media (prefers-color-scheme: dark) {
-  .message-content blockquote {
-    border-left-color: #4b5563;
-    color: #9ca3af;
-  }
+.message-content hr { margin: 1.3em 0; border: 0; border-top: 1px solid var(--wf-border); }
+
+/* Inline images — AI screenshots / animated console demos (emitted as <img> by the
+   assistant; DOMPurify keeps the tag). Cap width so they fit the message bubble. */
+.message-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 0.6em 0;
+  display: block;
+  box-shadow: var(--wf-shadow-block);
 }
 
-/* Horizontal rules */
-.message-content hr {
-  margin: 1.5em 0;
-  border: 0;
-  border-top: 1px solid #e5e7eb;
-}
+/* The "Sources:" footer that sanitizeAndParse appends */
+.message-content sup { color: var(--wf-primary); font-weight: 700; }
 
-@media (prefers-color-scheme: dark) {
-  .message-content hr {
-    border-top-color: #4b5563;
-  }
-}
+/* User bubbles render on brand blue — force readable link/code colors */
+.wf-user-bubble .message-content,
+.wf-user-bubble .message-content p { color: #fff; }
+.wf-user-bubble .message-content a { color: #fff; text-decoration: underline; }
+.wf-user-bubble .message-content code { background: rgba(255, 255, 255, 0.18); color: #fff; }
 
-/* Message actions hover effect */
-.message-actions {
-  opacity: 0;
-  transition: opacity 0.2s ease-in-out;
-}
-
-.MuiBox-root:hover .message-actions {
-  opacity: 1;
-}
-
-/* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
+/* ===== Scrollbars ===== */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
+  background-color: var(--wf-border);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--wf-muted); background-clip: padding-box; }
+
+.chat-messages-container { scroll-behavior: smooth; }
+
+.jump-to-latest {
+  position: sticky !important;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 2;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(0, 0, 0, 0.3);
-}
-
-@media (prefers-color-scheme: dark) {
-  ::-webkit-scrollbar-thumb {
-    background-color: rgba(255, 255, 255, 0.2);
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(255, 255, 255, 0.3);
-  }
-}
-
-/* Smooth scrolling */
-.chat-messages-container {
-  scroll-behavior: smooth;
-}
-
-/* Animation for streaming messages */
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
-.streaming-cursor {
-  display: inline-block;
-  width: 8px;
-  height: 20px;
-  background-color: currentColor;
-  animation: pulse 1s infinite;
-}
-
-/* Button hover effects */
-.MuiButton-root {
-  transition: all 0.2s ease-in-out;
-}
-
-.MuiIconButton-root {
-  transition: all 0.2s ease-in-out;
-}
-
-/* Input field focus styles */
-.MuiTextField-root:focus-within {
-  outline: none;
-}
-
-/* Chip hover effect */
-.MuiChip-root {
-  transition: all 0.2s ease-in-out;
-  cursor: pointer;
-}
-
-.MuiChip-root:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-/* Drawer animation */
-.MuiDrawer-paper {
-  transition: transform 0.3s ease-in-out !important;
-}
-
-/* Example prompts animation */
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.example-prompts {
-  animation: fadeInUp 0.5s ease-out;
-}
-
-/* Message fade in */
-@keyframes messageSlideIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.message-wrapper {
-  animation: messageSlideIn 0.3s ease-out;
-}
-
-/* Responsive design */
-@media (max-width: 768px) {
-  .chat-messages-container {
-    padding: 8px;
-  }
-
-  .message-content {
-    font-size: 14px;
-  }
-
-  .MuiDrawer-paper {
-    width: 240px !important;
-  }
-}
-
-/* Print styles */
-@media print {
-  .MuiDrawer-root,
-  .message-actions,
-  .input-area {
-    display: none !important;
-  }
-
-  .message-content {
-    page-break-inside: avoid;
-  }
-}
-
-/* Accessibility improvements */
 .MuiButton-root:focus-visible,
-.MuiIconButton-root:focus-visible {
-  outline: 2px solid #0969da;
+.MuiIconButton-root:focus-visible,
+.message-actions button:focus-visible,
+.delete-btn:focus-visible {
+  outline: 3px solid var(--wf-primary);
   outline-offset: 2px;
 }
 
-@media (prefers-color-scheme: dark) {
-  .MuiButton-root:focus-visible,
-  .MuiIconButton-root:focus-visible {
-    outline-color: #58a6ff;
-  }
-}
-
-/* Loading dots animation */
-@keyframes loadingDots {
-  0%, 20% {
-    content: '.';
-  }
-  40% {
-    content: '..';
-  }
-  60%, 100% {
-    content: '...';
-  }
-}
-
-.loading-dots::after {
-  content: '.';
-  animation: loadingDots 1.5s infinite;
-}
-
-/* Turnstile container styling */
-#turnstile-container {
+/* ===== Streaming cursor + typing dots ===== */
+@keyframes wfBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.streaming-cursor {
   display: inline-block;
-  margin: 16px auto;
+  width: 7px;
+  height: 1.05em;
+  background-color: var(--wf-primary);
+  margin-left: 2px;
+  vertical-align: -2px;
+  animation: wfBlink 1s steps(1) infinite;
 }
 
-/* Respect reduced-motion preference */
+@keyframes wfDot {
+  0%, 70%, 100% { transform: translateY(0); opacity: 0.45; }
+  35% { transform: translateY(-4px); opacity: 1; }
+}
+.wf-typing { display: inline-flex; gap: 5px; align-items: center; padding: 4px 2px; }
+.wf-typing span {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--wf-muted); display: inline-block;
+  animation: wfDot 1.3s infinite ease-in-out;
+}
+.wf-typing span:nth-child(2) { animation-delay: 0.18s; }
+.wf-typing span:nth-child(3) { animation-delay: 0.36s; }
+
+/* ===== Responsive ===== */
+@media (max-width: 768px) {
+  .message-content { font-size: 14px; }
+}
+
+/* ===== Print ===== */
+@media print {
+  .MuiDrawer-root, .message-actions, .wf-input-area { display: none !important; }
+  .message-content { page-break-inside: avoid; }
+}
+
+/* ===== Reduced motion ===== */
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *, *::before, *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
 }
+
+/* Turnstile container */
+#turnstile-container { display: inline-block; margin: 8px auto; }

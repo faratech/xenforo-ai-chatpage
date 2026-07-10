@@ -6,16 +6,18 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ### Build and Run
 - `npm run dev` - Start development server at http://localhost:5173
-- `npm run build` - Standard production build with hashed filenames
-- `npm run deploy` - Build and deploy to `/web/public_html/chatpage/` (production)
+- `npm run build` - Production build with stable entries and hashed chunks/media
+- `npm run check` - Run lint, typecheck, tests, build, and release verification
+- `npm run deploy` - Validate, stage, and atomically activate a production release
+- `./deploy.sh rollback` - Atomically restore the previous production release
 
 ### Deployment
-The app is deployed to `/web/public_html/chatpage/` which serves `https://windowsforum.com/chatpage`.
+The app is served through `/web/public_html/chatpage`, which points to matching releases under `/web/releases/xenforo-ai-chatpage/` on both production nodes and serves `https://windowsforum.com/chatpage`.
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
 - **Build Output**: `dist/` directory
-- **Base Path**: `/chatpage` (configured in package.json homepage)
+- **Base Path**: `/chatpage/` (configured in `vite.config.ts`)
 - **Environment**: Variables in `.env` must be prefixed with `VITE_`
 
 ## Architecture Overview
@@ -151,6 +153,7 @@ Required variables (in `.env`):
 ```bash
 VITE_DOMAIN=https://windowsforum.com
 VITE_TEST_DOMAIN=https://test.windowsforum.com
+VITE_API_BASE=
 VITE_TURNSTILE_SITE_KEY=0x4AAAAAAABiq2_hH-dGCkQi
 VITE_ENABLE_VOICE=true
 VITE_MAX_CONVERSATIONS=50
@@ -242,10 +245,10 @@ Citations rendered in "Sources" section at message end.
 ## Testing Deployment Locally
 
 Before deploying:
-1. Test build: `npm run build`
-2. Verify output: Check `dist/` contains the built assets
-3. Test locally: `npx serve -s dist -l 5173`
-4. Deploy: `npm run deploy` (requires server access)
+1. Run the full gate: `npm run check`
+2. Verify `dist/index.html` references `main.js?v=2` and `main.css?v=2`
+3. Test locally: `npm run preview`
+4. Coordinate the backend-first rollout, then deploy: `npm run deploy`
 
 ## Integration with XenForo
 
@@ -263,9 +266,10 @@ The app expects:
 
 ## Build Artifacts
 
-The Vite build emits to the `dist/` directory for XenForo template integration:
-- Produces hashed JS/CSS files for cache busting
-- Generates `index.html` with the correct asset references
-- Output is deployed to `/web/public_html/chatpage/`
+The Vite build emits a hybrid release contract to `dist/`:
+- Stable `static/js/main.js` and `static/css/main.css` entries use `?v=2` in standalone and XenForo consumers
+- Imported JavaScript chunks and bundled media use content hashes
+- `public/.htaccess` makes stable files revalidate and hashed files immutable
+- `deploy.sh` verifies generated and XenForo references before atomically switching the public symlink
 
 This is intentional for XenForo integration and should not be "fixed".

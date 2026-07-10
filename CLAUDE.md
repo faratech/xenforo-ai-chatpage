@@ -6,17 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Build and Run
 - `npm run dev` - Start Vite development server at http://localhost:5173
-- `npm run build` - Production build (`vite build` → `dist/`, consistent filenames, no content hashes)
+- `npm run build` - Production build (`vite build` → `dist/`, stable entries and hashed chunks/media)
 - `npm run preview` - Preview the production build locally
 - `npm run typecheck` - Type-check without emitting (`tsc --noEmit`)
-- `npm run deploy` - Build and deploy to `/web/public_html/chatpage/` (production)
+- `npm run check` - Run lint, typecheck, tests, build, and release verification
+- `npm run deploy` - Build, validate, stage, and atomically activate a production release
+- `./deploy.sh rollback` - Atomically restore the previous production release
 
 ### Deployment
-The app is deployed to `/web/public_html/chatpage/` which serves `https://windowsforum.com/chatpage`. Consistent filenames (no content hashes) are produced by the `vite.config.ts` `rollupOptions` output config; there is no `build.sh`.
+The app is served through the `/web/public_html/chatpage` symlink at `https://windowsforum.com/chatpage`. Releases are staged under `/web/releases/xenforo-ai-chatpage/` on both GCP and OCI; `deploy.sh` switches both symlinks only after all checks, peer staging, and release-reference validation pass. It then uses `xf-designer:sync-templates` for `wf3` and `wf3_domperf`; it never edits compiled template caches directly.
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
-- **Build Output**: `dist/` directory (consistent filenames, no content hashes)
+- **Build Output**: `dist/` directory (stable `main.js`/`main.css`, content-hashed chunks/media)
 - **Base Path**: `/chatpage` (configured in `vite.config.ts` `base` field)
 - **Environment**: Variables in `.env` must be prefixed with `VITE_`
 
@@ -153,6 +155,7 @@ Required variables (in `.env`):
 ```bash
 VITE_DOMAIN=https://windowsforum.com
 VITE_TEST_DOMAIN=https://test.windowsforum.com
+VITE_API_BASE=
 VITE_TURNSTILE_SITE_KEY=0x4AAAAAAABiq2_hH-dGCkQi
 VITE_ENABLE_VOICE=true
 VITE_MAX_CONVERSATIONS=50
@@ -244,10 +247,10 @@ Citations rendered in "Sources" section at message end.
 ## Testing Deployment Locally
 
 Before deploying:
-1. Test build: `npm run build`
-2. Verify output: Check `dist/static/js/main.js` exists (no hash)
+1. Run the full gate: `npm run check`
+2. Confirm `dist/index.html` uses `main.js?v=2` and `main.css?v=2`
 3. Test locally: `npm run preview`
-4. Deploy: `npm run deploy` (requires server access)
+4. Coordinate the backend-first rollout, then deploy: `npm run deploy`
 
 ## Integration with XenForo
 
@@ -265,9 +268,10 @@ The app expects:
 
 ## Build Artifacts
 
-The `vite.config.ts` `rollupOptions` output config ensures consistent filenames for XenForo template integration:
-- Emits `static/js/main.js`, `static/css/main.css`, and `static/media/[name][extname]`
-- No content hashes in filenames
-- Allows hardcoded paths in XenForo templates without cache busting
+The Vite output contract supports XenForo integration without leaving dependency chunks stale:
+- Emits stable `static/js/main.js` and `static/css/main.css` entrypoints, referenced with `?v=2`
+- Emits content-hashed JavaScript chunks and bundled media
+- Copies `public/.htaccess`, which serves stable entries with `no-cache, must-revalidate` and hashed assets with a one-year immutable policy
+- Validates every local reference in generated `dist/index.html`
 
 This is intentional for XenForo integration and should not be "fixed".

@@ -1,645 +1,850 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Avatar from '@mui/material/Avatar';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Stack from '@mui/material/Stack';
-import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
-import IconButton from '@mui/material/IconButton';
-import Chip from '@mui/material/Chip';
 import Fade from '@mui/material/Fade';
+import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
+import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import AddIcon from '@mui/icons-material/Add';
-import MenuIcon from '@mui/icons-material/Menu';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
+import MenuIcon from '@mui/icons-material/Menu';
 
 import type {
+  Annotation,
   ChatMessageHistoryItem,
   ChatWindowProps,
   Conversation,
   ConversationMap,
-  Message
+  Message,
+  UsageData,
 } from '../types';
 import { Message as MessageComponent } from './Message';
 import { ConversationSidebar } from './ConversationSidebar';
 import { InputArea } from './InputArea';
+import { EXAMPLE_PROMPTS, generateConversationId } from '../utils/helpers';
 import {
-  sanitizeAndParse,
-  generateConversationId,
-  EXAMPLE_PROMPTS,
-  extractTextFromHTML
-} from '../utils/helpers';
-import { ChatAPI, AudioService, CaptchaRequiredError } from '../services/api';
+  APIError,
+  AudioService,
+  CaptchaRequiredError,
+  ChatAPI,
+  IncompleteStreamError,
+  StreamCancelledError,
+  StreamProtocolError,
+} from '../services/api';
 import { ENV } from '../config/env';
+import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 
-const createNewConversation = (id: string, welcomeMsg: string): Conversation => ({
-  id,
-  title: 'New Chat',
-  messages: [{
-    id: `msg_${Date.now()}`,
-    role: 'ai',
-    content: sanitizeAndParse(welcomeMsg),
-    rawContent: extractTextFromHTML(welcomeMsg),
-    timestamp: Date.now(),
-  }],
-  createdAt: Date.now(),
-  updatedAt: Date.now(),
-});
+const MAX_MESSAGE_BYTES = 500;
+const LEGACY_CONVERSATIONS_KEY = 'chat_conversations';
+const LEGACY_CURRENT_KEY = 'current_conversation_id';
+const STORAGE_VERSION_KEY = 'chat_storage_version';
+
+const messageId = (suffix = ''): string => {
+  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  return `msg_${random}${suffix}`;
+};
+
+const createNewConversation = (id: string, welcomeMessage: string): Conversation => {
+  const now = Date.now();
+  return {
+    id,
+    title: 'New Chat',
+    messages: [{
+      id: messageId('_welcome'),
+      role: 'ai',
+      rawContent: welcomeMessage,
+      timestamp: now,
+      status: 'complete',
+    }],
+    createdAt: now,
+    updatedAt: now,
+  };
+};
 
 const noopEdit = (_id: string, _content: string) => {};
+const noopRetry = (_id: string) => {};
 const noopRegenerate = () => {};
 
 type ConversationUpdate = Partial<Conversation> | ((conversation: Conversation) => Partial<Conversation>);
 
-const getMessageText = (message: Message): string => {
-  return (message.rawContent || extractTextFromHTML(message.content)).trim();
-};
+interface ActiveTurn {
+  requestId: string;
+  conversationId: string;
+  controller: AbortController;
+  userMessageId: string;
+  partialText: string;
+  annotations: Annotation[];
+}
 
-const serializeConversationHistory = (messages: Message[]): ChatMessageHistoryItem[] => {
-  return messages
-    .filter((message, index) => {
-      const text = getMessageText(message);
-      return Boolean(text) && !(index === 0 && message.role === 'ai' && text.startsWith('Welcome to WindowsForum.com'));
-    })
-    .map((message) => ({
-      role: message.role === 'ai' ? 'assistant' : 'user',
-      content: getMessageText(message),
-    }));
-};
+interface PendingCaptchaTurn {
+  conversationId: string;
+  content: string;
+  userMessage: Message;
+  resetConversation?: boolean;
+  history?: ChatMessageHistoryItem[];
+}
+
+const getMessageText = (message: Message): string => message.rawContent.trim();
+
+const serializeConversationHistory = (messages: Message[]): ChatMessageHistoryItem[] => messages
+  .filter((message, index) => {
+    const text = getMessageText(message);
+    return Boolean(text)
+      && message.status !== 'failed'
+      && !(index === 0 && message.role === 'ai' && text.startsWith('Welcome to WindowsForum.com'));
+  })
+  .map((message) => ({
+    role: message.role === 'ai' ? 'assistant' : 'user',
+    content: getMessageText(message),
+  }));
 
 const pruneConversations = (conversationMap: ConversationMap, keepConversationId: string): ConversationMap => {
-  const maxConversations = Number.isFinite(ENV.MAX_CONVERSATIONS) && ENV.MAX_CONVERSATIONS > 0
+  const max = Number.isFinite(ENV.MAX_CONVERSATIONS) && ENV.MAX_CONVERSATIONS > 0
     ? ENV.MAX_CONVERSATIONS
     : 50;
   const entries = Object.entries(conversationMap).sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
-  const keep = new Set(entries.slice(0, maxConversations).map(([id]) => id));
+  const keep = new Set(entries.slice(0, max).map(([id]) => id));
   keep.add(keepConversationId);
-
-  return entries.reduce<ConversationMap>((acc, [id, conversation]) => {
-    if (keep.has(id)) acc[id] = conversation;
-    return acc;
+  return entries.reduce<ConversationMap>((result, [id, conversation]) => {
+    if (keep.has(id)) result[id] = conversation;
+    return result;
   }, {});
 };
 
-const loadSavedConversations = (): ConversationMap => {
+const isMessage = (value: unknown): value is Message => {
+  if (!value || typeof value !== 'object') return false;
+  const message = value as Partial<Message>;
+  return typeof message.id === 'string'
+    && (message.role === 'user' || message.role === 'ai')
+    && typeof message.rawContent === 'string'
+    && typeof message.timestamp === 'number';
+};
+
+const parseConversationMap = (raw: string | null): ConversationMap => {
+  if (!raw) return {};
   try {
-    const saved = localStorage.getItem('chat_conversations');
-    if (!saved) return {};
-    const parsed = JSON.parse(saved);
-    if (!parsed || typeof parsed !== 'object') return {};
-    const sanitized: ConversationMap = {};
-    for (const [id, conv] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof id !== 'string' || id === '__proto__' || id === 'constructor' || id === 'prototype') continue;
-      const c = conv as Partial<Conversation>;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const result: ConversationMap = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue;
+      if (!value || typeof value !== 'object') continue;
+      const conversation = value as Partial<Conversation>;
       if (
-        c &&
-        typeof c === 'object' &&
-        typeof c.id === 'string' &&
-        typeof c.title === 'string' &&
-        Array.isArray(c.messages) &&
-        typeof c.createdAt === 'number' &&
-        typeof c.updatedAt === 'number'
-      ) {
-        sanitized[id] = c as Conversation;
-      }
+        conversation.id !== id
+        || typeof conversation.title !== 'string'
+        || !Array.isArray(conversation.messages)
+        || !conversation.messages.every(isMessage)
+        || typeof conversation.createdAt !== 'number'
+        || typeof conversation.updatedAt !== 'number'
+      ) continue;
+      result[id] = conversation as Conversation;
     }
-    return sanitized;
-  } catch (error) {
-    console.warn('Ignoring invalid saved conversations:', error);
+    return result;
+  } catch {
     return {};
   }
 };
 
-/**
- * ChatWindow Component - Main chat interface
- */
+const storageKeys = (userId: string) => {
+  const principal = encodeURIComponent(userId);
+  return {
+    conversations: `chat_conversations:v2:${principal}`,
+    current: `current_conversation_id:v2:${principal}`,
+  };
+};
+
+const loadStoredState = (userId: string): { conversations: ConversationMap; currentId: string | null } => {
+  const keys = storageKeys(userId);
+  try {
+    // Unscoped history cannot be assigned safely on a shared browser.
+    localStorage.removeItem(LEGACY_CONVERSATIONS_KEY);
+    localStorage.removeItem(LEGACY_CURRENT_KEY);
+    localStorage.setItem(STORAGE_VERSION_KEY, '2');
+    const conversations = parseConversationMap(localStorage.getItem(keys.conversations));
+    const currentId = localStorage.getItem(keys.current);
+    return { conversations, currentId };
+  } catch (error) {
+    console.warn('Local chat storage is unavailable; continuing without persistence.', error);
+    return { conversations: {}, currentId: null };
+  }
+};
+
+type TurnstileApi = NonNullable<Window['turnstile']>;
+let turnstileLoader: Promise<TurnstileApi> | null = null;
+
+const loadTurnstile = (): Promise<TurnstileApi> => {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileLoader) return turnstileLoader;
+
+  turnstileLoader = new Promise<TurnstileApi>((resolve, reject) => {
+    const finish = () => {
+      if (window.turnstile) resolve(window.turnstile);
+      else reject(new Error('Turnstile loaded without exposing its API.'));
+    };
+    const existing = document.querySelector<HTMLScriptElement>('script[data-wf-turnstile]');
+    if (existing) {
+      existing.addEventListener('load', finish, { once: true });
+      existing.addEventListener('error', () => reject(new Error('Turnstile failed to load.')), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.dataset.wfTurnstile = 'true';
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', finish, { once: true });
+    script.addEventListener('error', () => reject(new Error('Turnstile failed to load.')), { once: true });
+    document.head.appendChild(script);
+  }).catch((error) => {
+    turnstileLoader = null;
+    throw error;
+  });
+
+  return turnstileLoader;
+};
+
+const byteLength = (value: string): number => new TextEncoder().encode(value).length;
+
 export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
   const theme = useTheme();
-  const isGuest = !userId || (typeof userId === 'string' && userId.startsWith('guest_'));
+  const isGuest = userId.startsWith('guest_');
   const welcomeMessage = useMemo(() => isGuest
-    ? 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology! For best results please <a href="/register">register</a> or <a href="/login">log-in</a> to the Windows Forum'
-    : 'Welcome to WindowsForum.com! Feel free to ask me anything about Windows or technology!',
-    [isGuest]
-  );
+    ? 'Welcome to WindowsForum.com! Ask me anything about Windows or technology. For the best results, [register](/register) or [log in](/login).'
+    : 'Welcome to WindowsForum.com! Ask me anything about Windows or technology.',
+  [isGuest]);
+  const keys = useMemo(() => storageKeys(userId), [userId]);
+  const initialChatState = useMemo(() => {
+    const stored = loadStoredState(userId);
+    const id = stored.currentId && stored.conversations[stored.currentId]
+      ? stored.currentId
+      : generateConversationId();
+    const initialConversations = stored.conversations[id]
+      ? stored.conversations
+      : { ...stored.conversations, [id]: createNewConversation(id, welcomeMessage) };
+    return { conversations: initialConversations, currentId: id };
+  }, [userId, welcomeMessage]);
 
-  // Conversation management states
-  const [conversations, setConversations] = useState<ConversationMap>(() => {
-    return loadSavedConversations();
-  });
-
-  const [currentConversationId, setCurrentConversationId] = useState<string>(() => {
-    const saved = localStorage.getItem('current_conversation_id');
-    if (saved && conversations[saved]) return saved;
-    return generateConversationId();
-  });
-
-  // Initialize current conversation if it doesn't exist
-  useEffect(() => {
-    if (!conversations[currentConversationId]) {
-      setConversations(prev => ({
-        ...prev,
-        [currentConversationId]: createNewConversation(currentConversationId, welcomeMessage),
-      }));
-    }
-  }, [currentConversationId, conversations, welcomeMessage]);
-
-  const defaultConversation = useMemo<Conversation>(() => ({
-    id: currentConversationId,
-    title: 'New Chat',
-    messages: [],
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  }), [currentConversationId]);
-
-  const currentConversation = useMemo(() =>
-    conversations[currentConversationId] || defaultConversation,
-    [conversations, currentConversationId, defaultConversation]
-  );
-
-  const [streamingMessage, setStreamingMessage] = useState<Message | null>(null);
+  const [conversations, setConversations] = useState<ConversationMap>(initialChatState.conversations);
+  const [currentConversationId, setCurrentConversationId] = useState(initialChatState.currentId);
+  const [streamingState, setStreamingState] = useState<{ conversationId: string; message: Message } | null>(null);
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [isListening, setIsListening] = useState(false);
-  const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] = useState(ENV.ENABLE_VOICE);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isSpeechRecognitionSupported] = useState(
+    () => ENV.ENABLE_VOICE && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
+  );
+  const [speechRecognition, setSpeechRecognition] = useState<SpeechRecognition | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [isMuted, setIsMuted] = useState<boolean>(() => {
     try {
-      return JSON.parse(localStorage.getItem('chat_mute') ?? 'true');
+      const stored: unknown = JSON.parse(localStorage.getItem('chat_mute') ?? 'true');
+      return typeof stored === 'boolean' ? stored : true;
     } catch {
       return true;
     }
   });
   const [showCaptcha, setShowCaptcha] = useState(false);
-  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [showExamples, setShowExamples] = useState(true);
+  const [usage, setUsage] = useState<UsageData | null>(null);
+  const [usageRefresh, setUsageRefresh] = useState(0);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const chatContainerRef = useRef<HTMLDivElement>(null);
   const textFieldRef = useRef<HTMLDivElement>(null);
+  const conversationsRef = useRef(conversations);
+  const currentConversationIdRef = useRef(currentConversationId);
+  const activeTurnRef = useRef<ActiveTurn | null>(null);
+  const pendingCaptchaRef = useRef<PendingCaptchaTurn | null>(null);
   const turnstileWidgetRef = useRef<string | null>(null);
   const inputRef = useRef(input);
+  const mutedRef = useRef(isMuted);
+  const keepListeningRef = useRef(false);
+  const dictationPrefixRef = useRef('');
+  const sendMessageRef = useRef<(content: string, options?: SendOptions) => Promise<void>>(async () => {});
 
+  const isLoading = activeRequestId !== null;
+  const inputBytes = byteLength(input);
+  const containerBg = theme.palette.background.paper;
+  const borderColor = theme.palette.divider;
+
+  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
+  useEffect(() => { currentConversationIdRef.current = currentConversationId; }, [currentConversationId]);
+  useEffect(() => { inputRef.current = input; }, [input]);
   useEffect(() => {
-    inputRef.current = input;
-  }, [input]);
+    mutedRef.current = isMuted;
+    AudioService.setMuted(isMuted || !ENV.ENABLE_VOICE);
+  }, [isMuted]);
 
-  const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const h = (e: MediaQueryListEvent) => setReduceMotion(e.matches);
-    mq.addEventListener('change', h);
-    return () => mq.removeEventListener('change', h);
-  }, []);
+  const defaultConversation = useMemo<Conversation>(() => ({
+    id: currentConversationId,
+    title: 'New Chat',
+    messages: [],
+    createdAt: 0,
+    updatedAt: 0,
+  }), [currentConversationId]);
+  const currentConversation = conversations[currentConversationId] || defaultConversation;
 
-  const streamingMessageRef = useRef(streamingMessage);
-  useEffect(() => {
-    streamingMessageRef.current = streamingMessage;
-  }, [streamingMessage]);
-
-  const containerBg = theme.palette.mode === 'light' ? '#fff' : '#343541';
-  const borderColor = theme.palette.mode === 'light' ? '#e5e7eb' : '#565869';
-
-  // Save conversations to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('chat_conversations', JSON.stringify(pruneConversations(conversations, currentConversationId)));
-      localStorage.setItem('current_conversation_id', currentConversationId);
+      localStorage.setItem(keys.conversations, JSON.stringify(pruneConversations(conversations, currentConversationId)));
+      localStorage.setItem(keys.current, currentConversationId);
     } catch (error) {
       if (error instanceof Error && error.name === 'QuotaExceededError') {
-        setErrorMessage('Storage quota exceeded. Your conversation may not persist across page reloads.');
+        queueMicrotask(() => setErrorMessage('Browser storage is full. New chat history will not persist after reload.'));
       } else {
-        console.error('Failed to save conversations to localStorage:', error);
+        console.warn('Failed to persist chat history:', error);
       }
     }
-  }, [conversations, currentConversationId]);
-
-  // Auto-resize textarea
-  const adjustTextareaHeight = useCallback(() => {
-    const textarea = textFieldRef.current?.querySelector('textarea');
-    if (textarea) {
-      textarea.style.height = 'auto';
-      const newHeight = Math.min(textarea.scrollHeight, 200);
-      textarea.style.height = `${newHeight}px`;
-    }
-  }, []);
+  }, [conversations, currentConversationId, keys]);
 
   useEffect(() => {
-    adjustTextareaHeight();
-  }, [input, adjustTextareaHeight]);
-
-  const scrollToBottom = useCallback(() => {
-    if (chatContainerRef.current) {
-      const container = chatContainerRef.current;
-      const scrollElement = container.querySelector('.chat-messages-container');
-      if (scrollElement) {
-        scrollElement.scrollTop = scrollElement.scrollHeight;
-      }
-    }
-  }, []);
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== keys.conversations || !event.newValue) return;
+      const remote = parseConversationMap(event.newValue);
+      setConversations(local => {
+        const merged = { ...local };
+        for (const [id, conversation] of Object.entries(remote)) {
+          if (!merged[id] || conversation.updatedAt > merged[id].updatedAt) merged[id] = conversation;
+        }
+        return pruneConversations(merged, currentConversationIdRef.current);
+      });
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [keys.conversations]);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [currentConversation.messages, streamingMessage, scrollToBottom]);
+    if (isGuest) return;
+    let cancelled = false;
+    ChatAPI.getUsage()
+      .then(value => { if (!cancelled) setUsage(value); })
+      .catch(() => { if (!cancelled) setUsage(null); });
+    return () => { cancelled = true; };
+  }, [isGuest, usageRefresh, userId]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handleChange = (event: MediaQueryListEvent) => setReduceMotion(event.matches);
+    media.addEventListener('change', handleChange);
+    return () => media.removeEventListener('change', handleChange);
+  }, []);
 
   const updateConversationById = useCallback((conversationId: string, update: ConversationUpdate) => {
-    setConversations(prev => {
-      const existing = prev[conversationId] || createNewConversation(conversationId, welcomeMessage);
-      const updates = typeof update === 'function' ? update(existing) : update;
-
+    setConversations(previous => {
+      const existing = previous[conversationId];
+      if (!existing) return previous;
+      const changes = typeof update === 'function' ? update(existing) : update;
       return pruneConversations({
-        ...prev,
-        [conversationId]: {
-          ...existing,
-          ...updates,
-          updatedAt: Date.now(),
-        }
+        ...previous,
+        [conversationId]: { ...existing, ...changes, updatedAt: Date.now() },
       }, conversationId);
     });
-  }, [welcomeMessage]);
-
-  const updateConversation = useCallback((updates: ConversationUpdate) => {
-    updateConversationById(currentConversationId, updates);
-  }, [currentConversationId, updateConversationById]);
+  }, []);
 
   const addMessage = useCallback((conversationId: string, message: Message) => {
     updateConversationById(conversationId, conversation => ({
-      messages: [...(conversation.messages || []), message],
+      messages: [...conversation.messages, message],
     }));
   }, [updateConversationById]);
 
-  const handleNewConversation = useCallback(() => {
-    const newId = generateConversationId();
-    setConversations(prev => pruneConversations({
-      ...prev,
-      [newId]: createNewConversation(newId, welcomeMessage),
-    }, newId));
-    setCurrentConversationId(newId);
-    setStreamingMessage(null);
-    setInput('');
-    setShowExamples(true);
-  }, [welcomeMessage]);
+  const updateMessage = useCallback((conversationId: string, id: string, update: Partial<Message>) => {
+    updateConversationById(conversationId, conversation => ({
+      messages: conversation.messages.map(message => message.id === id ? { ...message, ...update } : message),
+    }));
+  }, [updateConversationById]);
 
-  const handleDeleteConversation = useCallback((convId: string) => {
-    void ChatAPI.deleteConversation(convId).catch(error => {
-      console.error('Failed to delete server conversation:', error);
-    });
-    setConversations(prev => {
-      const newConvs = { ...prev };
-      delete newConvs[convId];
-      return newConvs;
-    });
-    if (convId === currentConversationId) {
-      handleNewConversation();
-    }
-  }, [currentConversationId, handleNewConversation]);
-
-  const handleSelectConversation = useCallback((convId: string) => {
-    setCurrentConversationId(convId);
-    setStreamingMessage(null);
-    setInput('');
-    setDrawerOpen(false);
-    setShowExamples(false);
+  const clearActiveTurn = useCallback((requestId: string) => {
+    if (activeTurnRef.current?.requestId !== requestId) return false;
+    activeTurnRef.current = null;
+    setActiveRequestId(null);
+    setStreamingState(null);
+    return true;
   }, []);
 
-  const playAudioResponse = useCallback(
-    async (text: string) => {
-      if (isMuted) return;
-      try {
-        await AudioService.playTTS(text);
-      } catch (error) {
-        console.error('Error playing TTS:', error);
-        setErrorMessage('Failed to play audio. Please try again later.');
-      }
-    },
-    [isMuted]
-  );
-
-  const handleStopGeneration = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      setIsLoading(false);
-      const currentStreaming = streamingMessageRef.current;
-      if (currentStreaming) {
-        addMessage(currentConversationId, {
-          ...currentStreaming,
-          content: sanitizeAndParse(currentStreaming.content + ' [Generation stopped]'),
-          rawContent: `${getMessageText(currentStreaming)} [Generation stopped]`,
-        });
-        setStreamingMessage(null);
-      }
-    }
-  }, [addMessage, currentConversationId]);
-
-  // Using API service - sendChatMessage is now handled by ChatAPI.sendMessage
-
-  const handleSendMessage = useCallback(async (
-    messageContent: string | null = null,
-    options: {
-      conversationId?: string;
-      resetConversation?: boolean;
-      history?: ChatMessageHistoryItem[];
-    } = {}
-  ) => {
-    const content = messageContent || input.trim();
-    if (!content) return;
-    const activeConversationId = options.conversationId || currentConversationId;
-    const activeConversation = conversations[activeConversationId] || currentConversation;
-
-    setIsLoading(true);
-    setErrorMessage('');
-    setShowExamples(false);
-
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
-
-    if (content.toLowerCase() === '/clear') {
-      setIsLoading(false);
-      void ChatAPI.clearConversation(activeConversationId).catch(error => {
-        console.error('Failed to clear server conversation:', error);
+  const abortActiveTurn = useCallback((persistPartial: boolean) => {
+    const turn = activeTurnRef.current;
+    if (!turn) return;
+    activeTurnRef.current = null;
+    turn.controller.abort();
+    if (persistPartial && turn.partialText.trim() && conversationsRef.current[turn.conversationId]) {
+      addMessage(turn.conversationId, {
+        id: messageId('_stopped'),
+        role: 'ai',
+        rawContent: `${turn.partialText.trimEnd()}\n\n_Generation stopped._`,
+        timestamp: Date.now(),
+        status: 'stopped',
+        annotations: turn.annotations,
       });
-      handleNewConversation();
+    }
+    setActiveRequestId(null);
+    setStreamingState(null);
+    AudioService.stop();
+  }, [addMessage]);
+
+  const cleanupTurnstileWidget = useCallback(() => {
+    const widgetId = turnstileWidgetRef.current;
+    if (widgetId && window.turnstile) {
+      try { window.turnstile.remove(widgetId); } catch { /* already removed */ }
+    }
+    turnstileWidgetRef.current = null;
+  }, []);
+
+  const cancelPendingCaptcha = useCallback((restoreFailedMessage: boolean) => {
+    const pending = pendingCaptchaRef.current;
+    pendingCaptchaRef.current = null;
+    cleanupTurnstileWidget();
+    setShowCaptcha(false);
+    if (restoreFailedMessage && pending && conversationsRef.current[pending.conversationId]) {
+      addMessage(pending.conversationId, { ...pending.userMessage, status: 'failed' });
+    }
+  }, [addMessage, cleanupTurnstileWidget]);
+
+  const stopListening = useCallback(() => {
+    keepListeningRef.current = false;
+    if (speechRecognition) {
+      try { speechRecognition.stop(); } catch { /* browser already stopped */ }
+    }
+    setIsListening(false);
+  }, [speechRecognition]);
+
+  const createAndSelectConversation = useCallback(() => {
+    const id = generateConversationId();
+    const conversation = createNewConversation(id, welcomeMessage);
+    setConversations(previous => pruneConversations({ ...previous, [id]: conversation }, id));
+    setCurrentConversationId(id);
+    setInput('');
+    setErrorMessage('');
+    setShowExamples(true);
+    setAutoFollow(true);
+  }, [welcomeMessage]);
+
+  const handleNewConversation = useCallback(() => {
+    stopListening();
+    abortActiveTurn(true);
+    cancelPendingCaptcha(true);
+    createAndSelectConversation();
+  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, stopListening]);
+
+  const handleSelectConversation = useCallback((conversationId: string) => {
+    if (conversationId === currentConversationIdRef.current) {
+      setDrawerOpen(false);
+      return;
+    }
+    stopListening();
+    abortActiveTurn(true);
+    cancelPendingCaptcha(true);
+    AudioService.stop();
+    setCurrentConversationId(conversationId);
+    setInput('');
+    setErrorMessage('');
+    setDrawerOpen(false);
+    setShowExamples(false);
+    setAutoFollow(true);
+  }, [abortActiveTurn, cancelPendingCaptcha, stopListening]);
+
+  const handleDeleteConversation = useCallback((conversationId: string) => {
+    if (activeTurnRef.current?.conversationId === conversationId) abortActiveTurn(false);
+    if (pendingCaptchaRef.current?.conversationId === conversationId) cancelPendingCaptcha(false);
+    void ChatAPI.deleteConversation(conversationId).catch(error => {
+      console.error('Failed to delete server conversation:', error);
+    });
+    setConversations(previous => {
+      const next = { ...previous };
+      delete next[conversationId];
+      return next;
+    });
+    if (conversationId === currentConversationIdRef.current) createAndSelectConversation();
+  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation]);
+
+  const getErrorText = useCallback((error: unknown): string => {
+    if (error instanceof IncompleteStreamError) return 'The response was interrupted before completion. You can retry it.';
+    if (error instanceof StreamProtocolError) return 'The server returned an invalid streaming response. Please retry.';
+    if (error instanceof APIError) {
+      if (error.status === 429 || error.status === 400 || error.status === 413) return error.message;
+      if (error.code === 'network_error') return 'Network error. Check your connection and retry.';
+      if (error.retryable) return 'The AI service is temporarily unavailable. Please retry.';
+    }
+    return 'Failed to send the message. Please retry.';
+  }, []);
+
+  const handleSendMessage = useCallback(async (messageContent: string | null = null, options: SendOptions = {}) => {
+    const content = (messageContent === null ? inputRef.current : messageContent).trim();
+    if (!content || activeTurnRef.current) return;
+    if (pendingCaptchaRef.current && !options.captchaToken) {
+      setErrorMessage('Complete the security check before sending another message.');
+      return;
+    }
+    const contentBytes = byteLength(content);
+    if (contentBytes > MAX_MESSAGE_BYTES) {
+      setErrorMessage(`Messages are limited to ${MAX_MESSAGE_BYTES} UTF-8 bytes (${contentBytes} currently).`);
       return;
     }
 
-    // Add user's message
-    const userMessage: Message = {
-      id: `msg_${Date.now()}`,
-      role: 'user',
-      content: sanitizeAndParse(content),
-      rawContent: content,
-      timestamp: Date.now(),
-    };
-    addMessage(activeConversationId, userMessage);
-    setInput('');
+    const conversationId = options.conversationId || currentConversationIdRef.current;
+    const existingConversation = conversationsRef.current[conversationId]
+      || createNewConversation(conversationId, welcomeMessage);
 
-    // Update conversation title if it's the first real message
-    if (activeConversation.messages.length === 1) {
-      const title = content.slice(0, 50) + (content.length > 50 ? '...' : '');
-      updateConversationById(activeConversationId, { title });
+    stopListening();
+    AudioService.stop();
+    setErrorMessage('');
+    setShowExamples(false);
+    setAutoFollow(true);
+
+    if (content.toLowerCase() === '/clear') {
+      void ChatAPI.clearConversation(conversationId).catch(error => console.error('Failed to clear conversation:', error));
+      createAndSelectConversation();
+      return;
     }
 
-    try {
-      const streamingMsg: Message = {
-        id: `msg_${Date.now()}_ai`,
-        role: 'ai',
-        content: '',
-        timestamp: Date.now(),
-      };
+    const userMessage: Message = {
+      id: messageId('_user'),
+      role: 'user',
+      rawContent: content,
+      timestamp: Date.now(),
+      status: 'complete',
+    };
+    setConversations(previous => {
+      const conversation = previous[conversationId] || existingConversation;
+      const isFirstQuestion = conversation.messages.length === 1;
+      return pruneConversations({
+        ...previous,
+        [conversationId]: {
+          ...conversation,
+          title: isFirstQuestion
+            ? `${content.slice(0, 50)}${content.length > 50 ? '…' : ''}`
+            : conversation.title,
+          messages: [...conversation.messages, userMessage],
+          updatedAt: Date.now(),
+        },
+      }, conversationId);
+    });
+    setInput('');
 
+    const requestId = messageId('_request');
+    const controller = new AbortController();
+    const turn: ActiveTurn = {
+      requestId,
+      conversationId,
+      controller,
+      userMessageId: userMessage.id,
+      partialText: '',
+      annotations: [],
+    };
+    activeTurnRef.current = turn;
+    setActiveRequestId(requestId);
+
+    try {
       const result = await ChatAPI.sendMessage(content, {
-        signal: abortController.signal,
-        captchaToken: captchaToken || undefined,
-        conversationId: activeConversationId,
+        signal: controller.signal,
+        captchaToken: options.captchaToken,
+        conversationId,
         resetConversation: options.resetConversation,
         history: options.history,
         onChunk: (partialText, annotations) => {
-          let formattedText = partialText;
-          if (annotations && annotations.length > 0) {
-            const citationText = annotations
-              .map((_ann, idx) => `[${idx + 1}]`)
-              .join(' ');
-            formattedText = `${partialText} ${citationText}`;
-          }
-          setStreamingMessage({ ...streamingMsg, content: formattedText, rawContent: partialText, annotations });
+          const active = activeTurnRef.current;
+          if (!active || active.requestId !== requestId) return;
+          active.partialText = partialText;
+          active.annotations = annotations;
+          setStreamingState({
+            conversationId,
+            message: {
+              id: `${requestId}_stream`,
+              role: 'ai',
+              rawContent: partialText || '▍',
+              timestamp: Date.now(),
+              status: 'sending',
+              annotations,
+            },
+          });
         },
       });
 
-      if (result && result.text) {
-        let finalContent = result.text;
+      if (activeTurnRef.current?.requestId !== requestId) return;
+      if (!result.text.trim()) {
+        throw new IncompleteStreamError('The completed stream contained no response text.');
+      }
+      addMessage(conversationId, {
+        id: messageId('_ai'),
+        role: 'ai',
+        rawContent: result.text,
+        timestamp: Date.now(),
+        status: 'complete',
+        annotations: result.annotations,
+      });
+      clearActiveTurn(requestId);
+      setUsageRefresh(value => value + 1);
+      if (ENV.ENABLE_VOICE && !mutedRef.current) {
+        void AudioService.playTTS(result.text).catch(error => console.error('TTS playback failed:', error));
+      }
+    } catch (error) {
+      const active = activeTurnRef.current;
+      if (!active || active.requestId !== requestId) return;
 
-        if (result.annotations && result.annotations.length > 0 && result.annotations[0].fileId) {
-          const citationList = result.annotations
-            .map((_ann, idx) => `<sup>[${idx + 1}]</sup>`)
-            .join(' ');
+      if (error instanceof CaptchaRequiredError) {
+        updateConversationById(conversationId, conversation => ({
+          messages: conversation.messages.filter(message => message.id !== userMessage.id),
+        }));
+        pendingCaptchaRef.current = {
+          conversationId,
+          content,
+          userMessage,
+          resetConversation: options.resetConversation,
+          history: options.history,
+        };
+        clearActiveTurn(requestId);
+        setInput(content);
+        setShowCaptcha(true);
+        setErrorMessage('Complete the security check to send your message.');
+        return;
+      }
 
-          const citationDetails = result.annotations
-            .map((ann, idx) => `<div><small>[${idx + 1}] ${ann.filename || 'Source'}</small></div>`)
-            .join('');
+      const partialText = error instanceof StreamCancelledError
+        || error instanceof IncompleteStreamError
+        || error instanceof StreamProtocolError
+        || error instanceof APIError
+        ? error.partialText
+        : active.partialText;
+      const annotations = error instanceof StreamCancelledError
+        || error instanceof IncompleteStreamError
+        || error instanceof StreamProtocolError
+        || error instanceof APIError
+        ? error.annotations
+        : active.annotations;
 
-          finalContent = `${result.text} ${citationList}<div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid ${borderColor};">${citationDetails}</div>`;
-        }
-
-        addMessage(activeConversationId, {
-          ...streamingMsg,
-          content: sanitizeAndParse(finalContent),
-          rawContent: result.text,
-          annotations: result.annotations,
+      if (partialText.trim()) {
+        addMessage(conversationId, {
+          id: messageId('_interrupted'),
+          role: 'ai',
+          rawContent: `${partialText.trimEnd()}\n\n_Response interrupted._`,
+          timestamp: Date.now(),
+          status: error instanceof StreamCancelledError ? 'stopped' : 'interrupted',
+          annotations,
         });
-        setStreamingMessage(null);
-        playAudioResponse(result.text);
-      } else {
-        setErrorMessage('No response received from server. Please try again.');
-        setStreamingMessage(null);
-        console.error('Empty result from sendChatMessage:', result);
+      } else if (!(error instanceof StreamCancelledError)) {
+        updateMessage(conversationId, userMessage.id, { status: 'failed' });
       }
-    } catch (error: any) {
-      if (error.name !== 'AbortError') {
-        if (error instanceof CaptchaRequiredError || error.message === 'CAPTCHA_REQUIRED') {
-          setShowCaptcha(true);
-          setErrorMessage('Please complete the captcha to continue.');
-          updateConversationById(activeConversationId, conversation => ({
-            messages: conversation.messages.filter(message => message.id !== userMessage.id),
-          }));
-          setInput(content);
-        } else {
-          const errorMsg = error.message || 'Unknown error';
-          console.error('Chat error:', error);
-
-          let userMessage = 'Failed to send message. Please try again.';
-          if (errorMsg.includes('Server error')) {
-            userMessage = `Server error: ${errorMsg}. Please try again later.`;
-          } else if (errorMsg.includes('No data received')) {
-            userMessage = 'No response from server. The server may be experiencing issues.';
-          } else if (errorMsg.includes('Network')) {
-            userMessage = 'Network error. Please check your connection.';
-          } else if (errorMsg.includes('ReadableStream')) {
-            userMessage = 'Your browser does not support streaming responses. Please try a modern browser.';
-          }
-
-          setErrorMessage(userMessage);
-          if (streamingMessageRef.current) {
-            setStreamingMessage(null);
-          }
-        }
-      }
-    } finally {
-      setIsLoading(false);
-      if (abortControllerRef.current === abortController) {
-        abortControllerRef.current = null;
+      clearActiveTurn(requestId);
+      if (!(error instanceof StreamCancelledError)) {
+        setErrorMessage(getErrorText(error));
+        setUsageRefresh(value => value + 1);
       }
     }
   }, [
-    input,
-    currentConversationId,
-    conversations,
-    currentConversation,
-    borderColor,
-    playAudioResponse,
-    captchaToken,
     addMessage,
+    clearActiveTurn,
+    createAndSelectConversation,
+    getErrorText,
+    stopListening,
     updateConversationById,
-    handleNewConversation
+    updateMessage,
+    welcomeMessage,
   ]);
 
-  const handleEditMessage = useCallback((messageId: string, newContent: string) => {
-    const messageIndex = currentConversation.messages.findIndex(m => m.id === messageId);
-    if (messageIndex >= 0) {
-      const newMessages = currentConversation.messages.slice(0, messageIndex);
-      const history = serializeConversationHistory(newMessages);
-      updateConversation({ messages: newMessages });
-      handleSendMessage(newContent, {
-        conversationId: currentConversationId,
-        resetConversation: true,
-        history,
-      });
-    }
-  }, [currentConversation, currentConversationId, updateConversation, handleSendMessage]);
-
-  const handleRegenerateMessage = useCallback(() => {
-    const lastUserIndex = currentConversation.messages.map(m => m.role).lastIndexOf('user');
-    const lastUserMessage = lastUserIndex >= 0 ? currentConversation.messages[lastUserIndex] : undefined;
-    if (lastUserMessage) {
-      const newMessages = currentConversation.messages.slice(0, lastUserIndex);
-      const history = serializeConversationHistory(newMessages);
-      updateConversation({ messages: newMessages });
-      const text = getMessageText(lastUserMessage);
-      handleSendMessage(text, {
-        conversationId: currentConversationId,
-        resetConversation: true,
-        history,
-      });
-    }
-  }, [currentConversation, currentConversationId, updateConversation, handleSendMessage]);
-
-  const [speechRecognition, setSpeechRecognition] = useState<SpeechRecognition | null>(null);
+  useEffect(() => { sendMessageRef.current = handleSendMessage; }, [handleSendMessage]);
 
   useEffect(() => {
-    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognitionCtor) {
-      const recognition = new SpeechRecognitionCtor();
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
+    if (!showCaptcha) return;
+    let cancelled = false;
+    void loadTurnstile().then(api => {
+      if (cancelled || !pendingCaptchaRef.current) return;
+      cleanupTurnstileWidget();
+      turnstileWidgetRef.current = api.render('#turnstile-container', {
+        sitekey: ENV.TURNSTILE_SITE_KEY,
+        callback: (token: string) => {
+          const pending = pendingCaptchaRef.current;
+          if (!pending) return;
+          const editedContent = inputRef.current.trim();
+          pendingCaptchaRef.current = null;
+          cleanupTurnstileWidget();
+          setShowCaptcha(false);
+          setErrorMessage('');
+          void sendMessageRef.current(editedContent || pending.content, {
+            conversationId: pending.conversationId,
+            resetConversation: pending.resetConversation,
+            history: pending.history,
+            captchaToken: token,
+          });
+        },
+        'expired-callback': () => {
+          setErrorMessage('The security check expired. Please complete it again.');
+          if (turnstileWidgetRef.current) api.reset(turnstileWidgetRef.current);
+        },
+        'error-callback': () => {
+          setErrorMessage('The security check failed to load. Please try again.');
+          if (turnstileWidgetRef.current) api.reset(turnstileWidgetRef.current);
+        },
+      });
+    }).catch(error => {
+      console.error('Turnstile load failed:', error);
+      if (!cancelled) {
+        setErrorMessage('The security check could not load. Please retry.');
+        cancelPendingCaptcha(true);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [cancelPendingCaptcha, cleanupTurnstileWidget, showCaptcha]);
 
-      recognition.onresult = (event: SpeechRecognitionEvent) => {
-        const transcript = Array.from(event.results)
-          .map((result) => result[0].transcript)
-          .join('');
-        setInput(transcript);
-      };
+  const handleEditMessage = useCallback((id: string, newContent: string) => {
+    if (activeTurnRef.current) return;
+    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    if (!conversation) return;
+    const index = conversation.messages.findIndex(message => message.id === id);
+    if (index < 0) return;
+    const before = conversation.messages.slice(0, index);
+    updateConversationById(conversation.id, { messages: before });
+    void handleSendMessage(newContent, {
+      conversationId: conversation.id,
+      resetConversation: true,
+      history: serializeConversationHistory(before),
+    });
+  }, [handleSendMessage, updateConversationById]);
 
-      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-        console.error('Speech recognition error:', event.error);
-        setIsListening(false);
-      };
+  const handleRegenerateMessage = useCallback(() => {
+    if (activeTurnRef.current) return;
+    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    if (!conversation) return;
+    const lastUserIndex = conversation.messages.map(message => message.role).lastIndexOf('user');
+    if (lastUserIndex < 0) return;
+    const userMessage = conversation.messages[lastUserIndex];
+    const before = conversation.messages.slice(0, lastUserIndex);
+    updateConversationById(conversation.id, { messages: before });
+    void handleSendMessage(userMessage.rawContent, {
+      conversationId: conversation.id,
+      resetConversation: true,
+      history: serializeConversationHistory(before),
+    });
+  }, [handleSendMessage, updateConversationById]);
 
-      recognition.onend = () => setIsListening(false);
+  const handleRetryMessage = useCallback((id: string) => {
+    if (activeTurnRef.current) return;
+    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    if (!conversation) return;
+    const index = conversation.messages.findIndex(message => message.id === id && message.role === 'user');
+    if (index < 0) return;
+    const failedMessage = conversation.messages[index];
+    const before = conversation.messages.slice(0, index);
+    updateConversationById(conversation.id, { messages: before });
+    void handleSendMessage(failedMessage.rawContent, {
+      conversationId: conversation.id,
+      resetConversation: true,
+      history: serializeConversationHistory(before),
+    });
+  }, [handleSendMessage, updateConversationById]);
 
-      setSpeechRecognition(recognition);
-    } else {
-      setIsSpeechRecognitionSupported(false);
-    }
+  useEffect(() => {
+    if (!ENV.ENABLE_VOICE) return;
+    const Constructor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Constructor) return;
+    const recognition = new Constructor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.onresult = event => {
+      const transcript = Array.from(event.results).map(result => result[0].transcript).join('');
+      const prefix = dictationPrefixRef.current;
+      setInput(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
+    };
+    recognition.onerror = event => {
+      console.error('Speech recognition error:', event.error);
+      keepListeningRef.current = false;
+      setIsListening(false);
+      setErrorMessage(`Voice input stopped: ${event.error}.`);
+    };
+    recognition.onend = () => {
+      if (keepListeningRef.current && !activeTurnRef.current) {
+        try { recognition.start(); return; } catch { keepListeningRef.current = false; }
+      }
+      setIsListening(false);
+    };
+    setSpeechRecognition(recognition);
+    return () => {
+      keepListeningRef.current = false;
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      try { recognition.stop(); } catch { /* already stopped */ }
+    };
   }, []);
 
   const handleStartListening = useCallback(() => {
-    if (speechRecognition) {
-      speechRecognition.start();
-      setIsListening(true);
-    }
-  }, [speechRecognition]);
-
-  const handleStopListening = useCallback(() => {
-    if (speechRecognition) {
-      speechRecognition.stop();
+    if (!speechRecognition || activeTurnRef.current) return;
+    dictationPrefixRef.current = inputRef.current.trim();
+    keepListeningRef.current = true;
+    setIsListening(true);
+    try { speechRecognition.start(); } catch (error) {
+      console.error('Speech recognition failed to start:', error);
+      keepListeningRef.current = false;
       setIsListening(false);
     }
   }, [speechRecognition]);
 
   const toggleMute = useCallback(() => {
-    setIsMuted(prev => {
-      const next = !prev;
-      try {
-        localStorage.setItem('chat_mute', JSON.stringify(next));
-      } catch { /* ignore persistence failures */ }
+    setIsMuted(previous => {
+      const next = !previous;
+      try { localStorage.setItem('chat_mute', JSON.stringify(next)); } catch { /* optional */ }
+      AudioService.setMuted(next || !ENV.ENABLE_VOICE);
       return next;
     });
   }, []);
 
-  // Load Turnstile script
-  useEffect(() => {
-    const existing = document.querySelector('script[src*="turnstile"]');
-    if (existing) return;
-    const script = document.createElement('script');
-    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-    script.async = true;
-    document.body.appendChild(script);
-    return () => {
-      if (document.body.contains(script)) document.body.removeChild(script);
-    };
+  const handleScroll = useCallback(() => {
+    const element = messagesContainerRef.current;
+    if (!element) return;
+    setAutoFollow(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
   }, []);
 
-  // Handle Turnstile
+  const scrollToLatest = useCallback(() => {
+    setAutoFollow(true);
+    messagesEndRef.current?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth' });
+  }, [reduceMotion]);
+
   useEffect(() => {
-    if (showCaptcha && window.turnstile) {
-      if (turnstileWidgetRef.current) {
-        window.turnstile.reset(turnstileWidgetRef.current);
-        return;
-      }
+    if (!autoFollow) return;
+    const frame = requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ block: 'end' }));
+    return () => cancelAnimationFrame(frame);
+  }, [autoFollow, currentConversation.messages, streamingState]);
 
-      turnstileWidgetRef.current = window.turnstile.render('#turnstile-container', {
-        sitekey: ENV.TURNSTILE_SITE_KEY,
-        callback: async (token: string) => {
-          try {
-            const result = await ChatAPI.verifyCaptcha(token);
-            if (result.success) {
-              setCaptchaToken(token);
-              setShowCaptcha(false);
-              turnstileWidgetRef.current = null;
-              setErrorMessage('');
-              if (inputRef.current) {
-                handleSendMessage(inputRef.current);
-              }
-            } else {
-              setErrorMessage('Captcha verification failed. Please try again.');
-            }
-          } catch {
-            setErrorMessage('Failed to verify captcha. Please try again.');
-          }
-        },
-      });
-    }
-  }, [showCaptcha, input, handleSendMessage]);
+  useEffect(() => () => {
+    const active = activeTurnRef.current;
+    activeTurnRef.current = null;
+    active?.controller.abort();
+    cleanupTurnstileWidget();
+    AudioService.stop();
+  }, [cleanupTurnstileWidget]);
 
-  // Sort conversations by most recent
-  const sortedConversations = useMemo(() => {
-    return Object.values(conversations)
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [conversations]);
-
+  const sortedConversations = useMemo(
+    () => Object.values(conversations).sort((a, b) => b.updatedAt - a.updatedAt),
+    [conversations]
+  );
   const lastUserMessageId = useMemo(() => {
-    for (let i = currentConversation.messages.length - 1; i >= 0; i--) {
-      if (currentConversation.messages[i].role === 'user') return currentConversation.messages[i].id;
+    for (let index = currentConversation.messages.length - 1; index >= 0; index -= 1) {
+      if (currentConversation.messages[index].role === 'user') return currentConversation.messages[index].id;
     }
     return undefined;
   }, [currentConversation.messages]);
-
-  const streamingDisplayMsg = useMemo(() => streamingMessage
-    ? { ...streamingMessage, content: sanitizeAndParse(streamingMessage.content || '▍') }
-    : null,
-    [streamingMessage]
-  );
+  const visibleStreamingMessage = streamingState?.conversationId === currentConversationId
+    ? streamingState.message
+    : null;
+  const usageVisible = !isGuest && !!usage?.logged_in && !usage.unavailable;
+  const usageTierLabel = usage?.tier === 'premium'
+    ? 'Premium Supporter'
+    : usage?.tier === 'unlimited' ? 'Staff' : 'Free';
+  const usageText = usage?.unlimited
+    ? `${usage.used ?? 0} today`
+    : `${usage?.used ?? 0} / ${usage?.limit ?? 0} today`;
+  const usageTooltip = `AI messages today · ${usageTierLabel}`;
 
   return (
-    <Box
-      id="react-chat-container"
-      ref={chatContainerRef}
-      sx={{
-        display: 'flex',
-        height: '100vh',
-        backgroundColor: containerBg,
-      }}
-    >
+    <Box id="react-chat-container" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
       <ConversationSidebar
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -650,123 +855,121 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         onNewConversation={handleNewConversation}
       />
 
-      {/* Main Chat Area */}
-      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        {/* Header */}
-        <Box
-          sx={{
-            borderBottom: `1px solid ${borderColor}`,
-            p: 2,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 2,
-          }}
-        >
-          <IconButton onClick={() => setDrawerOpen(true)}>
-            <MenuIcon />
-          </IconButton>
-          <Typography variant="h6" sx={{ flex: 1 }}>
-            {currentConversation.title}
-          </Typography>
-          <Button
-            size="small"
-            startIcon={<AddIcon />}
-            onClick={handleNewConversation}
-          >
-            New Chat
-          </Button>
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: 2, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0 }}>
+          <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
+          <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="h6" sx={{ lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {currentConversation.title}
+            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+              <Box sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: 'success.main' }} />
+              <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>{ASSISTANT_NAME} · online</Typography>
+            </Box>
+          </Box>
+          {usageVisible && (
+            <Tooltip title={usageTooltip}>
+              <Box sx={{ px: 1, py: 0.25, borderRadius: 1, border: `1px solid ${borderColor}`, display: { xs: 'none', sm: 'block' }, flexShrink: 0 }}>
+                <Typography sx={{ fontSize: 12, color: 'text.secondary', whiteSpace: 'nowrap' }}>{usageText}</Typography>
+              </Box>
+            </Tooltip>
+          )}
+          <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={handleNewConversation}>New chat</Button>
         </Box>
 
-        {/* Messages Area */}
         <Box
+          ref={messagesContainerRef}
           className="chat-messages-container"
-          role="log"
-          aria-live="polite"
+          onScroll={handleScroll}
           aria-label="Chat messages"
-          sx={{
-            flex: 1,
-            overflowY: 'auto',
-            overflowX: 'hidden',
-          }}
+          sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
         >
-          {currentConversation.messages.map((msg, index) => (
-            <MessageComponent
-              key={msg.id}
-              msg={msg}
-              userAvatar={userAvatar}
-              userName={userName}
-              onEdit={handleEditMessage}
-              onRegenerate={handleRegenerateMessage}
-              isLastMessage={index === currentConversation.messages.length - 1}
-              isLastUserMessage={msg.id === lastUserMessageId}
-              isStreaming={false}
-            />
-          ))}
+          <Box role="log" aria-live="polite" aria-relevant="additions">
+            {currentConversation.messages.map((message, index) => (
+              <MessageComponent
+                key={message.id}
+                msg={message}
+                userAvatar={userAvatar}
+                userName={userName}
+                onEdit={handleEditMessage}
+                onRegenerate={handleRegenerateMessage}
+                onRetry={handleRetryMessage}
+                isLastMessage={index === currentConversation.messages.length - 1 && Boolean(lastUserMessageId)}
+                isLastUserMessage={message.id === lastUserMessageId}
+                isStreaming={false}
+                isBusy={isLoading}
+              />
+            ))}
+          </Box>
 
-          {streamingDisplayMsg && (
-            <MessageComponent
-              msg={streamingDisplayMsg}
-              userAvatar={userAvatar}
-              userName={userName}
-              onEdit={noopEdit}
-              onRegenerate={noopRegenerate}
-              isLastMessage={true}
-              isStreaming={true}
-            />
+          {visibleStreamingMessage && (
+            <Box aria-live="off">
+              <MessageComponent
+                msg={visibleStreamingMessage}
+                userAvatar={userAvatar}
+                userName={userName}
+                onEdit={noopEdit}
+                onRegenerate={noopRegenerate}
+                onRetry={noopRetry}
+                isLastMessage
+                isStreaming
+                isBusy
+              />
+            </Box>
           )}
 
-          {isLoading && !streamingMessage && (
-            <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }}>
+          {isLoading && !visibleStreamingMessage && (
+            <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }} aria-label="Waiting for assistant response">
               <CircularProgress size={24} />
             </Box>
           )}
 
           {errorMessage && (
-            <Box sx={{ p: 3, textAlign: 'center' }}>
+            <Box role="status" sx={{ px: 3, py: 1.5, textAlign: 'center' }}>
               <Typography color="error">{errorMessage}</Typography>
             </Box>
           )}
 
           {showCaptcha && (
             <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }}>
-              <div id="turnstile-container"></div>
+              <div id="turnstile-container" aria-label="Security check" />
             </Box>
           )}
 
-          {/* Example Prompts */}
           {showExamples && currentConversation.messages.length === 1 && !isLoading && (
-            <Fade in={true} timeout={reduceMotion ? 0 : undefined}>
-              <Box sx={{ p: 4 }}>
-                <Stack spacing={2} sx={{ alignItems: 'center' }}>
-                  <Typography variant="subtitle1" sx={{ opacity: 0.7 }}>
-                    <LightbulbIcon sx={{ fontSize: 'inherit', verticalAlign: 'middle', mr: 0.5 }} /> Try asking:
-                  </Typography>
-                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', justifyContent: 'center' }}>
-                    {EXAMPLE_PROMPTS.map((prompt, idx) => (
-                      <Chip
-                        key={idx}
-                        label={prompt}
-                        clickable
-                        onClick={() => handleSendMessage(prompt)}
-                        sx={{
-                          cursor: 'pointer',
-                          mb: 1,
-                          '&:hover': {
-                            backgroundColor: theme.palette.mode === 'light' ? '#e5e7eb' : '#4b4f60',
-                          }
-                        }}
-                      />
-                    ))}
-                  </Stack>
-                </Stack>
+            <Fade in timeout={reduceMotion ? 0 : undefined}>
+              <Box sx={{ maxWidth: '52rem', mx: 'auto', px: { xs: 2, sm: 3, md: 4 }, pb: 3 }}>
+                <Typography sx={{ display: 'flex', alignItems: 'center', gap: 0.75, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'text.secondary', mb: 1.5 }}>
+                  <LightbulbIcon sx={{ fontSize: 16 }} /> Try asking
+                </Typography>
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.5 }}>
+                  {EXAMPLE_PROMPTS.map(prompt => (
+                    <Box
+                      key={prompt}
+                      component="button"
+                      onClick={() => { void handleSendMessage(prompt); }}
+                      sx={{ textAlign: 'left', cursor: 'pointer', font: 'inherit', display: 'flex', alignItems: 'center', gap: 1.25, p: 1.5, border: t => `1px solid ${t.palette.divider}`, borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary', transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s', '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' } }}
+                    >
+                      <Box sx={{ width: 32, height: 32, borderRadius: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'rgba(15,108,189,0.1)', color: 'primary.main' }}>
+                        <LightbulbIcon sx={{ fontSize: 16 }} />
+                      </Box>
+                      <Typography sx={{ fontSize: 14, fontWeight: 500 }}>{prompt}</Typography>
+                    </Box>
+                  ))}
+                </Box>
               </Box>
             </Fade>
           )}
 
+          {!autoFollow && (
+            <Button className="jump-to-latest" size="small" variant="contained" onClick={scrollToLatest}>
+              Jump to latest
+            </Button>
+          )}
           <div ref={messagesEndRef} />
         </Box>
 
-        {/* Input Area */}
         <InputArea
           input={input}
           setInput={setInput}
@@ -774,10 +977,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           isListening={isListening}
           isSpeechRecognitionSupported={isSpeechRecognitionSupported}
           isMuted={isMuted}
-          onSend={() => handleSendMessage()}
-          onStop={handleStopGeneration}
+          voiceEnabled={ENV.ENABLE_VOICE}
+          inputBytes={inputBytes}
+          maxMessageBytes={MAX_MESSAGE_BYTES}
+          onSend={() => { void handleSendMessage(); }}
+          onStop={() => abortActiveTurn(true)}
           onStartListening={handleStartListening}
-          onStopListening={handleStopListening}
+          onStopListening={stopListening}
           onToggleMute={toggleMute}
           textFieldRef={textFieldRef}
         />
@@ -785,3 +991,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     </Box>
   );
 };
+
+interface SendOptions {
+  conversationId?: string;
+  resetConversation?: boolean;
+  history?: ChatMessageHistoryItem[];
+  captchaToken?: string;
+}

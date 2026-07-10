@@ -1,0 +1,222 @@
+import '@testing-library/jest-dom/vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { createRef } from 'react';
+
+const apiMocks = vi.hoisted(() => ({
+  sendMessage: vi.fn(),
+  getUsage: vi.fn(),
+  clearConversation: vi.fn(),
+  deleteConversation: vi.fn(),
+  playTTS: vi.fn(),
+  stopAudio: vi.fn(),
+  setMuted: vi.fn(),
+}));
+
+vi.mock('../services/api', async importOriginal => {
+  const actual = await importOriginal<typeof import('../services/api')>();
+  return {
+    ...actual,
+    ChatAPI: {
+      ...actual.ChatAPI,
+      sendMessage: apiMocks.sendMessage,
+      getUsage: apiMocks.getUsage,
+      clearConversation: apiMocks.clearConversation,
+      deleteConversation: apiMocks.deleteConversation,
+    },
+    AudioService: {
+      playTTS: apiMocks.playTTS,
+      stop: apiMocks.stopAudio,
+      setMuted: apiMocks.setMuted,
+    },
+  };
+});
+
+import { CaptchaRequiredError, StreamCancelledError } from '../services/api';
+import { ChatWindow } from '../components/ChatWindow';
+import { InputArea } from '../components/InputArea';
+import { Message } from '../components/Message';
+
+const theme = createTheme();
+const renderThemed = (node: React.ReactNode) => render(<ThemeProvider theme={theme}>{node}</ThemeProvider>);
+
+beforeAll(() => {
+  const values = new Map<string, string>();
+  const storage: Storage = {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: key => values.get(key) ?? null,
+    key: index => [...values.keys()][index] ?? null,
+    removeItem: key => { values.delete(key); },
+    setItem: (key, value) => { values.set(key, String(value)); },
+  };
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
+
+beforeEach(() => {
+  window.localStorage.clear();
+  apiMocks.sendMessage.mockReset();
+  apiMocks.getUsage.mockReset().mockResolvedValue({ logged_in: true, used: 1, limit: 10 });
+  apiMocks.clearConversation.mockReset().mockResolvedValue({ success: true });
+  apiMocks.deleteConversation.mockReset().mockResolvedValue({ success: true });
+  apiMocks.playTTS.mockReset().mockResolvedValue(undefined);
+  apiMocks.stopAudio.mockReset();
+  apiMocks.setMuted.mockReset();
+  delete window.turnstile;
+});
+
+afterEach(() => cleanup());
+
+describe('ChatWindow state ownership', () => {
+  it('discards legacy global history and persists under the resolved identity', async () => {
+    window.localStorage.setItem('chat_conversations', JSON.stringify({ leaked: { title: 'Account A secret' } }));
+    window.localStorage.setItem('current_conversation_id', 'leaked');
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    expect(await screen.findByText(/Welcome to WindowsForum\.com/)).toBeInTheDocument();
+    expect(screen.queryByText('Account A secret')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('chat_conversations')).toBeNull();
+    expect(window.localStorage.getItem('current_conversation_id')).toBeNull();
+    await waitFor(() => expect(window.localStorage.getItem('chat_conversations:v2:42')).not.toBeNull());
+  });
+
+  it('commits an aborted partial response exactly once and never speaks it', async () => {
+    apiMocks.sendMessage.mockImplementation((_message: string, options: {
+      signal: AbortSignal;
+      onChunk?: (text: string, annotations: []) => void;
+    }) => new Promise((_resolve, reject) => {
+      options.onChunk?.('Partial answer', []);
+      options.signal.addEventListener('abort', () => {
+        reject(new StreamCancelledError('cancelled', 'Partial answer'));
+      }, { once: true });
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const composer = await screen.findByRole('textbox');
+    fireEvent.change(composer, { target: { value: 'How do I fix this?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('Partial answer')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Stop generation'));
+
+    await waitFor(() => expect(screen.getAllByText(/Generation stopped/)).toHaveLength(1));
+    expect(screen.getAllByText(/Partial answer/)).toHaveLength(1);
+    expect(apiMocks.playTTS).not.toHaveBeenCalled();
+  });
+
+  it('binds a Turnstile token to the pending turn and submits it only once', async () => {
+    let turnstileConfig: Record<string, unknown> | undefined;
+    window.turnstile = {
+      render: vi.fn((_selector, config) => {
+        turnstileConfig = config;
+        return 'widget-1';
+      }),
+      reset: vi.fn(),
+      remove: vi.fn(),
+    };
+    apiMocks.sendMessage
+      .mockRejectedValueOnce(new CaptchaRequiredError())
+      .mockResolvedValueOnce({ text: 'Verified reply', annotations: [] });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_abc" />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Guest question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => expect(window.turnstile?.render).toHaveBeenCalledTimes(1));
+    const callback = turnstileConfig?.callback;
+    expect(typeof callback).toBe('function');
+    await act(async () => {
+      (callback as (token: string) => void)('fresh-token');
+    });
+
+    await waitFor(() => expect(apiMocks.sendMessage).toHaveBeenCalledTimes(2));
+    expect(apiMocks.sendMessage.mock.calls[1][1]).toMatchObject({
+      captchaToken: 'fresh-token',
+      conversationId: expect.stringMatching(/^conv_/),
+    });
+    expect(await screen.findByText('Verified reply')).toBeInTheDocument();
+    expect(screen.getAllByText('Guest question').filter(element => element.tagName === 'P')).toHaveLength(1);
+  });
+});
+
+describe('composer and message integrity', () => {
+  it('does not submit Enter while an IME composition is active and enforces the byte limit', () => {
+    const onSend = vi.fn();
+    const commonProps = {
+      setInput: vi.fn(),
+      isLoading: false,
+      isListening: false,
+      isSpeechRecognitionSupported: false,
+      isMuted: true,
+      voiceEnabled: false,
+      onSend,
+      onStop: vi.fn(),
+      onStartListening: vi.fn(),
+      onStopListening: vi.fn(),
+      onToggleMute: vi.fn(),
+      textFieldRef: createRef<HTMLDivElement>(),
+      maxMessageBytes: 500,
+    };
+    const { rerender } = renderThemed(<InputArea {...commonProps} input="日本語" inputBytes={9} />);
+    fireEvent.keyDown(screen.getByRole('textbox'), {
+      key: 'Enter',
+      shiftKey: false,
+      isComposing: true,
+    });
+    expect(onSend).not.toHaveBeenCalled();
+
+    rerender(
+      <ThemeProvider theme={theme}>
+        <InputArea {...commonProps} input={'é'.repeat(251)} inputBytes={502} />
+      </ThemeProvider>
+    );
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    expect(screen.getByText('502 / 500 bytes')).toBeInTheDocument();
+  });
+
+  it('opens the editor with the original Markdown rather than flattened rendered text', () => {
+    const onEdit = vi.fn();
+    renderThemed(
+      <Message
+        msg={{
+          id: 'user-1',
+          role: 'user',
+          rawContent: '**bold** [example](https://example.com)',
+          timestamp: Date.now(),
+          status: 'complete',
+        }}
+        userAvatar="/avatar.webp"
+        userName="Member"
+        onEdit={onEdit}
+        onRegenerate={vi.fn()}
+        onRetry={vi.fn()}
+        isLastMessage={false}
+        isLastUserMessage
+        isStreaming={false}
+      />
+    );
+
+    fireEvent.click(screen.getByLabelText('Edit message'));
+    expect(screen.getByRole('textbox')).toHaveValue('**bold** [example](https://example.com)');
+  });
+});

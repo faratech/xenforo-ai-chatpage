@@ -3,9 +3,10 @@
 export interface Message {
   id: string;
   role: 'user' | 'ai';
-  content: string;
-  rawContent?: string;
+  /** Raw Markdown/plain text. Rendered HTML is derived at the display boundary. */
+  rawContent: string;
   timestamp: number;
+  status?: 'complete' | 'sending' | 'stopped' | 'interrupted' | 'failed';
   annotations?: Annotation[];
 }
 
@@ -70,7 +71,20 @@ export interface SSEEvent {
 export interface UserData {
   avatar?: string;
   name?: string;
-  user_id?: string;
+  user_id?: string | number;
+}
+
+export interface UsageData {
+  logged_in?: boolean;
+  unavailable?: boolean;
+  tier?: string;
+  used?: number;
+  limit?: number | null;
+  remaining?: number | null;
+  unlimited?: boolean;
+  tokens_today?: number;
+  reset_at?: string;
+  premium_daily_allowance?: number;
 }
 
 export interface MessageProps {
@@ -79,9 +93,11 @@ export interface MessageProps {
   userName: string;
   onEdit: (messageId: string, newContent: string) => void;
   onRegenerate: () => void;
+  onRetry: (messageId: string) => void;
   isLastMessage: boolean;
   isLastUserMessage?: boolean;
   isStreaming: boolean;
+  isBusy?: boolean;
   onFeedback?: (messageId: string, type: 'up' | 'down') => void;
 }
 
@@ -102,6 +118,9 @@ export interface InputAreaProps {
   isListening: boolean;
   isSpeechRecognitionSupported: boolean;
   isMuted: boolean;
+  voiceEnabled: boolean;
+  inputBytes: number;
+  maxMessageBytes: number;
   onSend: () => void;
   onStop: () => void;
   onStartListening: () => void;
@@ -113,5 +132,5 @@ export interface InputAreaProps {
 export interface ChatWindowProps {
   userAvatar: string;
   userName: string;
-  userId: string | null;
+  userId: string;
 }

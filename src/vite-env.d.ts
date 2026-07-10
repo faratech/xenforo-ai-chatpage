@@ -8,6 +8,7 @@ declare global {
   interface SpeechRecognitionErrorEvent extends Event { readonly error: string }
   interface SpeechRecognition extends EventTarget {
     interimResults: boolean;
+    continuous: boolean;
     lang: string;
     onresult: ((event: SpeechRecognitionEvent) => void) | null;
     onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
@@ -22,6 +23,7 @@ declare global {
     turnstile?: {
       render: (selector: string, config: Record<string, unknown>) => string;
       reset: (widgetId: string) => void;
+      remove: (widgetId: string) => void;
     };
   }
 }

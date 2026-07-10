@@ -7,12 +7,21 @@ export const ENV = {
   // Domain Configuration
   DOMAIN: import.meta.env.VITE_DOMAIN || 'https://windowsforum.com',
   TEST_DOMAIN: import.meta.env.VITE_TEST_DOMAIN || 'https://test.windowsforum.com',
+  API_BASE: (import.meta.env.VITE_API_BASE || '').replace(/\/$/, ''),
 
   // Get the appropriate domain based on hostname
   getCurrentDomain: (): string => {
     return window.location.hostname === 'test.windowsforum.com'
       ? ENV.TEST_DOMAIN
       : ENV.DOMAIN;
+  },
+
+  // Local development uses Vite's same-origin proxy. Production/test default
+  // to their detected origin unless an explicit API base is configured.
+  getApiBase: (): string => {
+    if (ENV.API_BASE) return ENV.API_BASE;
+    if (import.meta.env.DEV && ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)) return '';
+    return ENV.getCurrentDomain();
   },
 
   // Cloudflare Turnstile
@@ -31,21 +40,3 @@ export const ENV = {
     TURNSTILE_VERIFY: '/chat.php',
   },
 } as const;
-
-// Validate required environment variables
-const requiredVars = ['VITE_DOMAIN'];
-const missingVars = requiredVars.filter(
-  varName => !import.meta.env[varName]
-);
-
-if (missingVars.length > 0) {
-  if (import.meta.env.PROD) {
-    throw new Error(
-      `Critical configuration error: Missing required environment variables: ${missingVars.join(', ')}.`
-    );
-  } else {
-    console.warn(
-      `Missing environment variables: ${missingVars.join(', ')}. Using defaults.`
-    );
-  }
-}
