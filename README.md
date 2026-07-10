@@ -16,7 +16,7 @@ Open [http://localhost:5173](http://localhost:5173) to view it in your browser.
 - `npm run dev` - Start the Vite development server at http://localhost:5173
 - `npm run build` - Build for production to the `dist/` directory
 - `npm run preview` - Preview the production build locally
-- `npm run typecheck` - Type-check the project with `tsc --noEmit`
+- `npm run typecheck` - Type-check with the native TypeScript 7 compiler (`typescript-native` alias)
 - `npm run check` - Run lint, typecheck, tests, build, and release verification
 - `npm run deploy` - Run all checks and atomically activate a production release
 - `./deploy.sh rollback` - Restore the previously activated release

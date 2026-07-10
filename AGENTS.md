@@ -16,6 +16,7 @@ The app is served through `/web/public_html/chatpage`, which points to matching 
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
+- **TypeScript layout**: `typescript-native` (aliased `typescript@7`, the native Go compiler) does `npm run typecheck`; the root `typescript@6` package exists only as the JS compiler API that `typescript-eslint` requires (its peer range caps at `<6.1.0`).
 - **Build Output**: `dist/` directory
 - **Base Path**: `/chatpage/` (configured in `vite.config.ts`)
 - **Environment**: Variables in `.env` must be prefixed with `VITE_`

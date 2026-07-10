@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run dev` - Start Vite development server at http://localhost:5173
 - `npm run build` - Production build (`vite build` → `dist/`, stable entries and hashed chunks/media)
 - `npm run preview` - Preview the production build locally
-- `npm run typecheck` - Type-check without emitting (`tsc --noEmit`)
+- `npm run typecheck` - Type-check without emitting (native TypeScript 7 via the `typescript-native` alias)
 - `npm run check` - Run lint, typecheck, tests, build, and release verification
 - `npm run deploy` - Build, validate, stage, and atomically activate a production release
 - `./deploy.sh rollback` - Atomically restore the previous production release
@@ -18,6 +18,7 @@ The app is served through the `/web/public_html/chatpage` symlink at `https://wi
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
+- **TypeScript layout**: `typescript-native` (aliased `typescript@7`, the native Go compiler) does `npm run typecheck`; the root `typescript@6` package exists only as the JS compiler API that `typescript-eslint` requires (its peer range caps at `<6.1.0`). Upgrade the root package only when typescript-eslint supports TS 7.
 - **Build Output**: `dist/` directory (stable `main.js`/`main.css`, content-hashed chunks/media)
 - **Base Path**: `/chatpage` (configured in `vite.config.ts` `base` field)
 - **Environment**: Variables in `.env` must be prefixed with `VITE_`
