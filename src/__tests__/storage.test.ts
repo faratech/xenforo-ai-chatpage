@@ -1,0 +1,247 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatStoreV3, Conversation } from '../types';
+import {
+  applyTombstones,
+  emptyStore,
+  enforceConversationCap,
+  loadStore,
+  mergeStores,
+  parseStore,
+  saveStore,
+  storageKeys,
+} from '../services/storage';
+
+interface FakeStorage extends Storage {
+  /** When set, setItem for this key throws QuotaExceededError this many times. */
+  failWrites: (key: string, times: number) => void;
+}
+
+const installFakeStorage = (): FakeStorage => {
+  const values = new Map<string, string>();
+  let failKey: string | null = null;
+  let failCount = 0;
+  const storage: FakeStorage = {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: key => values.get(key) ?? null,
+    key: index => [...values.keys()][index] ?? null,
+    removeItem: key => { values.delete(key); },
+    setItem: (key, value) => {
+      if (key === failKey && failCount > 0) {
+        failCount -= 1;
+        const error = new DOMException('quota exceeded', 'QuotaExceededError');
+        throw error;
+      }
+      values.set(key, String(value));
+    },
+    failWrites: (key, times) => { failKey = key; failCount = times; },
+  };
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+  return storage;
+};
+
+const conversation = (id: string, updatedAt: number, overrides: Partial<Conversation> = {}): Conversation => ({
+  id,
+  title: `Conversation ${id}`,
+  messages: [{
+    id: `msg_${id}`,
+    role: 'user',
+    rawContent: `content ${id}`,
+    timestamp: updatedAt,
+    status: 'complete',
+  }],
+  createdAt: updatedAt,
+  updatedAt,
+  ...overrides,
+});
+
+let storage: FakeStorage;
+
+beforeEach(() => {
+  storage = installFakeStorage();
+  vi.restoreAllMocks();
+});
+
+describe('v2 → v3 migration', () => {
+  it('migrates the per-user v2 map into a v3 envelope exactly once', () => {
+    const keys = storageKeys('42');
+    const legacy = {
+      conv_1: {
+        ...conversation('conv_1', 1_000),
+        messages: [{
+          id: 'm1',
+          role: 'ai',
+          rawContent: 'hello',
+          timestamp: 1_000,
+          // Legacy file-only annotation shape must migrate to the union.
+          annotations: [{ index: 0, filename: 'guide.pdf', fileId: 'file_9' }],
+        }],
+      },
+    };
+    storage.setItem(keys.legacyConversations, JSON.stringify(legacy));
+    storage.setItem(keys.legacyCurrent, 'conv_1');
+
+    const loaded = loadStore('42');
+    expect(loaded.unavailable).toBe(false);
+    expect(loaded.currentId).toBe('conv_1');
+    expect(loaded.store.conversations.conv_1.messages[0].annotations).toEqual([
+      { type: 'file_citation', filename: 'guide.pdf', fileId: 'file_9' },
+    ]);
+    // Legacy keys are gone and a v3 envelope exists.
+    expect(storage.getItem(keys.legacyConversations)).toBeNull();
+    expect(storage.getItem(keys.legacyCurrent)).toBeNull();
+    expect(parseStore(storage.getItem(keys.store))?.version).toBe(3);
+  });
+
+  it('drops unscoped pre-v2 keys that cannot be assigned to a user', () => {
+    storage.setItem('chat_conversations', '{"leaked": {}}');
+    storage.setItem('current_conversation_id', 'leaked');
+    loadStore('42');
+    expect(storage.getItem('chat_conversations')).toBeNull();
+    expect(storage.getItem('current_conversation_id')).toBeNull();
+  });
+
+  it('rejects dangerous and malformed store content', () => {
+    expect(parseStore('{"version":3,"conversations":{"__proto__":{}}}')?.conversations).toEqual({});
+    expect(parseStore('{"version":2,"conversations":{}}')).toBeNull();
+    expect(parseStore('not json')).toBeNull();
+    expect(parseStore(null)).toBeNull();
+  });
+});
+
+describe('tombstones', () => {
+  it('always removes tombstoned conversations, regardless of timestamps', () => {
+    const store: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: { conv_1: conversation('conv_1', 5_000), conv_2: conversation('conv_2', 1_000) },
+      tombstones: { conv_1: 2_000 },
+    };
+    expect(Object.keys(applyTombstones(store).conversations)).toEqual(['conv_2']);
+  });
+
+  it('merges cross-tab stores: tombstones union, newest conversation wins', () => {
+    const local: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: {
+        conv_a: conversation('conv_a', 2_000, { title: 'local newer' }),
+        conv_b: conversation('conv_b', 1_000),
+      },
+      tombstones: { conv_x: 500 },
+    };
+    const remote: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: {
+        conv_a: conversation('conv_a', 1_500, { title: 'remote older' }),
+        conv_c: conversation('conv_c', 3_000),
+      },
+      tombstones: { conv_b: 4_000, conv_x: 900 },
+    };
+
+    const merged = mergeStores(local, remote);
+    expect(merged.conversations.conv_a.title).toBe('local newer');
+    expect(merged.conversations.conv_c).toBeDefined();
+    // conv_b was deleted in the other tab: the deletion propagates.
+    expect(merged.conversations.conv_b).toBeUndefined();
+    expect(merged.tombstones).toEqual({ conv_x: 900, conv_b: 4_000 });
+  });
+});
+
+describe('conversation cap', () => {
+  it('enforces the configured cap exactly and always keeps the current conversation', () => {
+    const map: Record<string, Conversation> = {};
+    for (let index = 0; index < 55; index += 1) {
+      map[`conv_${index}`] = conversation(`conv_${index}`, index);
+    }
+    // conv_0 is the oldest; make it current — it must survive anyway.
+    const capped = enforceConversationCap(map, 'conv_0');
+    expect(Object.keys(capped)).toHaveLength(50);
+    expect(capped.conv_0).toBeDefined();
+    // The newest 49 others survive; conv_1 .. conv_5 (oldest) do not.
+    expect(capped.conv_5).toBeUndefined();
+    expect(capped.conv_54).toBeDefined();
+  });
+});
+
+describe('quota pressure', () => {
+  it('evicts the oldest non-current conversations until the write fits', () => {
+    const keys = storageKeys('42');
+    const store: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: {
+        conv_old: conversation('conv_old', 1_000),
+        conv_mid: conversation('conv_mid', 2_000),
+        conv_new: conversation('conv_new', 3_000),
+        conv_current: conversation('conv_current', 500),
+      },
+    };
+    storage.failWrites(keys.store, 2);
+
+    const result = saveStore('42', store, 'conv_current');
+    expect(result.persisted).toBe(true);
+    // Oldest non-current first; the current conversation is never evicted
+    // even though it is the oldest overall.
+    expect(result.evictedIds).toEqual(['conv_old', 'conv_mid']);
+    const persisted = parseStore(storage.getItem(keys.store));
+    expect(Object.keys(persisted?.conversations ?? {}).sort()).toEqual(['conv_current', 'conv_new']);
+  });
+
+  it('reports failure when nothing evictable remains', () => {
+    const keys = storageKeys('42');
+    const store: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: { conv_current: conversation('conv_current', 500) },
+    };
+    storage.failWrites(keys.store, 99);
+
+    const result = saveStore('42', store, 'conv_current');
+    expect(result.persisted).toBe(false);
+    expect(result.evictedIds).toEqual([]);
+  });
+
+  it('continues without persistence when localStorage is unavailable', () => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get() { throw new Error('denied'); },
+    });
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() { throw new Error('denied'); },
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const loaded = loadStore('42');
+    expect(loaded.unavailable).toBe(true);
+    expect(loaded.store.conversations).toEqual({});
+  });
+});
+
+describe('pending server deletions', () => {
+  it('round-trips pending deletions through the envelope', () => {
+    const store: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: { conv_current: conversation('conv_current', 1_000) },
+      tombstones: { conv_gone: Date.now() },
+      pendingServerDeletions: { conv_gone: Date.now() },
+    };
+    saveStore('42', store, 'conv_current');
+
+    const reloaded = loadStore('42');
+    expect(Object.keys(reloaded.store.pendingServerDeletions)).toEqual(['conv_gone']);
+    expect(Object.keys(reloaded.store.tombstones)).toEqual(['conv_gone']);
+  });
+
+  it('garbage-collects expired tombstones at save time', () => {
+    const keys = storageKeys('42');
+    const expired = Date.now() - 31 * 24 * 60 * 60 * 1000;
+    const store: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: { conv_current: conversation('conv_current', 1_000) },
+      tombstones: { conv_ancient: expired, conv_recent: Date.now() },
+    };
+    saveStore('42', store, 'conv_current');
+
+    const persisted = parseStore(storage.getItem(keys.store));
+    expect(Object.keys(persisted?.tombstones ?? {})).toEqual(['conv_recent']);
+  });
+});

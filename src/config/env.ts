@@ -9,6 +9,10 @@ export const ENV = {
   TEST_DOMAIN: import.meta.env.VITE_TEST_DOMAIN || 'https://test.windowsforum.com',
   API_BASE: (import.meta.env.VITE_API_BASE || '').replace(/\/$/, ''),
 
+  // Origin that serves the built /chatpage assets in every environment.
+  // Test-domain embeds must not request local assets that only production hosts.
+  ASSET_ORIGIN: (import.meta.env.VITE_ASSET_ORIGIN || import.meta.env.VITE_DOMAIN || 'https://windowsforum.com').replace(/\/$/, ''),
+
   // Get the appropriate domain based on hostname
   getCurrentDomain: (): string => {
     return window.location.hostname === 'test.windowsforum.com'
@@ -29,7 +33,6 @@ export const ENV = {
 
   // Feature flags
   ENABLE_VOICE: import.meta.env.VITE_ENABLE_VOICE !== 'false',
-  ENABLE_FEEDBACK: import.meta.env.VITE_ENABLE_FEEDBACK !== 'false',
   MAX_CONVERSATIONS: Number.parseInt(import.meta.env.VITE_MAX_CONVERSATIONS || '50', 10),
 
   // API Endpoints

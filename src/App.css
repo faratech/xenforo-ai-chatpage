@@ -1,8 +1,11 @@
 /* WindowsForum.com — "Ask the AI" chat styling
-   Fluent-adjacent design system. Dark mode is keyed to [data-wf-theme="dark"]
-   (set in index.tsx) so CSS tokens track MUI's resolved palette exactly. */
+   Fluent-adjacent design system. Every rule is scoped under
+   #react-chat-container (the ScopedCssBaseline wrapper): the embed must
+   never restyle the surrounding XenForo page. Dark mode is keyed to
+   #react-chat-container[data-wf-theme='dark'] (set in index.tsx) so CSS
+   tokens track MUI's resolved palette exactly. */
 
-:root {
+#react-chat-container {
   --wf-primary: #0f6cbd;
   --wf-primary-hover: #0c5aa0;
   --wf-accent: #115ea3;
@@ -23,7 +26,7 @@
   --wf-mono: Consolas, 'Lucida Console', ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
 }
 
-[data-wf-theme='dark'] {
+#react-chat-container[data-wf-theme='dark'] {
   --wf-primary: #75b6e7;
   --wf-primary-hover: #8ac7f0;
   --wf-page: #1f2021;
@@ -36,9 +39,14 @@
   --wf-code-border: #383a3a;
 }
 
-* { box-sizing: border-box; }
+#react-chat-container,
+#react-chat-container *,
+#react-chat-container *::before,
+#react-chat-container *::after {
+  box-sizing: border-box;
+}
 
-body {
+#react-chat-container {
   margin: 0;
   padding: 0;
   font-family: var(--wf-font);
@@ -49,32 +57,43 @@ body {
 }
 
 /* ===== Rich message content (rendered via dangerouslySetInnerHTML) ===== */
-.message-content {
+#react-chat-container .message-content {
   line-height: 1.6;
   word-wrap: break-word;
   font-size: 15px;
 }
 
-.message-content h1, .message-content h2, .message-content h3,
-.message-content h4, .message-content h5, .message-content h6 {
+/* Streaming responses render as escaped plain text until completion. */
+#react-chat-container .wf-streaming-plain {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+#react-chat-container .message-content h1,
+#react-chat-container .message-content h2,
+#react-chat-container .message-content h3,
+#react-chat-container .message-content h4,
+#react-chat-container .message-content h5,
+#react-chat-container .message-content h6 {
   margin-top: 1.4em;
   margin-bottom: 0.5em;
   font-weight: 700;
   line-height: 1.25;
 }
-.message-content h1 { font-size: 1.4em; }
-.message-content h2 { font-size: 1.25em; }
-.message-content h3 { font-size: 1.1em; }
+#react-chat-container .message-content h1 { font-size: 1.4em; }
+#react-chat-container .message-content h2 { font-size: 1.25em; }
+#react-chat-container .message-content h3 { font-size: 1.1em; }
 
-.message-content p { margin: 0.7em 0; }
-.message-content p:first-child { margin-top: 0; }
-.message-content p:last-child { margin-bottom: 0; }
+#react-chat-container .message-content p { margin: 0.7em 0; }
+#react-chat-container .message-content p:first-child { margin-top: 0; }
+#react-chat-container .message-content p:last-child { margin-bottom: 0; }
 
-.message-content ul, .message-content ol { margin: 0.6em 0; padding-left: 1.5em; }
-.message-content li { margin: 0.25em 0; }
+#react-chat-container .message-content ul,
+#react-chat-container .message-content ol { margin: 0.6em 0; padding-left: 1.5em; }
+#react-chat-container .message-content li { margin: 0.25em 0; }
 
 /* Code */
-.message-content pre {
+#react-chat-container .message-content pre {
   background-color: var(--wf-code-bg);
   border: 1px solid var(--wf-code-border);
   border-radius: 6px;
@@ -84,14 +103,14 @@ body {
   font-size: 13px;
   line-height: 1.5;
 }
-.message-content code {
+#react-chat-container .message-content code {
   background-color: rgba(15, 108, 189, 0.1);
   padding: 0.15em 0.4em;
   border-radius: 3px;
   font-family: var(--wf-mono);
   font-size: 88%;
 }
-.message-content pre code {
+#react-chat-container .message-content pre code {
   background-color: transparent;
   padding: 0;
   border-radius: 0;
@@ -99,24 +118,27 @@ body {
 }
 
 /* Links */
-.message-content a {
+#react-chat-container .message-content a,
+#react-chat-container .message-file-sources a {
   color: var(--wf-primary);
   text-decoration: none;
   font-weight: 500;
   transition: color 0.1s;
 }
-.message-content a:hover { text-decoration: underline; color: var(--wf-accent); }
+#react-chat-container .message-content a:hover,
+#react-chat-container .message-file-sources a:hover { text-decoration: underline; color: var(--wf-accent); }
 
 /* Tables */
-.message-content table { border-collapse: collapse; margin: 1em 0; width: 100%; }
-.message-content table th, .message-content table td {
+#react-chat-container .message-content table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+#react-chat-container .message-content table th,
+#react-chat-container .message-content table td {
   border: 1px solid var(--wf-border);
   padding: 8px 12px;
 }
-.message-content table th { background-color: var(--wf-alt); font-weight: 700; }
+#react-chat-container .message-content table th { background-color: var(--wf-alt); font-weight: 700; }
 
 /* Blockquotes — brand left accent (the one accepted colored left-border use) */
-.message-content blockquote {
+#react-chat-container .message-content blockquote {
   margin: 0.8em 0;
   padding: 6px 14px;
   border-left: 3px solid var(--wf-primary);
@@ -125,11 +147,11 @@ body {
   border-radius: 0 6px 6px 0;
 }
 
-.message-content hr { margin: 1.3em 0; border: 0; border-top: 1px solid var(--wf-border); }
+#react-chat-container .message-content hr { margin: 1.3em 0; border: 0; border-top: 1px solid var(--wf-border); }
 
 /* Inline images — AI screenshots / animated console demos (emitted as <img> by the
    assistant; DOMPurify keeps the tag). Cap width so they fit the message bubble. */
-.message-content img {
+#react-chat-container .message-content img {
   max-width: 100%;
   height: auto;
   border-radius: 8px;
@@ -139,28 +161,28 @@ body {
 }
 
 /* The "Sources:" footer that sanitizeAndParse appends */
-.message-content sup { color: var(--wf-primary); font-weight: 700; }
+#react-chat-container .message-content sup { color: var(--wf-primary); font-weight: 700; }
 
 /* User bubbles render on brand blue — force readable link/code colors */
-.wf-user-bubble .message-content,
-.wf-user-bubble .message-content p { color: #fff; }
-.wf-user-bubble .message-content a { color: #fff; text-decoration: underline; }
-.wf-user-bubble .message-content code { background: rgba(255, 255, 255, 0.18); color: #fff; }
+#react-chat-container .wf-user-bubble .message-content,
+#react-chat-container .wf-user-bubble .message-content p { color: #fff; }
+#react-chat-container .wf-user-bubble .message-content a { color: #fff; text-decoration: underline; }
+#react-chat-container .wf-user-bubble .message-content code { background: rgba(255, 255, 255, 0.18); color: #fff; }
 
 /* ===== Scrollbars ===== */
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
+#react-chat-container ::-webkit-scrollbar { width: 10px; height: 10px; }
+#react-chat-container ::-webkit-scrollbar-track { background: transparent; }
+#react-chat-container ::-webkit-scrollbar-thumb {
   background-color: var(--wf-border);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background-color: var(--wf-muted); background-clip: padding-box; }
+#react-chat-container ::-webkit-scrollbar-thumb:hover { background-color: var(--wf-muted); background-clip: padding-box; }
 
-.chat-messages-container { scroll-behavior: smooth; }
+#react-chat-container .chat-messages-container { scroll-behavior: smooth; }
 
-.jump-to-latest {
+#react-chat-container .jump-to-latest {
   position: sticky !important;
   left: 50%;
   bottom: 12px;
@@ -168,17 +190,17 @@ body {
   z-index: 2;
 }
 
-.MuiButton-root:focus-visible,
-.MuiIconButton-root:focus-visible,
-.message-actions button:focus-visible,
-.delete-btn:focus-visible {
+#react-chat-container .MuiButton-root:focus-visible,
+#react-chat-container .MuiIconButton-root:focus-visible,
+#react-chat-container .message-actions button:focus-visible,
+#react-chat-container .delete-btn:focus-visible {
   outline: 3px solid var(--wf-primary);
   outline-offset: 2px;
 }
 
 /* ===== Streaming cursor + typing dots ===== */
 @keyframes wfBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
-.streaming-cursor {
+#react-chat-container .streaming-cursor {
   display: inline-block;
   width: 7px;
   height: 1.05em;
@@ -192,29 +214,34 @@ body {
   0%, 70%, 100% { transform: translateY(0); opacity: 0.45; }
   35% { transform: translateY(-4px); opacity: 1; }
 }
-.wf-typing { display: inline-flex; gap: 5px; align-items: center; padding: 4px 2px; }
-.wf-typing span {
+#react-chat-container .wf-typing { display: inline-flex; gap: 5px; align-items: center; padding: 4px 2px; }
+#react-chat-container .wf-typing span {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--wf-muted); display: inline-block;
   animation: wfDot 1.3s infinite ease-in-out;
 }
-.wf-typing span:nth-child(2) { animation-delay: 0.18s; }
-.wf-typing span:nth-child(3) { animation-delay: 0.36s; }
+#react-chat-container .wf-typing span:nth-child(2) { animation-delay: 0.18s; }
+#react-chat-container .wf-typing span:nth-child(3) { animation-delay: 0.36s; }
 
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
-  .message-content { font-size: 14px; }
+  #react-chat-container .message-content { font-size: 14px; }
 }
 
 /* ===== Print ===== */
 @media print {
-  .MuiDrawer-root, .message-actions, .wf-input-area { display: none !important; }
-  .message-content { page-break-inside: avoid; }
+  #react-chat-container .MuiDrawer-root,
+  #react-chat-container .message-actions,
+  #react-chat-container .wf-input-area { display: none !important; }
+  #react-chat-container .message-content { page-break-inside: avoid; }
 }
 
 /* ===== Reduced motion ===== */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  #react-chat-container,
+  #react-chat-container *,
+  #react-chat-container *::before,
+  #react-chat-container *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
@@ -223,4 +250,4 @@ body {
 }
 
 /* Turnstile container */
-#turnstile-container { display: inline-block; margin: 8px auto; }
+#react-chat-container #turnstile-container { display: inline-block; margin: 8px auto; }

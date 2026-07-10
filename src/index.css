@@ -1,5 +1,7 @@
-/* index.css */
-body {
+/* index.css — base typography, scoped to the chat wrapper so the
+   surrounding XenForo page is never restyled by this embed. */
+
+#react-chat-container {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
@@ -8,6 +10,6 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-code {
+#react-chat-container code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
 }

@@ -10,11 +10,41 @@ export interface Message {
   annotations?: Annotation[];
 }
 
-export interface Annotation {
-  index: number;
+/**
+ * Discriminated citation union covering every annotation shape the
+ * Responses API emits. URL citations carry a validated link; file-backed
+ * citations carry file/container identifiers and a display filename.
+ */
+export interface UrlCitation {
+  type: 'url_citation';
+  url: string;
+  title?: string;
+}
+
+export interface FileCitation {
+  type: 'file_citation';
   filename?: string;
   fileId?: string;
 }
+
+export interface ContainerFileCitation {
+  type: 'container_file_citation';
+  containerId?: string;
+  fileId?: string;
+  filename?: string;
+}
+
+export interface FilePathCitation {
+  type: 'file_path';
+  fileId?: string;
+  filename?: string;
+}
+
+export type Annotation =
+  | UrlCitation
+  | FileCitation
+  | ContainerFileCitation
+  | FilePathCitation;
 
 export interface Conversation {
   id: string;
@@ -22,10 +52,27 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  /**
+   * Set when a turn was stopped or interrupted, so the server-side
+   * conversation state may be missing the tail of the local transcript.
+   * The next turn sends reset_conversation + full history to resync,
+   * then clears the marker on success.
+   */
+  needsServerResync?: boolean;
 }
 
 export interface ConversationMap {
   [id: string]: Conversation;
+}
+
+/** Versioned per-user localStorage envelope. */
+export interface ChatStoreV3 {
+  version: 3;
+  conversations: ConversationMap;
+  /** conversationId → deletion timestamp (ms). Wins over any older conversation copy. */
+  tombstones: Record<string, number>;
+  /** conversationId → first-attempt timestamp (ms) for server deletions not yet confirmed. */
+  pendingServerDeletions: Record<string, number>;
 }
 
 export interface StreamingResponse {
@@ -47,8 +94,14 @@ export interface ErrorResponse {
 
 export interface SSEAnnotation {
   type?: string;
+  url?: string;
+  title?: string;
   filename?: string;
   file_id?: string;
+  container_id?: string;
+  index?: number;
+  start_index?: number;
+  end_index?: number;
 }
 
 export interface SSEEvent {
@@ -98,7 +151,6 @@ export interface MessageProps {
   isLastUserMessage?: boolean;
   isStreaming: boolean;
   isBusy?: boolean;
-  onFeedback?: (messageId: string, type: 'up' | 'down') => void;
 }
 
 export interface ConversationSidebarProps {

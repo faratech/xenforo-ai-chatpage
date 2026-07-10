@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   APIError,
-  AudioService,
   ChatAPI,
   IncompleteStreamError,
   StreamCancelledError,
@@ -32,8 +31,6 @@ function streamResponse(chunks: string[]): Response {
 }
 
 afterEach(() => {
-  AudioService.setMuted(false);
-  AudioService.stop();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -139,7 +136,7 @@ describe('ChatAPI streaming protocol', () => {
   });
 });
 
-describe('TTS lifecycle', () => {
+describe('TTS request validation', () => {
   it('rejects successful non-audio responses', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
@@ -153,52 +150,5 @@ describe('TTS lifecycle', () => {
       name: 'APIError',
       code: 'invalid_tts_content_type',
     });
-  });
-
-  it('aborts stale synthesis and revokes the current object URL on stop', async () => {
-    let firstSignal: AbortSignal | undefined;
-    let resolveSecond: ((blob: Blob) => void) | undefined;
-    const requestSpy = vi.spyOn(ChatAPI, 'requestTTS').mockImplementation((text, options) => {
-      if (text === 'first') {
-        firstSignal = options?.signal;
-        return new Promise((_resolve, reject) => {
-          options?.signal?.addEventListener('abort', () => {
-            const error = new Error('aborted');
-            error.name = 'AbortError';
-            reject(error);
-          }, { once: true });
-        });
-      }
-
-      return new Promise(resolve => {
-        resolveSecond = resolve;
-      });
-    });
-
-    const pause = vi.fn();
-    const play = vi.fn().mockResolvedValue(undefined);
-    class MockAudio extends EventTarget {
-      pause = pause;
-      play = play;
-      removeAttribute = vi.fn();
-    }
-    vi.stubGlobal('Audio', MockAudio);
-    const createObjectURL = vi.fn().mockReturnValue('blob:test-audio');
-    const revokeObjectURL = vi.fn();
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
-
-    const first = AudioService.playTTS('first');
-    await vi.waitFor(() => expect(firstSignal).toBeDefined());
-    const second = AudioService.playTTS('second');
-    expect(firstSignal?.aborted).toBe(true);
-
-    resolveSecond?.(new Blob(['audio'], { type: 'audio/ogg' }));
-    await Promise.all([first, second]);
-    expect(requestSpy).toHaveBeenCalledTimes(2);
-    expect(play).toHaveBeenCalledOnce();
-
-    AudioService.stop();
-    expect(pause).toHaveBeenCalledOnce();
-    expect(revokeObjectURL).toHaveBeenCalledOnce();
   });
 });

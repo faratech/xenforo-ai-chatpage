@@ -67,7 +67,7 @@ const escapeHtml = (value: string): string => value
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
 
-const parseHttpUrl = (value: string): URL | null => {
+export const parseHttpUrl = (value: string): URL | null => {
   try {
     const url = new URL(value);
     if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
@@ -210,12 +210,3 @@ export const EXAMPLE_PROMPTS = [
   "How can I secure my Windows computer?",
   "What are the essential Windows keyboard shortcuts?",
 ];
-
-/**
- * Extracts plain text from HTML content
- */
-export const extractTextFromHTML = (html: string): string => {
-  const tempDiv = document.createElement('div');
-  tempDiv.innerHTML = html;
-  return tempDiv.textContent || tempDiv.innerText || '';
-};

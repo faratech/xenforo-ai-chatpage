@@ -13,16 +13,68 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import EditIcon from '@mui/icons-material/Edit';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
-import ThumbUpIcon from '@mui/icons-material/ThumbUp';
-import ThumbDownIcon from '@mui/icons-material/ThumbDown';
-import type { MessageProps } from '../types';
-import { sanitizeAndParse } from '../utils/helpers';
+import type { Annotation, MessageProps } from '../types';
+import { parseHttpUrl, sanitizeAndParse } from '../utils/helpers';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
+
+const citationLabel = (annotation: Annotation): string => {
+  switch (annotation.type) {
+    case 'url_citation': {
+      if (annotation.title) return annotation.title;
+      const url = parseHttpUrl(annotation.url);
+      return url ? url.hostname : annotation.url;
+    }
+    case 'file_citation':
+      return annotation.filename || annotation.fileId || 'Source';
+    case 'container_file_citation':
+      return annotation.filename || annotation.fileId || annotation.containerId || 'Source';
+    case 'file_path':
+      return annotation.filename || annotation.fileId || 'Source';
+  }
+};
+
+const citationReactKey = (annotation: Annotation, index: number): string => {
+  switch (annotation.type) {
+    case 'url_citation':
+      return `url_${annotation.url}_${index}`;
+    case 'file_citation':
+      return `file_${annotation.fileId || annotation.filename || ''}_${index}`;
+    case 'container_file_citation':
+      return `container_${annotation.containerId || ''}_${annotation.fileId || ''}_${index}`;
+    case 'file_path':
+      return `path_${annotation.fileId || ''}_${index}`;
+  }
+};
+
+const SourcesList = ({ annotations }: { annotations: Annotation[] }) => (
+  <Box className="message-file-sources" sx={{ mt: 1.25, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
+    <Typography component="div" sx={{ fontSize: 12, color: 'text.secondary', mb: 0.5 }}>Sources</Typography>
+    {annotations.map((annotation, index) => {
+      // Only validated http(s) URLs become links; everything else is text.
+      const safeUrl = annotation.type === 'url_citation' ? parseHttpUrl(annotation.url) : null;
+      return (
+        <Typography key={citationReactKey(annotation, index)} component="div" sx={{ fontSize: 12 }}>
+          [{index + 1}]{' '}
+          {safeUrl ? (
+            <a href={safeUrl.href} target="_blank" rel="noopener noreferrer">
+              {citationLabel(annotation)}
+            </a>
+          ) : (
+            citationLabel(annotation)
+          )}
+        </Typography>
+      );
+    })}
+  </Box>
+);
 
 /**
  * Message Component — WindowsForum "Ask the AI" bubble layout.
  * User messages are right-aligned brand-blue bubbles; assistant messages are
  * left-aligned cards with the bot avatar, name + AI badge, and hover actions.
+ *
+ * While a response streams, content renders as escaped plain text; Markdown
+ * parsing and sanitization run exactly once, when the message completes.
  */
 export const Message = memo<MessageProps>(({
   msg,
@@ -35,16 +87,17 @@ export const Message = memo<MessageProps>(({
   isLastUserMessage,
   isStreaming,
   isBusy = false,
-  onFeedback,
 }) => {
   const theme = useTheme();
   const isUser = msg.role === 'user';
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
 
-  const renderedContent = useMemo(() => sanitizeAndParse(msg.rawContent), [msg.rawContent]);
+  const renderedContent = useMemo(
+    () => (isStreaming ? '' : sanitizeAndParse(msg.rawContent)),
+    [msg.rawContent, isStreaming]
+  );
 
   const handleCopy = useCallback(async () => {
     try {
@@ -67,22 +120,22 @@ export const Message = memo<MessageProps>(({
     }
   }, [isEditing, editText, msg.id, msg.rawContent, onEdit]);
 
-  const handleFeedback = useCallback((type: 'up' | 'down') => {
-    setFeedback(type);
-    if (onFeedback) onFeedback(msg.id, type);
-  }, [msg.id, onFeedback]);
-
   const time = msg.timestamp
     ? new Date(msg.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
     : '';
 
-  const isThinking = isStreaming && msg.rawContent.trim() === '▍';
+  const isThinking = isStreaming && !msg.rawContent.trim();
 
   const contentBlock = isThinking ? (
     <Box className="wf-typing" aria-label="Assistant is typing">
       <Box component="span" />
       <Box component="span" />
       <Box component="span" />
+    </Box>
+  ) : isStreaming ? (
+    <Box className="message-content wf-streaming-plain">
+      {msg.rawContent}
+      <Box component="span" className="streaming-cursor" aria-hidden="true" />
     </Box>
   ) : (
     <Box
@@ -132,31 +185,6 @@ export const Message = memo<MessageProps>(({
             <RefreshIcon fontSize="small" />
           </IconButton>
         </Tooltip>
-      )}
-
-      {!isUser && onFeedback && (
-        <>
-          <Tooltip title="Good response">
-            <IconButton
-              size="small"
-              onClick={() => handleFeedback('up')}
-              aria-label="Good response"
-              sx={{ color: feedback === 'up' ? 'primary.main' : 'inherit' }}
-            >
-              <ThumbUpIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Bad response">
-            <IconButton
-              size="small"
-              onClick={() => handleFeedback('down')}
-              aria-label="Bad response"
-              sx={{ color: feedback === 'down' ? 'error.main' : 'inherit' }}
-            >
-              <ThumbDownIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </>
       )}
     </Stack>
   );
@@ -289,15 +317,8 @@ export const Message = memo<MessageProps>(({
                   }}
                 >
                   {contentBlock}
-                  {!!msg.annotations?.length && (
-                    <Box className="message-file-sources" sx={{ mt: 1.25, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
-                      <Typography component="div" sx={{ fontSize: 12, color: 'text.secondary', mb: 0.5 }}>Sources</Typography>
-                      {msg.annotations.map((annotation, index) => (
-                        <Typography key={`${annotation.fileId || annotation.filename || 'source'}_${index}`} component="div" sx={{ fontSize: 12 }}>
-                          [{index + 1}] {annotation.filename || 'Source'}
-                        </Typography>
-                      ))}
-                    </Box>
+                  {!!msg.annotations?.length && !isStreaming && (
+                    <SourcesList annotations={msg.annotations} />
                   )}
                 </Box>
               )}

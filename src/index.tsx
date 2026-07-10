@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import CssBaseline from '@mui/material/CssBaseline';
+import ScopedCssBaseline from '@mui/material/ScopedCssBaseline';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import './index.css';
 import App from './App';
@@ -81,14 +81,18 @@ const ThemedApp = () => {
     };
   }, []);
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-wf-theme', mode);
-  }, [mode]);
-
   return (
     <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <App />
+      {/* All baseline resets, theme tokens, and chat styling live on this
+          wrapper — never on <html>/<body> — so the surrounding XenForo
+          page is unaffected by the embed. */}
+      <ScopedCssBaseline
+        id="react-chat-container"
+        data-wf-theme={mode}
+        sx={{ backgroundColor: 'background.default', color: 'text.primary' }}
+      >
+        <App />
+      </ScopedCssBaseline>
     </ThemeProvider>
   );
 };

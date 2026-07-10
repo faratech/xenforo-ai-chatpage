@@ -25,13 +25,16 @@ vi.mock('../services/api', async importOriginal => {
       clearConversation: apiMocks.clearConversation,
       deleteConversation: apiMocks.deleteConversation,
     },
-    AudioService: {
-      playTTS: apiMocks.playTTS,
-      stop: apiMocks.stopAudio,
-      setMuted: apiMocks.setMuted,
-    },
   };
 });
+
+vi.mock('../services/speech', () => ({
+  AudioService: {
+    playTTS: apiMocks.playTTS,
+    stop: apiMocks.stopAudio,
+    setMuted: apiMocks.setMuted,
+  },
+}));
 
 import { CaptchaRequiredError, StreamCancelledError } from '../services/api';
 import { ChatWindow } from '../components/ChatWindow';
@@ -97,7 +100,7 @@ describe('ChatWindow state ownership', () => {
     expect(screen.queryByText('Account A secret')).not.toBeInTheDocument();
     expect(window.localStorage.getItem('chat_conversations')).toBeNull();
     expect(window.localStorage.getItem('current_conversation_id')).toBeNull();
-    await waitFor(() => expect(window.localStorage.getItem('chat_conversations:v2:42')).not.toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem('chat_store:v3:42')).not.toBeNull());
   });
 
   it('commits an aborted partial response exactly once and never speaks it', async () => {

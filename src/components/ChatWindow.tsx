@@ -17,7 +17,6 @@ import type {
   ChatMessageHistoryItem,
   ChatWindowProps,
   Conversation,
-  ConversationMap,
   Message,
   UsageData,
 } from '../types';
@@ -27,20 +26,29 @@ import { InputArea } from './InputArea';
 import { EXAMPLE_PROMPTS, generateConversationId } from '../utils/helpers';
 import {
   APIError,
-  AudioService,
   CaptchaRequiredError,
   ChatAPI,
   IncompleteStreamError,
   StreamCancelledError,
   StreamProtocolError,
 } from '../services/api';
+import { AudioService } from '../services/speech';
+import {
+  enforceConversationCap,
+  loadStore,
+  mergeStores,
+  parseStore,
+  saveStore,
+  storageKeys,
+} from '../services/storage';
 import { ENV } from '../config/env';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 
 const MAX_MESSAGE_BYTES = 500;
-const LEGACY_CONVERSATIONS_KEY = 'chat_conversations';
-const LEGACY_CURRENT_KEY = 'current_conversation_id';
-const STORAGE_VERSION_KEY = 'chat_storage_version';
+/** Local history items sent with every request as server recovery context. */
+const HISTORY_CONTEXT_ITEMS = 20;
+const TURNSTILE_LOAD_TIMEOUT_MS = 15_000;
+const PENDING_DELETION_RETRY_MS = 60_000;
 
 const messageId = (suffix = ''): string => {
   const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -49,18 +57,20 @@ const messageId = (suffix = ''): string => {
   return `msg_${random}${suffix}`;
 };
 
+const createWelcomeMessage = (welcomeMessage: string): Message => ({
+  id: messageId('_welcome'),
+  role: 'ai',
+  rawContent: welcomeMessage,
+  timestamp: Date.now(),
+  status: 'complete',
+});
+
 const createNewConversation = (id: string, welcomeMessage: string): Conversation => {
   const now = Date.now();
   return {
     id,
     title: 'New Chat',
-    messages: [{
-      id: messageId('_welcome'),
-      role: 'ai',
-      rawContent: welcomeMessage,
-      timestamp: now,
-      status: 'complete',
-    }],
+    messages: [createWelcomeMessage(welcomeMessage)],
     createdAt: now,
     updatedAt: now,
   };
@@ -72,6 +82,22 @@ const noopRegenerate = () => {};
 
 type ConversationUpdate = Partial<Conversation> | ((conversation: Conversation) => Partial<Conversation>);
 
+type TurnKind = 'send' | 'edit' | 'regenerate' | 'retry';
+
+interface TurnParams {
+  conversationId: string;
+  content: string;
+  kind: TurnKind;
+  /** Messages the new user message appends to. Defaults to the live list. */
+  baseMessages?: Message[];
+  /** Full original message list restored if a branch operation fails. */
+  rollbackMessages?: Message[];
+  rollbackTitle?: string;
+  captchaToken?: string;
+  /** Branch operations rewrite server history unconditionally. */
+  forceReset?: boolean;
+}
+
 interface ActiveTurn {
   requestId: string;
   conversationId: string;
@@ -82,131 +108,86 @@ interface ActiveTurn {
 }
 
 interface PendingCaptchaTurn {
-  conversationId: string;
-  content: string;
+  params: TurnParams;
   userMessage: Message;
-  resetConversation?: boolean;
-  history?: ChatMessageHistoryItem[];
 }
 
 const getMessageText = (message: Message): string => message.rawContent.trim();
 
+/** Trailing markers appended to stopped/interrupted responses are UI, not context. */
+const INTERRUPTION_MARKER = /\n\n_(?:Generation stopped|Response interrupted)\._$/;
+
 const serializeConversationHistory = (messages: Message[]): ChatMessageHistoryItem[] => messages
-  .filter((message, index) => {
+  .map((message, index) => ({ message, index }))
+  .filter(({ message, index }) => {
     const text = getMessageText(message);
     return Boolean(text)
       && message.status !== 'failed'
+      && message.status !== 'sending'
       && !(index === 0 && message.role === 'ai' && text.startsWith('Welcome to WindowsForum.com'));
   })
-  .map((message) => ({
-    role: message.role === 'ai' ? 'assistant' : 'user',
-    content: getMessageText(message),
-  }));
-
-const pruneConversations = (conversationMap: ConversationMap, keepConversationId: string): ConversationMap => {
-  const max = Number.isFinite(ENV.MAX_CONVERSATIONS) && ENV.MAX_CONVERSATIONS > 0
-    ? ENV.MAX_CONVERSATIONS
-    : 50;
-  const entries = Object.entries(conversationMap).sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
-  const keep = new Set(entries.slice(0, max).map(([id]) => id));
-  keep.add(keepConversationId);
-  return entries.reduce<ConversationMap>((result, [id, conversation]) => {
-    if (keep.has(id)) result[id] = conversation;
-    return result;
-  }, {});
-};
-
-const isMessage = (value: unknown): value is Message => {
-  if (!value || typeof value !== 'object') return false;
-  const message = value as Partial<Message>;
-  return typeof message.id === 'string'
-    && (message.role === 'user' || message.role === 'ai')
-    && typeof message.rawContent === 'string'
-    && typeof message.timestamp === 'number';
-};
-
-const parseConversationMap = (raw: string | null): ConversationMap => {
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const result: ConversationMap = {};
-    for (const [id, value] of Object.entries(parsed)) {
-      if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue;
-      if (!value || typeof value !== 'object') continue;
-      const conversation = value as Partial<Conversation>;
-      if (
-        conversation.id !== id
-        || typeof conversation.title !== 'string'
-        || !Array.isArray(conversation.messages)
-        || !conversation.messages.every(isMessage)
-        || typeof conversation.createdAt !== 'number'
-        || typeof conversation.updatedAt !== 'number'
-      ) continue;
-      result[id] = conversation as Conversation;
-    }
-    return result;
-  } catch {
-    return {};
-  }
-};
-
-const storageKeys = (userId: string) => {
-  const principal = encodeURIComponent(userId);
-  return {
-    conversations: `chat_conversations:v2:${principal}`,
-    current: `current_conversation_id:v2:${principal}`,
-  };
-};
-
-const loadStoredState = (userId: string): { conversations: ConversationMap; currentId: string | null } => {
-  const keys = storageKeys(userId);
-  try {
-    // Unscoped history cannot be assigned safely on a shared browser.
-    localStorage.removeItem(LEGACY_CONVERSATIONS_KEY);
-    localStorage.removeItem(LEGACY_CURRENT_KEY);
-    localStorage.setItem(STORAGE_VERSION_KEY, '2');
-    const conversations = parseConversationMap(localStorage.getItem(keys.conversations));
-    const currentId = localStorage.getItem(keys.current);
-    return { conversations, currentId };
-  } catch (error) {
-    console.warn('Local chat storage is unavailable; continuing without persistence.', error);
-    return { conversations: {}, currentId: null };
-  }
-};
+  .map(({ message }) => ({
+    role: message.role === 'ai' ? 'assistant' as const : 'user' as const,
+    content: getMessageText(message).replace(INTERRUPTION_MARKER, '').trim(),
+  }))
+  .filter(item => item.content !== '');
 
 type TurnstileApi = NonNullable<Window['turnstile']>;
 let turnstileLoader: Promise<TurnstileApi> | null = null;
 
+/**
+ * Loads the Turnstile script with a hard deadline. A script element that
+ * failed or timed out is removed so the next attempt injects a fresh one —
+ * a wedged element would otherwise never fire load again.
+ */
 const loadTurnstile = (): Promise<TurnstileApi> => {
   if (window.turnstile) return Promise.resolve(window.turnstile);
   if (turnstileLoader) return turnstileLoader;
 
-  turnstileLoader = new Promise<TurnstileApi>((resolve, reject) => {
-    const finish = () => {
-      if (window.turnstile) resolve(window.turnstile);
-      else reject(new Error('Turnstile loaded without exposing its API.'));
+  const loader = new Promise<TurnstileApi>((resolve, reject) => {
+    let settled = false;
+    let script = document.querySelector<HTMLScriptElement>('script[data-wf-turnstile]');
+
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
     };
-    const existing = document.querySelector<HTMLScriptElement>('script[data-wf-turnstile]');
-    if (existing) {
-      existing.addEventListener('load', finish, { once: true });
-      existing.addEventListener('error', () => reject(new Error('Turnstile failed to load.')), { once: true });
-      return;
+    const failAndRecreate = (message: string) => settle(() => {
+      script?.remove();
+      reject(new Error(message));
+    });
+    const finish = () => settle(() => {
+      if (window.turnstile) {
+        resolve(window.turnstile);
+      } else {
+        script?.remove();
+        reject(new Error('Turnstile loaded without exposing its API.'));
+      }
+    });
+    const timer = setTimeout(
+      () => failAndRecreate('Turnstile script timed out.'),
+      TURNSTILE_LOAD_TIMEOUT_MS,
+    );
+
+    if (!script) {
+      script = document.createElement('script');
+      script.dataset.wfTurnstile = 'true';
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
     }
-    const script = document.createElement('script');
-    script.dataset.wfTurnstile = 'true';
-    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-    script.async = true;
-    script.defer = true;
     script.addEventListener('load', finish, { once: true });
-    script.addEventListener('error', () => reject(new Error('Turnstile failed to load.')), { once: true });
-    document.head.appendChild(script);
-  }).catch((error) => {
+    script.addEventListener('error', () => failAndRecreate('Turnstile failed to load.'), { once: true });
+  }).catch((error: unknown) => {
     turnstileLoader = null;
     throw error;
   });
 
-  return turnstileLoader;
+  turnstileLoader = loader;
+  return loader;
 };
 
 const byteLength = (value: string): number => new TextEncoder().encode(value).length;
@@ -218,22 +199,29 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     ? 'Welcome to WindowsForum.com! Ask me anything about Windows or technology. For the best results, [register](/register) or [log in](/login).'
     : 'Welcome to WindowsForum.com! Ask me anything about Windows or technology.',
   [isGuest]);
-  const keys = useMemo(() => storageKeys(userId), [userId]);
+
   const initialChatState = useMemo(() => {
-    const stored = loadStoredState(userId);
-    const id = stored.currentId && stored.conversations[stored.currentId]
-      ? stored.currentId
+    const loaded = loadStore(userId);
+    const id = loaded.currentId && loaded.store.conversations[loaded.currentId]
+      ? loaded.currentId
       : generateConversationId();
-    const initialConversations = stored.conversations[id]
-      ? stored.conversations
-      : { ...stored.conversations, [id]: createNewConversation(id, welcomeMessage) };
-    return { conversations: initialConversations, currentId: id };
+    const conversations = loaded.store.conversations[id]
+      ? loaded.store.conversations
+      : { ...loaded.store.conversations, [id]: createNewConversation(id, welcomeMessage) };
+    return {
+      conversations,
+      currentId: id,
+      tombstones: loaded.store.tombstones,
+      pendingServerDeletions: loaded.store.pendingServerDeletions,
+      unavailable: loaded.unavailable,
+    };
   }, [userId, welcomeMessage]);
 
-  const [conversations, setConversations] = useState<ConversationMap>(initialChatState.conversations);
+  const [conversations, setConversations] = useState(initialChatState.conversations);
   const [currentConversationId, setCurrentConversationId] = useState(initialChatState.currentId);
   const [streamingState, setStreamingState] = useState<{ conversationId: string; message: Message } | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
   const [input, setInput] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [isSpeechRecognitionSupported] = useState(
@@ -262,23 +250,28 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const textFieldRef = useRef<HTMLDivElement>(null);
   const conversationsRef = useRef(conversations);
   const currentConversationIdRef = useRef(currentConversationId);
+  const tombstonesRef = useRef(initialChatState.tombstones);
+  const pendingDeletionsRef = useRef(initialChatState.pendingServerDeletions);
+  const storageUnavailableRef = useRef(initialChatState.unavailable);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const pendingCaptchaRef = useRef<PendingCaptchaTurn | null>(null);
   const turnstileWidgetRef = useRef<string | null>(null);
+  const streamingFrameRef = useRef<number | null>(null);
   const inputRef = useRef(input);
   const mutedRef = useRef(isMuted);
+  const isClearingRef = useRef(false);
   const keepListeningRef = useRef(false);
   const dictationPrefixRef = useRef('');
-  const sendMessageRef = useRef<(content: string, options?: SendOptions) => Promise<void>>(async () => {});
+  const runTurnRef = useRef<(params: TurnParams) => Promise<void>>(async () => {});
 
-  const isLoading = activeRequestId !== null;
+  const isLoading = activeRequestId !== null || isClearing;
   const inputBytes = byteLength(input);
   const containerBg = theme.palette.background.paper;
   const borderColor = theme.palette.divider;
 
-  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
   useEffect(() => { currentConversationIdRef.current = currentConversationId; }, [currentConversationId]);
   useEffect(() => { inputRef.current = input; }, [input]);
+  useEffect(() => { isClearingRef.current = isClearing; }, [isClearing]);
   useEffect(() => {
     mutedRef.current = isMuted;
     AudioService.setMuted(isMuted || !ENV.ENABLE_VOICE);
@@ -293,57 +286,42 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   }), [currentConversationId]);
   const currentConversation = conversations[currentConversationId] || defaultConversation;
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(keys.conversations, JSON.stringify(pruneConversations(conversations, currentConversationId)));
-      localStorage.setItem(keys.current, currentConversationId);
-    } catch (error) {
-      if (error instanceof Error && error.name === 'QuotaExceededError') {
-        queueMicrotask(() => setErrorMessage('Browser storage is full. New chat history will not persist after reload.'));
-      } else {
-        console.warn('Failed to persist chat history:', error);
-      }
-    }
-  }, [conversations, currentConversationId, keys]);
+  /** Persists the composed v3 store and reflects quota evictions in memory. */
+  const persistStore = useCallback(() => {
+    if (storageUnavailableRef.current) return;
+    const result = saveStore(userId, {
+      version: 3,
+      conversations: conversationsRef.current,
+      tombstones: tombstonesRef.current,
+      pendingServerDeletions: pendingDeletionsRef.current,
+    }, currentConversationIdRef.current);
 
-  useEffect(() => {
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key !== keys.conversations || !event.newValue) return;
-      const remote = parseConversationMap(event.newValue);
-      setConversations(local => {
-        const merged = { ...local };
-        for (const [id, conversation] of Object.entries(remote)) {
-          if (!merged[id] || conversation.updatedAt > merged[id].updatedAt) merged[id] = conversation;
-        }
-        return pruneConversations(merged, currentConversationIdRef.current);
+    if (result.evictedIds.length) {
+      queueMicrotask(() => {
+        setConversations(previous => {
+          const next = { ...previous };
+          for (const id of result.evictedIds) delete next[id];
+          return next;
+        });
+        setErrorMessage('Browser storage is full. The oldest conversations were removed to keep saving history.');
       });
-    };
-    window.addEventListener('storage', handleStorage);
-    return () => window.removeEventListener('storage', handleStorage);
-  }, [keys.conversations]);
+    } else if (!result.persisted) {
+      queueMicrotask(() => setErrorMessage('Browser storage is full. New chat history will not persist after reload.'));
+    }
+  }, [userId]);
 
   useEffect(() => {
-    if (isGuest) return;
-    let cancelled = false;
-    ChatAPI.getUsage()
-      .then(value => { if (!cancelled) setUsage(value); })
-      .catch(() => { if (!cancelled) setUsage(null); });
-    return () => { cancelled = true; };
-  }, [isGuest, usageRefresh, userId]);
-
-  useEffect(() => {
-    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const handleChange = (event: MediaQueryListEvent) => setReduceMotion(event.matches);
-    media.addEventListener('change', handleChange);
-    return () => media.removeEventListener('change', handleChange);
-  }, []);
+    conversationsRef.current = conversations;
+    persistStore();
+  }, [conversations, persistStore]);
+  useEffect(() => { persistStore(); }, [currentConversationId, persistStore]);
 
   const updateConversationById = useCallback((conversationId: string, update: ConversationUpdate) => {
     setConversations(previous => {
       const existing = previous[conversationId];
       if (!existing) return previous;
       const changes = typeof update === 'function' ? update(existing) : update;
-      return pruneConversations({
+      return enforceConversationCap({
         ...previous,
         [conversationId]: { ...existing, ...changes, updatedAt: Date.now() },
       }, conversationId);
@@ -362,33 +340,48 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }));
   }, [updateConversationById]);
 
+  const cancelStreamingFrame = useCallback(() => {
+    if (streamingFrameRef.current !== null) {
+      cancelAnimationFrame(streamingFrameRef.current);
+      streamingFrameRef.current = null;
+    }
+  }, []);
+
   const clearActiveTurn = useCallback((requestId: string) => {
     if (activeTurnRef.current?.requestId !== requestId) return false;
     activeTurnRef.current = null;
+    cancelStreamingFrame();
     setActiveRequestId(null);
     setStreamingState(null);
     return true;
-  }, []);
+  }, [cancelStreamingFrame]);
 
   const abortActiveTurn = useCallback((persistPartial: boolean) => {
     const turn = activeTurnRef.current;
     if (!turn) return;
     activeTurnRef.current = null;
     turn.controller.abort();
-    if (persistPartial && turn.partialText.trim() && conversationsRef.current[turn.conversationId]) {
-      addMessage(turn.conversationId, {
-        id: messageId('_stopped'),
-        role: 'ai',
-        rawContent: `${turn.partialText.trimEnd()}\n\n_Generation stopped._`,
-        timestamp: Date.now(),
-        status: 'stopped',
-        annotations: turn.annotations,
-      });
+    cancelStreamingFrame();
+    if (conversationsRef.current[turn.conversationId]) {
+      // The server may have consumed this turn; resync it next time.
+      updateConversationById(turn.conversationId, conversation => ({
+        needsServerResync: true,
+        messages: persistPartial && turn.partialText.trim()
+          ? [...conversation.messages, {
+            id: messageId('_stopped'),
+            role: 'ai' as const,
+            rawContent: `${turn.partialText.trimEnd()}\n\n_Generation stopped._`,
+            timestamp: Date.now(),
+            status: 'stopped' as const,
+            annotations: turn.annotations,
+          }]
+          : conversation.messages,
+      }));
     }
     setActiveRequestId(null);
     setStreamingState(null);
     AudioService.stop();
-  }, [addMessage]);
+  }, [cancelStreamingFrame, updateConversationById]);
 
   const cleanupTurnstileWidget = useCallback(() => {
     const widgetId = turnstileWidgetRef.current;
@@ -403,8 +396,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     pendingCaptchaRef.current = null;
     cleanupTurnstileWidget();
     setShowCaptcha(false);
-    if (restoreFailedMessage && pending && conversationsRef.current[pending.conversationId]) {
-      addMessage(pending.conversationId, { ...pending.userMessage, status: 'failed' });
+    if (
+      restoreFailedMessage
+      && pending
+      && pending.params.kind === 'send'
+      && conversationsRef.current[pending.params.conversationId]
+    ) {
+      addMessage(pending.params.conversationId, { ...pending.userMessage, status: 'failed' });
     }
   }, [addMessage, cleanupTurnstileWidget]);
 
@@ -419,7 +417,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const createAndSelectConversation = useCallback(() => {
     const id = generateConversationId();
     const conversation = createNewConversation(id, welcomeMessage);
-    setConversations(previous => pruneConversations({ ...previous, [id]: conversation }, id));
+    setConversations(previous => enforceConversationCap({ ...previous, [id]: conversation }, id));
     setCurrentConversationId(id);
     setInput('');
     setErrorMessage('');
@@ -451,35 +449,136 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     setAutoFollow(true);
   }, [abortActiveTurn, cancelPendingCaptcha, stopListening]);
 
+  const retryPendingDeletions = useCallback(() => {
+    for (const conversationId of Object.keys(pendingDeletionsRef.current)) {
+      void ChatAPI.deleteConversation(conversationId).then(() => {
+        const next = { ...pendingDeletionsRef.current };
+        delete next[conversationId];
+        pendingDeletionsRef.current = next;
+        persistStore();
+      }).catch(() => {
+        // Still pending; the next retry pass picks it up.
+      });
+    }
+  }, [persistStore]);
+
+  useEffect(() => {
+    retryPendingDeletions();
+    const interval = setInterval(retryPendingDeletions, PENDING_DELETION_RETRY_MS);
+    return () => clearInterval(interval);
+  }, [retryPendingDeletions]);
+
   const handleDeleteConversation = useCallback((conversationId: string) => {
     if (activeTurnRef.current?.conversationId === conversationId) abortActiveTurn(false);
-    if (pendingCaptchaRef.current?.conversationId === conversationId) cancelPendingCaptcha(false);
-    void ChatAPI.deleteConversation(conversationId).catch(error => {
-      console.error('Failed to delete server conversation:', error);
-    });
+    if (pendingCaptchaRef.current?.params.conversationId === conversationId) cancelPendingCaptcha(false);
+
+    // Tombstone first: the deletion must win across tabs even if another
+    // tab writes this conversation again before seeing our update.
+    tombstonesRef.current = { ...tombstonesRef.current, [conversationId]: Date.now() };
+    pendingDeletionsRef.current = { ...pendingDeletionsRef.current, [conversationId]: Date.now() };
     setConversations(previous => {
       const next = { ...previous };
       delete next[conversationId];
       return next;
     });
+    void ChatAPI.deleteConversation(conversationId).then(() => {
+      const next = { ...pendingDeletionsRef.current };
+      delete next[conversationId];
+      pendingDeletionsRef.current = next;
+      persistStore();
+    }).catch(error => {
+      console.error('Failed to delete server conversation; will retry:', error);
+    });
     if (conversationId === currentConversationIdRef.current) createAndSelectConversation();
-  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation]);
+  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, persistStore]);
+
+  // Cross-tab merge: deletions (tombstones) always win; conversations take
+  // the most recently updated copy.
+  useEffect(() => {
+    const keys = storageKeys(userId);
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== keys.store || !event.newValue) return;
+      const remote = parseStore(event.newValue);
+      if (!remote) return;
+      const merged = mergeStores({
+        version: 3,
+        conversations: conversationsRef.current,
+        tombstones: tombstonesRef.current,
+        pendingServerDeletions: pendingDeletionsRef.current,
+      }, remote);
+      tombstonesRef.current = merged.tombstones;
+      pendingDeletionsRef.current = merged.pendingServerDeletions;
+      setConversations(enforceConversationCap(merged.conversations, currentConversationIdRef.current));
+      if (merged.tombstones[currentConversationIdRef.current] !== undefined) {
+        if (activeTurnRef.current?.conversationId === currentConversationIdRef.current) {
+          abortActiveTurn(false);
+        }
+        createAndSelectConversation();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [abortActiveTurn, createAndSelectConversation, userId]);
+
+  useEffect(() => {
+    if (isGuest) return;
+    let cancelled = false;
+    ChatAPI.getUsage()
+      .then(value => { if (!cancelled) setUsage(value); })
+      .catch(() => { if (!cancelled) setUsage(null); });
+    return () => { cancelled = true; };
+  }, [isGuest, usageRefresh, userId]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handleChange = (event: MediaQueryListEvent) => setReduceMotion(event.matches);
+    media.addEventListener('change', handleChange);
+    return () => media.removeEventListener('change', handleChange);
+  }, []);
 
   const getErrorText = useCallback((error: unknown): string => {
     if (error instanceof IncompleteStreamError) return 'The response was interrupted before completion. You can retry it.';
     if (error instanceof StreamProtocolError) return 'The server returned an invalid streaming response. Please retry.';
     if (error instanceof APIError) {
       if (error.status === 429 || error.status === 400 || error.status === 413) return error.message;
+      if (error.code === 'timeout') return 'The AI service took too long to respond. Please retry.';
       if (error.code === 'network_error') return 'Network error. Check your connection and retry.';
       if (error.retryable) return 'The AI service is temporarily unavailable. Please retry.';
     }
     return 'Failed to send the message. Please retry.';
   }, []);
 
-  const handleSendMessage = useCallback(async (messageContent: string | null = null, options: SendOptions = {}) => {
-    const content = (messageContent === null ? inputRef.current : messageContent).trim();
-    if (!content || activeTurnRef.current) return;
-    if (pendingCaptchaRef.current && !options.captchaToken) {
+  /** Transactionally resets the current conversation after the server confirms. */
+  const handleClearCommand = useCallback(async (conversationId: string) => {
+    setInput('');
+    setIsClearing(true);
+    setErrorMessage('');
+    try {
+      await ChatAPI.clearConversation(conversationId);
+      updateConversationById(conversationId, () => ({
+        title: 'New Chat',
+        messages: [createWelcomeMessage(welcomeMessage)],
+        needsServerResync: false,
+      }));
+      setShowExamples(true);
+      setAutoFollow(true);
+    } catch (error) {
+      console.error('Failed to clear conversation:', error);
+      setErrorMessage('The server could not clear this conversation, so nothing was reset. Please retry.');
+    } finally {
+      setIsClearing(false);
+    }
+  }, [updateConversationById, welcomeMessage]);
+
+  /**
+   * Runs one chat turn transactionally: nothing is mutated until validation
+   * passes, and branch operations (edit/regenerate/retry) restore the
+   * original messages when the turn fails without a usable result.
+   */
+  const runTurn = useCallback(async (params: TurnParams) => {
+    const content = params.content.trim();
+    if (!content || activeTurnRef.current || isClearingRef.current) return;
+    if (pendingCaptchaRef.current && !params.captchaToken) {
       setErrorMessage('Complete the security check before sending another message.');
       return;
     }
@@ -489,9 +588,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       return;
     }
 
-    const conversationId = options.conversationId || currentConversationIdRef.current;
+    const conversationId = params.conversationId;
     const existingConversation = conversationsRef.current[conversationId]
       || createNewConversation(conversationId, welcomeMessage);
+    const baseMessages = params.baseMessages ?? existingConversation.messages;
+    const resetConversation = Boolean(params.forceReset || existingConversation.needsServerResync);
+    const history = serializeConversationHistory(baseMessages).slice(-HISTORY_CONTEXT_ITEMS);
 
     stopListening();
     AudioService.stop();
@@ -499,9 +601,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     setShowExamples(false);
     setAutoFollow(true);
 
-    if (content.toLowerCase() === '/clear') {
-      void ChatAPI.clearConversation(conversationId).catch(error => console.error('Failed to clear conversation:', error));
-      createAndSelectConversation();
+    if (params.kind === 'send' && content.toLowerCase() === '/clear') {
+      await handleClearCommand(conversationId);
       return;
     }
 
@@ -512,22 +613,22 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       timestamp: Date.now(),
       status: 'complete',
     };
+    const isFirstQuestion = !baseMessages.some(message => message.role === 'user');
     setConversations(previous => {
       const conversation = previous[conversationId] || existingConversation;
-      const isFirstQuestion = conversation.messages.length === 1;
-      return pruneConversations({
+      return enforceConversationCap({
         ...previous,
         [conversationId]: {
           ...conversation,
           title: isFirstQuestion
             ? `${content.slice(0, 50)}${content.length > 50 ? '…' : ''}`
             : conversation.title,
-          messages: [...conversation.messages, userMessage],
+          messages: [...baseMessages, userMessage],
           updatedAt: Date.now(),
         },
       }, conversationId);
     });
-    setInput('');
+    if (params.kind === 'send') setInput('');
 
     const requestId = messageId('_request');
     const controller = new AbortController();
@@ -542,29 +643,49 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     activeTurnRef.current = turn;
     setActiveRequestId(requestId);
 
+    const scheduleStreamingUpdate = () => {
+      if (streamingFrameRef.current !== null) return;
+      streamingFrameRef.current = requestAnimationFrame(() => {
+        streamingFrameRef.current = null;
+        const active = activeTurnRef.current;
+        if (!active || active.requestId !== requestId) return;
+        setStreamingState({
+          conversationId,
+          message: {
+            id: `${requestId}_stream`,
+            role: 'ai',
+            rawContent: active.partialText,
+            timestamp: Date.now(),
+            status: 'sending',
+            annotations: active.annotations,
+          },
+        });
+      });
+    };
+
+    const restoreBranch = () => {
+      if (!params.rollbackMessages || !conversationsRef.current[conversationId]) return;
+      updateConversationById(conversationId, () => ({
+        messages: params.rollbackMessages,
+        ...(params.rollbackTitle !== undefined ? { title: params.rollbackTitle } : {}),
+      }));
+    };
+
     try {
       const result = await ChatAPI.sendMessage(content, {
         signal: controller.signal,
-        captchaToken: options.captchaToken,
+        captchaToken: params.captchaToken,
         conversationId,
-        resetConversation: options.resetConversation,
-        history: options.history,
+        resetConversation: resetConversation || undefined,
+        history,
         onChunk: (partialText, annotations) => {
           const active = activeTurnRef.current;
           if (!active || active.requestId !== requestId) return;
           active.partialText = partialText;
           active.annotations = annotations;
-          setStreamingState({
-            conversationId,
-            message: {
-              id: `${requestId}_stream`,
-              role: 'ai',
-              rawContent: partialText || '▍',
-              timestamp: Date.now(),
-              status: 'sending',
-              annotations,
-            },
-          });
+          // Coalesce chunk updates to animation frames; per-chunk renders
+          // jank long streams.
+          scheduleStreamingUpdate();
         },
       });
 
@@ -572,14 +693,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       if (!result.text.trim()) {
         throw new IncompleteStreamError('The completed stream contained no response text.');
       }
-      addMessage(conversationId, {
-        id: messageId('_ai'),
-        role: 'ai',
-        rawContent: result.text,
-        timestamp: Date.now(),
-        status: 'complete',
-        annotations: result.annotations,
-      });
+      updateConversationById(conversationId, conversation => ({
+        messages: [...conversation.messages, {
+          id: messageId('_ai'),
+          role: 'ai' as const,
+          rawContent: result.text,
+          timestamp: Date.now(),
+          status: 'complete' as const,
+          annotations: result.annotations,
+        }],
+        needsServerResync: false,
+      }));
       clearActiveTurn(requestId);
       setUsageRefresh(value => value + 1);
       if (ENV.ENABLE_VOICE && !mutedRef.current) {
@@ -590,66 +714,97 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       if (!active || active.requestId !== requestId) return;
 
       if (error instanceof CaptchaRequiredError) {
-        updateConversationById(conversationId, conversation => ({
-          messages: conversation.messages.filter(message => message.id !== userMessage.id),
-        }));
-        pendingCaptchaRef.current = {
-          conversationId,
-          content,
-          userMessage,
-          resetConversation: options.resetConversation,
-          history: options.history,
-        };
+        // Restore the pre-turn state entirely; the parked turn re-runs
+        // with the token after verification.
+        if (params.rollbackMessages) {
+          restoreBranch();
+        } else {
+          updateConversationById(conversationId, conversation => ({
+            messages: conversation.messages.filter(message => message.id !== userMessage.id),
+          }));
+        }
+        pendingCaptchaRef.current = { params, userMessage };
         clearActiveTurn(requestId);
-        setInput(content);
+        if (params.kind === 'send') setInput(content);
         setShowCaptcha(true);
         setErrorMessage('Complete the security check to send your message.');
         return;
       }
 
-      const partialText = error instanceof StreamCancelledError
+      const isStreamStateError = error instanceof StreamCancelledError
         || error instanceof IncompleteStreamError
         || error instanceof StreamProtocolError
-        || error instanceof APIError
-        ? error.partialText
-        : active.partialText;
-      const annotations = error instanceof StreamCancelledError
-        || error instanceof IncompleteStreamError
-        || error instanceof StreamProtocolError
-        || error instanceof APIError
-        ? error.annotations
-        : active.annotations;
+        || error instanceof APIError;
+      const partialText = isStreamStateError ? error.partialText : active.partialText;
+      const annotations = isStreamStateError ? error.annotations : active.annotations;
 
-      if (partialText.trim()) {
-        addMessage(conversationId, {
-          id: messageId('_interrupted'),
-          role: 'ai',
-          rawContent: `${partialText.trimEnd()}\n\n_Response interrupted._`,
-          timestamp: Date.now(),
-          status: error instanceof StreamCancelledError ? 'stopped' : 'interrupted',
-          annotations,
-        });
-      } else if (!(error instanceof StreamCancelledError)) {
+      if (error instanceof StreamCancelledError) {
+        // Reached only when the abort did not come from abortActiveTurn
+        // (e.g. signal aborted while this turn is still registered).
+        if (partialText.trim() && conversationsRef.current[conversationId]) {
+          updateConversationById(conversationId, conversation => ({
+            needsServerResync: true,
+            messages: [...conversation.messages, {
+              id: messageId('_stopped'),
+              role: 'ai' as const,
+              rawContent: `${partialText.trimEnd()}\n\n_Generation stopped._`,
+              timestamp: Date.now(),
+              status: 'stopped' as const,
+              annotations,
+            }],
+          }));
+        }
+        clearActiveTurn(requestId);
+        return;
+      }
+
+      if (params.rollbackMessages) {
+        // Branch operation failed: the original branch is restored intact.
+        // The server may have consumed the turn, so flag a resync.
+        updateConversationById(conversationId, () => ({
+          messages: params.rollbackMessages,
+          ...(params.rollbackTitle !== undefined ? { title: params.rollbackTitle } : {}),
+          needsServerResync: true,
+        }));
+      } else if (partialText.trim()) {
+        updateConversationById(conversationId, conversation => ({
+          needsServerResync: true,
+          messages: [...conversation.messages, {
+            id: messageId('_interrupted'),
+            role: 'ai' as const,
+            rawContent: `${partialText.trimEnd()}\n\n_Response interrupted._`,
+            timestamp: Date.now(),
+            status: 'interrupted' as const,
+            annotations,
+          }],
+        }));
+      } else {
         updateMessage(conversationId, userMessage.id, { status: 'failed' });
       }
       clearActiveTurn(requestId);
-      if (!(error instanceof StreamCancelledError)) {
-        setErrorMessage(getErrorText(error));
-        setUsageRefresh(value => value + 1);
-      }
+      setErrorMessage(getErrorText(error));
+      setUsageRefresh(value => value + 1);
     }
   }, [
-    addMessage,
     clearActiveTurn,
-    createAndSelectConversation,
     getErrorText,
+    handleClearCommand,
     stopListening,
     updateConversationById,
     updateMessage,
     welcomeMessage,
   ]);
 
-  useEffect(() => { sendMessageRef.current = handleSendMessage; }, [handleSendMessage]);
+  useEffect(() => { runTurnRef.current = runTurn; }, [runTurn]);
+
+  const handleSendMessage = useCallback(async (messageContent: string | null = null) => {
+    const content = messageContent === null ? inputRef.current : messageContent;
+    await runTurn({
+      conversationId: currentConversationIdRef.current,
+      content,
+      kind: 'send',
+    });
+  }, [runTurn]);
 
   useEffect(() => {
     if (!showCaptcha) return;
@@ -662,28 +817,27 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         callback: (token: string) => {
           const pending = pendingCaptchaRef.current;
           if (!pending) return;
-          const editedContent = inputRef.current.trim();
           pendingCaptchaRef.current = null;
           cleanupTurnstileWidget();
           setShowCaptcha(false);
           setErrorMessage('');
-          void sendMessageRef.current(editedContent || pending.content, {
-            conversationId: pending.conversationId,
-            resetConversation: pending.resetConversation,
-            history: pending.history,
-            captchaToken: token,
-          });
+          // A plain send may have been edited in the composer while the
+          // check was showing; branch operations replay verbatim.
+          const content = pending.params.kind === 'send'
+            ? (inputRef.current.trim() || pending.params.content)
+            : pending.params.content;
+          void runTurnRef.current({ ...pending.params, content, captchaToken: token });
         },
         'expired-callback': () => {
           setErrorMessage('The security check expired. Please complete it again.');
-          if (turnstileWidgetRef.current) api.reset(turnstileWidgetRef.current);
+          if (turnstileWidgetRef.current && window.turnstile) window.turnstile.reset(turnstileWidgetRef.current);
         },
         'error-callback': () => {
           setErrorMessage('The security check failed to load. Please try again.');
-          if (turnstileWidgetRef.current) api.reset(turnstileWidgetRef.current);
+          if (turnstileWidgetRef.current && window.turnstile) window.turnstile.reset(turnstileWidgetRef.current);
         },
       });
-    }).catch(error => {
+    }).catch((error: unknown) => {
       console.error('Turnstile load failed:', error);
       if (!cancelled) {
         setErrorMessage('The security check could not load. Please retry.');
@@ -693,52 +847,62 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     return () => { cancelled = true; };
   }, [cancelPendingCaptcha, cleanupTurnstileWidget, showCaptcha]);
 
+  const branchGuard = useCallback((): Conversation | null => {
+    if (activeTurnRef.current || isClearingRef.current) return null;
+    if (pendingCaptchaRef.current) {
+      setErrorMessage('Complete the security check before sending another message.');
+      return null;
+    }
+    return conversationsRef.current[currentConversationIdRef.current] ?? null;
+  }, []);
+
   const handleEditMessage = useCallback((id: string, newContent: string) => {
-    if (activeTurnRef.current) return;
-    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    const conversation = branchGuard();
     if (!conversation) return;
     const index = conversation.messages.findIndex(message => message.id === id);
     if (index < 0) return;
-    const before = conversation.messages.slice(0, index);
-    updateConversationById(conversation.id, { messages: before });
-    void handleSendMessage(newContent, {
+    void runTurn({
       conversationId: conversation.id,
-      resetConversation: true,
-      history: serializeConversationHistory(before),
+      content: newContent,
+      kind: 'edit',
+      baseMessages: conversation.messages.slice(0, index),
+      rollbackMessages: conversation.messages,
+      rollbackTitle: conversation.title,
+      forceReset: true,
     });
-  }, [handleSendMessage, updateConversationById]);
+  }, [branchGuard, runTurn]);
 
   const handleRegenerateMessage = useCallback(() => {
-    if (activeTurnRef.current) return;
-    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    const conversation = branchGuard();
     if (!conversation) return;
     const lastUserIndex = conversation.messages.map(message => message.role).lastIndexOf('user');
     if (lastUserIndex < 0) return;
-    const userMessage = conversation.messages[lastUserIndex];
-    const before = conversation.messages.slice(0, lastUserIndex);
-    updateConversationById(conversation.id, { messages: before });
-    void handleSendMessage(userMessage.rawContent, {
+    void runTurn({
       conversationId: conversation.id,
-      resetConversation: true,
-      history: serializeConversationHistory(before),
+      content: conversation.messages[lastUserIndex].rawContent,
+      kind: 'regenerate',
+      baseMessages: conversation.messages.slice(0, lastUserIndex),
+      rollbackMessages: conversation.messages,
+      rollbackTitle: conversation.title,
+      forceReset: true,
     });
-  }, [handleSendMessage, updateConversationById]);
+  }, [branchGuard, runTurn]);
 
   const handleRetryMessage = useCallback((id: string) => {
-    if (activeTurnRef.current) return;
-    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    const conversation = branchGuard();
     if (!conversation) return;
     const index = conversation.messages.findIndex(message => message.id === id && message.role === 'user');
     if (index < 0) return;
-    const failedMessage = conversation.messages[index];
-    const before = conversation.messages.slice(0, index);
-    updateConversationById(conversation.id, { messages: before });
-    void handleSendMessage(failedMessage.rawContent, {
+    void runTurn({
       conversationId: conversation.id,
-      resetConversation: true,
-      history: serializeConversationHistory(before),
+      content: conversation.messages[index].rawContent,
+      kind: 'retry',
+      baseMessages: conversation.messages.slice(0, index),
+      rollbackMessages: conversation.messages,
+      rollbackTitle: conversation.title,
+      forceReset: true,
     });
-  }, [handleSendMessage, updateConversationById]);
+  }, [branchGuard, runTurn]);
 
   useEffect(() => {
     if (!ENV.ENABLE_VOICE) return;
@@ -817,9 +981,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     const active = activeTurnRef.current;
     activeTurnRef.current = null;
     active?.controller.abort();
+    if (streamingFrameRef.current !== null) cancelAnimationFrame(streamingFrameRef.current);
+    if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
+      // Unmount (navigation/account switch) interrupted a turn; persist the
+      // resync marker directly since no further renders will run.
+      const conversation = conversationsRef.current[active.conversationId];
+      saveStore(userId, {
+        version: 3,
+        conversations: {
+          ...conversationsRef.current,
+          [active.conversationId]: { ...conversation, needsServerResync: true, updatedAt: Date.now() },
+        },
+        tombstones: tombstonesRef.current,
+        pendingServerDeletions: pendingDeletionsRef.current,
+      }, currentConversationIdRef.current);
+    }
     cleanupTurnstileWidget();
     AudioService.stop();
-  }, [cleanupTurnstileWidget]);
+  }, [cleanupTurnstileWidget, userId]);
 
   const sortedConversations = useMemo(
     () => Object.values(conversations).sort((a, b) => b.updatedAt - a.updatedAt),
@@ -844,7 +1023,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const usageTooltip = `AI messages today · ${usageTierLabel}`;
 
   return (
-    <Box id="react-chat-container" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
+    <Box className="wf-chat-window" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
       <ConversationSidebar
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -991,10 +1170,3 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     </Box>
   );
 };
-
-interface SendOptions {
-  conversationId?: string;
-  resetConversation?: boolean;
-  history?: ChatMessageHistoryItem[];
-  captchaToken?: string;
-}

@@ -10,11 +10,19 @@ import type {
   StreamingResponse,
   Annotation,
   ChatMessageHistoryItem,
+  SSEAnnotation,
   SSEEvent,
   ErrorResponse,
 } from '../types';
 
 const apiBase = ENV.getApiBase();
+
+/** Bootstrap/JSON endpoints must answer quickly or the UI stalls. */
+export const JSON_REQUEST_TIMEOUT_MS = 15_000;
+/** The chat backend may queue behind tool calls before the first byte. */
+export const CHAT_FIRST_BYTE_TIMEOUT_MS = 130_000;
+/** Between-chunk inactivity limit once the stream has started. */
+export const READ_INACTIVITY_TIMEOUT_MS = 45_000;
 
 interface SendMessagePayload {
   message: string;
@@ -113,16 +121,6 @@ export class CaptchaRequiredError extends APIError {
   }
 }
 
-/** @deprecated Use APIError. Retained for callers that still import BackendError. */
-export class BackendError extends APIError {
-  readonly isBackendError = true;
-
-  constructor(message: string, options: APIErrorOptions = {}) {
-    super(message, options);
-    this.name = 'BackendError';
-  }
-}
-
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
@@ -133,8 +131,14 @@ function makeAbortError(): Error {
   return error;
 }
 
+/**
+ * Transient failures worth retrying: request/precondition timeouts, rate
+ * limiting, and server-side errors other than 501 (unimplemented is
+ * permanent by definition).
+ */
 function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status >= 500;
+  if (status === 408 || status === 425 || status === 429) return true;
+  return status >= 500 && status !== 501;
 }
 
 function errorMessage(errorData: ErrorResponse, fallback: string): string {
@@ -159,12 +163,125 @@ async function readErrorResponse(response: Response): Promise<ErrorResponse> {
 }
 
 /**
- * Base fetch wrapper with common configuration.
+ * Converts a wire annotation to the discriminated citation union.
+ * Unknown shapes with file metadata degrade to file citations; anything
+ * else is dropped.
+ */
+function annotationFromSSE(annotation: SSEAnnotation | undefined): Annotation | null {
+  if (!annotation || typeof annotation !== 'object') return null;
+
+  switch (annotation.type) {
+    case 'url_citation':
+      if (typeof annotation.url !== 'string' || !annotation.url) return null;
+      return {
+        type: 'url_citation',
+        url: annotation.url,
+        ...(typeof annotation.title === 'string' && annotation.title ? { title: annotation.title } : {}),
+      };
+    case 'file_citation':
+      if (typeof annotation.filename !== 'string' && typeof annotation.file_id !== 'string') return null;
+      return {
+        type: 'file_citation',
+        ...(typeof annotation.filename === 'string' ? { filename: annotation.filename } : {}),
+        ...(typeof annotation.file_id === 'string' ? { fileId: annotation.file_id } : {}),
+      };
+    case 'container_file_citation':
+      if (typeof annotation.file_id !== 'string' && typeof annotation.container_id !== 'string') return null;
+      return {
+        type: 'container_file_citation',
+        ...(typeof annotation.container_id === 'string' ? { containerId: annotation.container_id } : {}),
+        ...(typeof annotation.file_id === 'string' ? { fileId: annotation.file_id } : {}),
+        ...(typeof annotation.filename === 'string' ? { filename: annotation.filename } : {}),
+      };
+    case 'file_path':
+      if (typeof annotation.file_id !== 'string') return null;
+      return {
+        type: 'file_path',
+        fileId: annotation.file_id,
+        ...(typeof annotation.filename === 'string' ? { filename: annotation.filename } : {}),
+      };
+    default:
+      // Legacy backend events omit the discriminant on file citations.
+      if (typeof annotation.filename === 'string' || typeof annotation.file_id === 'string') {
+        return {
+          type: 'file_citation',
+          ...(typeof annotation.filename === 'string' ? { filename: annotation.filename } : {}),
+          ...(typeof annotation.file_id === 'string' ? { fileId: annotation.file_id } : {}),
+        };
+      }
+      return null;
+  }
+}
+
+function annotationKey(annotation: Annotation): string {
+  switch (annotation.type) {
+    case 'url_citation':
+      return `url:${annotation.url}`;
+    case 'file_citation':
+      return `file:${annotation.fileId ?? ''}:${annotation.filename ?? ''}`;
+    case 'container_file_citation':
+      return `container:${annotation.containerId ?? ''}:${annotation.fileId ?? ''}`;
+    case 'file_path':
+      return `path:${annotation.fileId ?? ''}`;
+  }
+}
+
+/** Appends new annotations, deduplicating across multipart events. */
+function mergeAnnotations(existing: Annotation[], incoming: Annotation[]): Annotation[] {
+  const seen = new Set(existing.map(annotationKey));
+  const merged = [...existing];
+  for (const annotation of incoming) {
+    const key = annotationKey(annotation);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(annotation);
+  }
+  return merged;
+}
+
+interface DeadlineHandle {
+  signal: AbortSignal;
+  /** True once the deadline (not a caller abort) fired. */
+  timedOut: () => boolean;
+  clear: () => void;
+}
+
+/**
+ * Combines an optional caller signal with a hard deadline. The returned
+ * signal aborts on either; `timedOut()` distinguishes the two.
+ */
+function withDeadline(timeoutMs: number, signal?: AbortSignal): DeadlineHandle {
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const onCallerAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    clear: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onCallerAbort);
+    },
+  };
+}
+
+/**
+ * Base fetch wrapper for JSON endpoints with a 15-second deadline.
  */
 async function fetchAPI<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
+  const deadline = withDeadline(JSON_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(`${apiBase}${endpoint}`, {
@@ -174,13 +291,22 @@ async function fetchAPI<T>(
         ...options.headers,
       },
       ...options,
+      signal: deadline.signal,
     });
   } catch (error) {
+    if (deadline.timedOut()) {
+      throw new APIError('The server did not respond in time', {
+        code: 'timeout',
+        retryable: true,
+      });
+    }
     if (isAbortError(error)) throw error;
     throw new APIError('Network request failed', {
       code: 'network_error',
       retryable: true,
     });
+  } finally {
+    deadline.clear();
   }
 
   if (!response.ok) {
@@ -249,6 +375,9 @@ export class ChatAPI {
     if (resetConversation) payload.reset_conversation = true;
     if (history?.length) payload.history = history;
 
+    // One deadline covers connection, headers, and the first body byte.
+    const firstByte = withDeadline(CHAT_FIRST_BYTE_TIMEOUT_MS, signal);
+
     let response: Response;
     try {
       response = await fetch(`${apiBase}${ENV.ENDPOINTS.CHAT}`, {
@@ -256,9 +385,16 @@ export class ChatAPI {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal,
+        signal: firstByte.signal,
       });
     } catch (error) {
+      firstByte.clear();
+      if (firstByte.timedOut()) {
+        throw new APIError('The AI service did not start responding in time', {
+          code: 'timeout',
+          retryable: true,
+        });
+      }
       if (signal?.aborted || isAbortError(error)) {
         throw new StreamCancelledError();
       }
@@ -269,6 +405,7 @@ export class ChatAPI {
     }
 
     if (!response.ok) {
+      firstByte.clear();
       const errorData = await readErrorResponse(response);
       if (errorData.captcha_required) throw new CaptchaRequiredError();
 
@@ -283,14 +420,16 @@ export class ChatAPI {
     }
 
     if (!response.body) {
+      firstByte.clear();
       throw new StreamProtocolError('ReadableStream not supported');
     }
 
-    return this.processStreamingResponse(response.body, onChunk, signal);
+    return this.processStreamingResponse(response.body, firstByte, onChunk, signal);
   }
 
   private static async processStreamingResponse(
     body: ReadableStream<Uint8Array>,
+    firstByte: DeadlineHandle,
     onChunk?: (partialText: string, annotations: Annotation[]) => void,
     signal?: AbortSignal
   ): Promise<StreamingResponse> {
@@ -301,6 +440,7 @@ export class ChatAPI {
     let annotations: Annotation[] = [];
     let responseId: string | undefined;
     let terminalReceived = false;
+    let firstByteReceived = false;
 
     const state = () => ({ partialText, annotations, responseId });
     const notifyChunk = () => onChunk?.(partialText, [...annotations]);
@@ -323,9 +463,6 @@ export class ChatAPI {
 
       const json = dataLines.join('\n').trim();
       if (!json || json === '[DONE]') return;
-      if (terminalReceived) {
-        throw protocolError('Received stream data after chat.stream.completed');
-      }
 
       let parsedData: SSEEvent;
       try {
@@ -419,31 +556,24 @@ export class ChatAPI {
           notifyChunk();
           break;
 
-        case 'response.output_text.annotation.added':
-          if (
-            parsedData.annotation?.type === 'file_citation'
-            && typeof parsedData.annotation.filename === 'string'
-          ) {
-            annotations = [
-              ...annotations,
-              {
-                index: parsedData.annotation_index ?? annotations.length,
-                filename: parsedData.annotation.filename,
-                fileId: parsedData.annotation.file_id,
-              },
-            ];
+        case 'response.output_text.annotation.added': {
+          const annotation = annotationFromSSE(parsedData.annotation);
+          if (annotation) {
+            annotations = mergeAnnotations(annotations, [annotation]);
             notifyChunk();
           }
           break;
+        }
 
         case 'response.content_part.done':
           if (Array.isArray(parsedData.part?.annotations)) {
-            annotations = parsedData.part.annotations.map((annotation, index) => ({
-              index,
-              filename: annotation.filename,
-              fileId: annotation.file_id,
-            }));
-            notifyChunk();
+            const incoming = parsedData.part.annotations
+              .map(annotationFromSSE)
+              .filter((annotation): annotation is Annotation => annotation !== null);
+            if (incoming.length) {
+              annotations = mergeAnnotations(annotations, incoming);
+              notifyChunk();
+            }
           }
           break;
 
@@ -461,7 +591,6 @@ export class ChatAPI {
       }
     };
 
-    const READ_INACTIVITY_TIMEOUT_MS = 45_000;
     const readChunk = (): Promise<ReadableStreamReadResult<Uint8Array>> => {
       if (signal?.aborted) return Promise.reject(makeAbortError());
 
@@ -470,16 +599,20 @@ export class ChatAPI {
         const finish = (callback: () => void) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timeoutId);
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
           signal?.removeEventListener('abort', handleAbort);
           callback();
         };
         const handleAbort = () => finish(() => reject(makeAbortError()));
-        const timeoutId = setTimeout(() => {
-          const timeoutError = new Error('Stream timed out waiting for data');
-          timeoutError.name = 'StreamTimeoutError';
-          finish(() => reject(timeoutError));
-        }, READ_INACTIVITY_TIMEOUT_MS);
+        // Before the first byte the 130s request deadline governs; after
+        // it, the between-chunk inactivity limit takes over.
+        const timeoutId = firstByteReceived
+          ? setTimeout(() => {
+            const timeoutError = new Error('Stream timed out waiting for data');
+            timeoutError.name = 'StreamTimeoutError';
+            finish(() => reject(timeoutError));
+          }, READ_INACTIVITY_TIMEOUT_MS)
+          : undefined;
 
         signal?.addEventListener('abort', handleAbort, { once: true });
         reader.read().then(
@@ -490,10 +623,14 @@ export class ChatAPI {
     };
 
     try {
-      while (true) {
+      while (!terminalReceived) {
         const { value, done } = await readChunk();
         if (done) break;
         if (!value) continue;
+        if (!firstByteReceived) {
+          firstByteReceived = true;
+          firstByte.clear();
+        }
 
         buffer += decoder.decode(value, { stream: true });
         let boundary = buffer.search(/\r?\n\r?\n/);
@@ -502,14 +639,19 @@ export class ChatAPI {
           const separatorLength = buffer[boundary] === '\r' ? 4 : 2;
           buffer = buffer.slice(boundary + separatorLength);
           handleEvent(rawEvent);
+          // The terminal event resolves the turn immediately; the PHP
+          // proxy may hold the transport open long after it.
+          if (terminalReceived) break;
           boundary = buffer.search(/\r?\n\r?\n/);
         }
       }
 
-      buffer += decoder.decode();
-      if (buffer.trim()) handleEvent(buffer);
+      if (!terminalReceived) {
+        buffer += decoder.decode();
+        if (buffer.trim()) handleEvent(buffer);
+      }
 
-      if (signal?.aborted) {
+      if (!terminalReceived && signal?.aborted) {
         throw new StreamCancelledError(
           'Stream cancelled',
           partialText,
@@ -540,6 +682,13 @@ export class ChatAPI {
         throw error;
       }
 
+      if (!firstByteReceived && firstByte.timedOut()) {
+        throw new APIError('The AI service did not start responding in time', {
+          code: 'timeout',
+          retryable: true,
+        });
+      }
+
       if (signal?.aborted || isAbortError(error)) {
         throw new StreamCancelledError(
           'Stream cancelled',
@@ -565,6 +714,7 @@ export class ChatAPI {
         responseId
       );
     } finally {
+      firstByte.clear();
       void reader.cancel().catch(() => undefined);
     }
   }
@@ -622,83 +772,5 @@ export class ChatAPI {
     }
 
     return response.blob();
-  }
-}
-
-/** Audio Service for TTS playback. */
-export class AudioService {
-  private static currentAudio: HTMLAudioElement | null = null;
-  private static currentRequest: AbortController | null = null;
-  private static currentCleanup: (() => void) | null = null;
-  private static generation = 0;
-  private static muted = false;
-
-  static setMuted(muted: boolean): void {
-    this.muted = muted;
-    if (muted) this.stop();
-  }
-
-  static async playTTS(text: string): Promise<void> {
-    this.stop();
-    if (this.muted || !text.trim()) return;
-
-    const generation = this.generation;
-    const controller = new AbortController();
-    this.currentRequest = controller;
-    let releaseAudio: (() => void) | null = null;
-
-    try {
-      const audioBlob = await ChatAPI.requestTTS(text, { signal: controller.signal });
-      if (controller.signal.aborted || this.muted || generation !== this.generation) return;
-
-      const audioUrl = URL.createObjectURL(audioBlob);
-      if (controller.signal.aborted || this.muted || generation !== this.generation) {
-        URL.revokeObjectURL(audioUrl);
-        return;
-      }
-
-      const audio = new Audio(audioUrl);
-      let cleaned = false;
-      const cleanup = () => {
-        if (cleaned) return;
-        cleaned = true;
-        URL.revokeObjectURL(audioUrl);
-        if (this.currentAudio === audio) this.currentAudio = null;
-        if (this.currentCleanup === cleanup) this.currentCleanup = null;
-      };
-      releaseAudio = cleanup;
-
-      this.currentAudio = audio;
-      this.currentCleanup = cleanup;
-      audio.addEventListener('ended', cleanup, { once: true });
-      audio.addEventListener('error', cleanup, { once: true });
-
-      await audio.play();
-    } catch (error) {
-      releaseAudio?.();
-      if (controller.signal.aborted || generation !== this.generation || isAbortError(error)) return;
-      throw error;
-    } finally {
-      if (this.currentRequest === controller) this.currentRequest = null;
-    }
-  }
-
-  static stop(): void {
-    this.generation += 1;
-
-    if (this.currentRequest) {
-      this.currentRequest.abort();
-      this.currentRequest = null;
-    }
-
-    if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio.removeAttribute('src');
-      this.currentAudio = null;
-    }
-
-    const cleanup = this.currentCleanup;
-    this.currentCleanup = null;
-    cleanup?.();
   }
 }

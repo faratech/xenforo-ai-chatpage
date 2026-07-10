@@ -9,6 +9,9 @@
     <link rel="apple-touch-icon" href="/chatpage/bot-avatar.webp" />
     <link rel="manifest" href="/chatpage/manifest.json" />
     <title>AI Chat - WindowsForum</title>
+    <!-- Standalone-page reset only. The bundled CSS is fully scoped to
+         #react-chat-container so the XenForo embed is unaffected. -->
+    <style>html, body { margin: 0; padding: 0; } #root { min-height: 100vh; }</style>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
