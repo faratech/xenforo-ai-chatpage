@@ -24,6 +24,71 @@ describe('sanitizeAndParse security boundary', () => {
     expect(rendered.textContent).toContain('<img');
   });
 
+  it('renders an approved raw HTML <img> from the CDN, whatever the attribute order', () => {
+    const output = sanitizeAndParse(
+      'Here is a walkthrough:\n\n'
+      + '<img src="https://data.windowsforum.com/images/ai/answers/d19b05d42604.webp" alt="Animated walkthrough">\n\n'
+      + '<img alt="Reversed order" src="https://windowsforum.com/images/ai/screenshots/x.png">'
+    );
+    const rendered = document.createElement('div');
+    rendered.innerHTML = output;
+    const images = [...rendered.querySelectorAll('img')];
+
+    expect(images).toHaveLength(2);
+    expect(images[0].getAttribute('src')).toBe('https://data.windowsforum.com/images/ai/answers/d19b05d42604.webp');
+    expect(images[0].getAttribute('alt')).toBe('Animated walkthrough');
+    expect(images[1].getAttribute('src')).toBe('https://windowsforum.com/images/ai/screenshots/x.png');
+    // The approved raw <img> carries no style/on* handlers.
+    expect(rendered.querySelector('[style], [onerror], [onload]')).toBeNull();
+  });
+
+  it('keeps a raw <img> from an unapproved origin or path inert (rendered as text)', () => {
+    const output = sanitizeAndParse(
+      '<img src="https://data.windowsforum.com.attacker.example/images/ai/answers/x.webp" alt="evil">\n\n'
+      + '<img src="https://data.windowsforum.com/uploads/evil.webp" alt="wrong path">'
+    );
+    const rendered = document.createElement('div');
+    rendered.innerHTML = output;
+
+    // Lookalike origin and wrong path never render as an image element.
+    expect(rendered.querySelector('img')).toBeNull();
+    expect(rendered.textContent).toContain('<img');
+  });
+
+  it('approves any windowsforum.com subdomain but rejects look-alike hosts', () => {
+    const output = sanitizeAndParse(
+      '<img src="https://cdn.windowsforum.com/images/ai/answers/a.webp" alt="cdn">\n\n'
+      + '<img src="https://media.eu.windowsforum.com/images/ai/screenshots/b.png" alt="nested">\n\n'
+      + '<img src="https://windowsforum.com/images/ai/answers/c.webp" alt="apex">\n\n'
+      + '<img src="https://notwindowsforum.com/images/ai/answers/d.webp" alt="suffix bypass">\n\n'
+      + '<img src="https://windowsforum.com.attacker.example/images/ai/answers/e.webp" alt="prefix bypass">'
+    );
+    const rendered = document.createElement('div');
+    rendered.innerHTML = output;
+    const sources = [...rendered.querySelectorAll('img')].map(image => image.getAttribute('src'));
+
+    expect(sources).toEqual([
+      'https://cdn.windowsforum.com/images/ai/answers/a.webp',
+      'https://media.eu.windowsforum.com/images/ai/screenshots/b.png',
+      'https://windowsforum.com/images/ai/answers/c.webp',
+    ]);
+  });
+
+  it('re-emits an approved raw <img> cleanly, dropping event-handler attributes', () => {
+    const output = sanitizeAndParse(
+      '<img src="https://data.windowsforum.com/images/ai/answers/x.webp" onerror="alert(1)" onload="x()">'
+    );
+    const rendered = document.createElement('div');
+    rendered.innerHTML = output;
+    const image = rendered.querySelector('img');
+
+    // Approved src → the image renders, but only src/alt survive the rebuild.
+    expect(image).not.toBeNull();
+    expect(image?.getAttribute('src')).toBe('https://data.windowsforum.com/images/ai/answers/x.webp');
+    expect(image?.getAttribute('onerror')).toBeNull();
+    expect(image?.getAttribute('onload')).toBeNull();
+  });
+
   it('preserves supported Markdown, safe links, citations, and approved AI images', () => {
     const output = sanitizeAndParse(`
 **Bold** [OpenAI](https://openai.com/docs?q=chat)

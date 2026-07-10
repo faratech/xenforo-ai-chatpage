@@ -55,10 +55,22 @@ const ALLOWED_MARKDOWN_ATTRIBUTES = [
 const CITATION_LABEL_PATTERN = /(?:^|\b)(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+(?:com|org|net|io|gov|edu)(?:\b|$)/i;
 const BARE_CITATION_PATTERN = /^\(((?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+(?:com|org|net|io|gov|edu)(?:\/[^\s<>()]*)?)\)/i;
 const AI_IMAGE_PATH_PATTERN = /^\/images\/ai\/(?:answers|walkthroughs|screenshots)\/.+\.(?:avif|gif|jpe?g|png|webp)$/i;
-const AI_IMAGE_ORIGINS = new Set([
-  'https://windowsforum.com',
-  'https://test.windowsforum.com',
-]);
+// Approved image host: the windowsforum.com apex and any of its subdomains
+// (data./test./cdn./…) over HTTPS. The leading dot in the suffix check is
+// what rejects look-alikes like notwindowsforum.com and
+// windowsforum.com.attacker.example.
+const AI_IMAGE_HOST = 'windowsforum.com';
+
+const isApprovedImageOrigin = (url: URL): boolean =>
+  url.protocol === 'https:'
+  && (url.hostname === AI_IMAGE_HOST || url.hostname.endsWith(`.${AI_IMAGE_HOST}`));
+
+// A single raw <img> tag: the assistant sometimes emits HTML rather than
+// Markdown image syntax. src/alt are extracted and re-emitted cleanly; the
+// tag is only honored when its src is an approved AI image (below).
+const LONE_IMG_TAG = /^<img\b[^>]*>$/i;
+const IMG_SRC_ATTR = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i;
+const IMG_ALT_ATTR = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i;
 
 const escapeHtml = (value: string): string => value
   .replace(/&/g, '&amp;')
@@ -89,8 +101,24 @@ const isSafeLink = (href: string): boolean => {
 const isApprovedAiImage = (href: string): boolean => {
   const url = parseHttpUrl(href);
   return url !== null
-    && AI_IMAGE_ORIGINS.has(url.origin)
+    && isApprovedImageOrigin(url)
     && AI_IMAGE_PATH_PATTERN.test(url.pathname);
+};
+
+/**
+ * Renders a raw HTML <img> tag as a clean, approved image element, or null
+ * when the markup is not a single <img> from an approved AI-image origin.
+ * Everything else in the raw-HTML surface stays escaped for XSS safety.
+ */
+const approvedRawImage = (rawHtml: string): string | null => {
+  const trimmed = rawHtml.trim();
+  if (!LONE_IMG_TAG.test(trimmed)) return null;
+  const srcMatch = IMG_SRC_ATTR.exec(trimmed);
+  const href = srcMatch ? (srcMatch[1] ?? srcMatch[2] ?? '') : '';
+  if (!isApprovedAiImage(href)) return null;
+  const altMatch = IMG_ALT_ATTR.exec(trimmed);
+  const alt = altMatch ? (altMatch[1] ?? altMatch[2] ?? '') : 'Windows screenshot';
+  return `<img src="${escapeHtml(href)}" alt="${escapeHtml(alt)}">`;
 };
 
 const linkAttributes = (href: string, title?: string | null): string => {
@@ -127,7 +155,9 @@ export const sanitizeAndParse = (content: string): string => {
   const markdown = new Marked({
     renderer: {
       html({ text }) {
-        return escapeHtml(text);
+        // Honor a raw <img> from an approved AI-image origin; escape the
+        // rest of the raw-HTML surface (scripts, forms, iframes, etc.).
+        return approvedRawImage(text) ?? escapeHtml(text);
       },
       link({ href, title, text, tokens }) {
         if (isApprovedAiImage(href) && href === text) {
