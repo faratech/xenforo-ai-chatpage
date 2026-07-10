@@ -8,6 +8,7 @@ import {
   mergeStores,
   parseStore,
   saveStore,
+  serializeStore,
   storageKeys,
 } from '../services/storage';
 
@@ -94,6 +95,42 @@ describe('v2 → v3 migration', () => {
     expect(parseStore(storage.getItem(keys.store))?.version).toBe(3);
   });
 
+  it('frees the legacy blob before writing v3 so a quota failure cannot strand or mass-evict it', () => {
+    const keys = storageKeys('42');
+    const legacy = {
+      conv_1: conversation('conv_1', 1_000),
+      conv_2: conversation('conv_2', 2_000),
+    };
+    storage.setItem(keys.legacyConversations, JSON.stringify(legacy));
+    storage.setItem(keys.legacyCurrent, 'conv_2');
+    // The v3 envelope write fails once (quota) during migration.
+    storage.failWrites(keys.store, 1);
+
+    const loaded = loadStore('42');
+    // Legacy keys are removed regardless of the failed write — not orphaned.
+    expect(storage.getItem(keys.legacyConversations)).toBeNull();
+    expect(storage.getItem(keys.legacyCurrent)).toBeNull();
+    // The parsed history is still in memory, fully intact (nothing evicted).
+    expect(Object.keys(loaded.store.conversations).sort()).toEqual(['conv_1', 'conv_2']);
+
+    // The next save now fits without evicting, since the legacy blob is gone.
+    const result = saveStore('42', loaded.store, 'conv_2');
+    expect(result.persisted).toBe(true);
+    expect(result.evictedIds).toEqual([]);
+  });
+
+  it('ignores a poisoned current id from localStorage', () => {
+    const keys = storageKeys('42');
+    saveStore('42', {
+      ...emptyStore(),
+      conversations: { conv_1: conversation('conv_1', 1_000) },
+    }, 'conv_1');
+    storage.setItem(keys.current, '__proto__');
+    const loaded = loadStore('42');
+    expect(loaded.currentId).toBeNull();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it('drops unscoped pre-v2 keys that cannot be assigned to a user', () => {
     storage.setItem('chat_conversations', '{"leaked": {}}');
     storage.setItem('current_conversation_id', 'leaked');
@@ -107,6 +144,34 @@ describe('v2 → v3 migration', () => {
     expect(parseStore('{"version":2,"conversations":{}}')).toBeNull();
     expect(parseStore('not json')).toBeNull();
     expect(parseStore(null)).toBeNull();
+  });
+});
+
+describe('canonical serialization (cross-tab ping-pong guard)', () => {
+  it('serializes identical content identically regardless of current conversation', () => {
+    const conversations = {
+      conv_a: conversation('conv_a', 2_000),
+      conv_b: conversation('conv_b', 1_000),
+      conv_c: conversation('conv_c', 3_000),
+    };
+    // Two tabs, different current conversations → cap orders them differently,
+    // but the persisted bytes must match so writes converge to a fixpoint.
+    const tabA = applyTombstones({ ...emptyStore(), conversations: enforceConversationCap(conversations, 'conv_a') });
+    const tabB = applyTombstones({ ...emptyStore(), conversations: enforceConversationCap(conversations, 'conv_c') });
+    expect(serializeStore(tabA)).toBe(serializeStore(tabB));
+  });
+
+  it('does not rewrite localStorage when the content is unchanged', () => {
+    const store: ChatStoreV3 = {
+      ...emptyStore(),
+      conversations: { conv_1: conversation('conv_1', 1_000) },
+    };
+    saveStore('42', store, 'conv_1');
+    const setItemSpy = vi.spyOn(window.localStorage, 'setItem');
+    // A second save with the same content (different current id) must be a no-op.
+    saveStore('42', store, 'conv_1');
+    const storeWrites = setItemSpy.mock.calls.filter(([key]) => key === storageKeys('42').store);
+    expect(storeWrites).toHaveLength(0);
   });
 });
 

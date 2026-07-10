@@ -275,6 +275,26 @@ const gcTimestampMap = (map: Record<string, number>, now: number): Record<string
   return result;
 };
 
+const sortedByKey = <T>(map: Record<string, T>): Record<string, T> => {
+  const result: Record<string, T> = {};
+  for (const key of Object.keys(map).sort()) result[key] = map[key];
+  return result;
+};
+
+/**
+ * Serializes the store with every map keyed in a canonical (sorted) order.
+ * Two tabs holding identical content therefore produce byte-identical JSON
+ * regardless of which conversation each has selected — without this, the
+ * current-conversation-first ordering made cross-tab writes ping-pong
+ * forever between tabs on different conversations.
+ */
+export const serializeStore = (store: ChatStoreV3): string => JSON.stringify({
+  version: 3,
+  conversations: sortedByKey(store.conversations),
+  tombstones: sortedByKey(store.tombstones),
+  pendingServerDeletions: sortedByKey(store.pendingServerDeletions),
+});
+
 // DOMException does not extend Error in every runtime; match on shape.
 const isQuotaError = (error: unknown): boolean => {
   if (!error || typeof error !== 'object') return false;
@@ -306,20 +326,26 @@ export const loadStore = (userId: string): LoadResult => {
 
     let store = parseStore(localStorage.getItem(keys.store));
     let currentId = localStorage.getItem(keys.current);
+    // A poisoned current id (e.g. "__proto__") must never reach an object
+    // key or enforceConversationCap; the JSON paths already filter these.
+    if (currentId && DANGEROUS_KEYS.has(currentId)) currentId = null;
 
     if (!store) {
       // One-time v2 → v3 migration.
       store = emptyStore();
       store.conversations = parseConversationMap(localStorage.getItem(keys.legacyConversations));
       const legacyCurrent = localStorage.getItem(keys.legacyCurrent);
-      if (legacyCurrent && !currentId) currentId = legacyCurrent;
+      if (legacyCurrent && !DANGEROUS_KEYS.has(legacyCurrent) && !currentId) currentId = legacyCurrent;
+      // Remove the legacy blob BEFORE writing the v3 envelope: its data is
+      // already parsed into `store`, and freeing its space first prevents a
+      // large v2 store from forcing the first save to evict live history.
+      localStorage.removeItem(keys.legacyConversations);
+      localStorage.removeItem(keys.legacyCurrent);
       try {
-        localStorage.setItem(keys.store, JSON.stringify(store));
+        localStorage.setItem(keys.store, serializeStore(store));
         if (currentId) localStorage.setItem(keys.current, currentId);
-        localStorage.removeItem(keys.legacyConversations);
-        localStorage.removeItem(keys.legacyCurrent);
       } catch {
-        // Quota pressure during migration is handled by the first save.
+        // The first saveStore retries with eviction if quota is still tight.
       }
     }
 
@@ -366,8 +392,16 @@ export const saveStore = (
   const evictedIds: string[] = [];
   for (;;) {
     try {
-      localStorage.setItem(keys.store, JSON.stringify(prepared));
-      localStorage.setItem(keys.current, currentId);
+      const serialized = serializeStore(prepared);
+      // No-op guard: skip the write (and the storage event it would fire in
+      // other tabs) when the on-disk store is already byte-identical. With
+      // canonical serialization this converges cross-tab writes to a fixpoint.
+      if (localStorage.getItem(keys.store) !== serialized) {
+        localStorage.setItem(keys.store, serialized);
+      }
+      if (localStorage.getItem(keys.current) !== currentId) {
+        localStorage.setItem(keys.current, currentId);
+      }
       return { persisted: true, evictedIds, store: prepared };
     } catch (error) {
       if (!isQuotaError(error)) {

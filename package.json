@@ -41,7 +41,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
+    "lint": "node scripts/shadow-lint-typescript.mjs && eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:dist": "node scripts/verify-dist.mjs",

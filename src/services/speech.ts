@@ -37,11 +37,15 @@ export const markdownToSpeechText = (markdown: string): string => {
     .replace(/(\*\*|__)(.*?)\1/g, '$2')
     .replace(/(\*|_)(.*?)\1/g, '$2')
     .replace(/~~(.*?)~~/g, '$1')
-    // Table pipes and header separators read as noise.
+    // Table pipes and header separators read as noise. The separator-row
+    // rule uses a single character class with one quantifier and excludes
+    // newlines: overlapping quantifiers over the space character caused
+    // cubic backtracking that could freeze the main thread on a long
+    // whitespace run followed by a non-matching character.
     .replace(/^\s*\|/gm, '')
     .replace(/\|\s*$/gm, '')
     .replace(/\|/g, ', ')
-    .replace(/^\s*[:\- ,]+\s*$/gm, ' ')
+    .replace(/^[ \t:\-,]+$/gm, ' ')
     .replace(/[ \t]+/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .trim();

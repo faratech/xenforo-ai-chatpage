@@ -105,6 +105,13 @@ interface ActiveTurn {
   userMessageId: string;
   partialText: string;
   annotations: Annotation[];
+  /**
+   * For branch operations (edit/regenerate/retry), the pre-turn messages
+   * and title, so an abort before any output restores the original branch
+   * instead of leaving it truncated.
+   */
+  rollbackMessages?: Message[];
+  rollbackTitle?: string;
 }
 
 interface PendingCaptchaTurn {
@@ -260,6 +267,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const inputRef = useRef(input);
   const mutedRef = useRef(isMuted);
   const isClearingRef = useRef(false);
+  // Set before applying a remote (cross-tab) change so the resulting persist
+  // effect does not write it straight back — that write-back is what made two
+  // tabs on different conversations ping-pong storage events forever.
+  const skipNextPersistRef = useRef(false);
   const keepListeningRef = useRef(false);
   const dictationPrefixRef = useRef('');
   const runTurnRef = useRef<(params: TurnParams) => Promise<void>>(async () => {});
@@ -312,6 +323,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   useEffect(() => {
     conversationsRef.current = conversations;
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return;
+    }
     persistStore();
   }, [conversations, persistStore]);
   useEffect(() => { persistStore(); }, [currentConversationId, persistStore]);
@@ -364,19 +379,30 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     cancelStreamingFrame();
     if (conversationsRef.current[turn.conversationId]) {
       // The server may have consumed this turn; resync it next time.
-      updateConversationById(turn.conversationId, conversation => ({
-        needsServerResync: true,
-        messages: persistPartial && turn.partialText.trim()
-          ? [...conversation.messages, {
+      if (persistPartial && turn.partialText.trim()) {
+        updateConversationById(turn.conversationId, conversation => ({
+          needsServerResync: true,
+          messages: [...conversation.messages, {
             id: messageId('_stopped'),
             role: 'ai' as const,
             rawContent: `${turn.partialText.trimEnd()}\n\n_Generation stopped._`,
             timestamp: Date.now(),
             status: 'stopped' as const,
             annotations: turn.annotations,
-          }]
-          : conversation.messages,
-      }));
+          }],
+        }));
+      } else if (turn.rollbackMessages) {
+        // A branch operation aborted before any output: restore the original
+        // branch rather than leaving it truncated (the contract for
+        // edit/regenerate/retry).
+        updateConversationById(turn.conversationId, () => ({
+          needsServerResync: true,
+          messages: turn.rollbackMessages,
+          ...(turn.rollbackTitle !== undefined ? { title: turn.rollbackTitle } : {}),
+        }));
+      } else {
+        updateConversationById(turn.conversationId, () => ({ needsServerResync: true }));
+      }
     }
     setActiveRequestId(null);
     setStreamingState(null);
@@ -500,16 +526,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       if (event.key !== keys.store || !event.newValue) return;
       const remote = parseStore(event.newValue);
       if (!remote) return;
-      const merged = mergeStores({
-        version: 3,
-        conversations: conversationsRef.current,
-        tombstones: tombstonesRef.current,
-        pendingServerDeletions: pendingDeletionsRef.current,
-      }, remote);
-      tombstonesRef.current = merged.tombstones;
-      pendingDeletionsRef.current = merged.pendingServerDeletions;
-      setConversations(enforceConversationCap(merged.conversations, currentConversationIdRef.current));
-      if (merged.tombstones[currentConversationIdRef.current] !== undefined) {
+      const currentTombstoned = remote.tombstones[currentConversationIdRef.current] !== undefined
+        || (tombstonesRef.current[currentConversationIdRef.current] !== undefined);
+      // Do not persist the merge straight back to disk; the other tab is the
+      // writer of record for this event.
+      skipNextPersistRef.current = true;
+      // Merge against the LATEST state, not the passive ref, so a just-enqueued
+      // in-flight update (e.g. a completed AI reply) is not clobbered.
+      setConversations(previous => {
+        const merged = mergeStores({
+          version: 3,
+          conversations: previous,
+          tombstones: tombstonesRef.current,
+          pendingServerDeletions: pendingDeletionsRef.current,
+        }, remote);
+        tombstonesRef.current = merged.tombstones;
+        pendingDeletionsRef.current = merged.pendingServerDeletions;
+        return enforceConversationCap(merged.conversations, currentConversationIdRef.current);
+      });
+      if (currentTombstoned) {
         if (activeTurnRef.current?.conversationId === currentConversationIdRef.current) {
           abortActiveTurn(false);
         }
@@ -639,6 +674,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       userMessageId: userMessage.id,
       partialText: '',
       annotations: [],
+      rollbackMessages: params.rollbackMessages,
+      rollbackTitle: params.rollbackTitle,
     };
     activeTurnRef.current = turn;
     setActiveRequestId(requestId);
@@ -984,13 +1021,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     if (streamingFrameRef.current !== null) cancelAnimationFrame(streamingFrameRef.current);
     if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
       // Unmount (navigation/account switch) interrupted a turn; persist the
-      // resync marker directly since no further renders will run.
+      // resync marker directly since no further renders will run. A branch
+      // operation interrupted before output is restored to its original
+      // branch so the prior answer is not lost on disk.
       const conversation = conversationsRef.current[active.conversationId];
+      const restored = active.rollbackMessages && !active.partialText.trim()
+        ? {
+          ...conversation,
+          messages: active.rollbackMessages,
+          ...(active.rollbackTitle !== undefined ? { title: active.rollbackTitle } : {}),
+          needsServerResync: true,
+          updatedAt: Date.now(),
+        }
+        : { ...conversation, needsServerResync: true, updatedAt: Date.now() };
       saveStore(userId, {
         version: 3,
         conversations: {
           ...conversationsRef.current,
-          [active.conversationId]: { ...conversation, needsServerResync: true, updatedAt: Date.now() },
+          [active.conversationId]: restored,
         },
         tombstones: tombstonesRef.current,
         pendingServerDeletions: pendingDeletionsRef.current,

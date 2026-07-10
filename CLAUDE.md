@@ -18,7 +18,7 @@ The app is served through the `/web/public_html/chatpage` symlink at `https://wi
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
-- **TypeScript layout**: the root `typescript@7` (native Go compiler) is the project compiler for `npm run typecheck`. `typescript-eslint` cannot load it (no JS compiler API; peer range caps at `<6.1.0`), so the `typescript-lint` devDependency (aliased `typescript@6`) is planted as the lint chain's nested `typescript` resolution by the postinstall script `scripts/shadow-lint-typescript.mjs`, and `.npmrc` sets `legacy-peer-deps` to accept the peer conflict. Remove all three together once typescript-eslint supports TS 7.
+- **TypeScript layout**: the root `typescript@7` (native Go compiler) is the project compiler for `npm run typecheck`. `typescript-eslint` cannot load it (no JS compiler API; peer range caps at `<6.1.0`), so the `typescript-lint` devDependency (aliased `typescript@6`) is planted as the lint chain's nested `typescript` resolution by `scripts/shadow-lint-typescript.mjs` (run both as a `postinstall` hook and at the start of `npm run lint`, so an `--ignore-scripts` reinstall can't leave lint broken), and `.npmrc` sets `legacy-peer-deps` to accept the peer conflict. Remove all four (alias, script, `.npmrc` line, lint prefix) together once typescript-eslint supports TS 7.
 - **Build Output**: `dist/` directory (stable `main.js`/`main.css`, content-hashed chunks/media)
 - **Base Path**: `/chatpage` (configured in `vite.config.ts` `base` field)
 - **Environment**: Variables in `.env` must be prefixed with `VITE_`

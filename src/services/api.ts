@@ -281,47 +281,61 @@ async function fetchAPI<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
+  // The deadline must cover the body read, not just time-to-headers: a
+  // stalled response body would otherwise hang forever (json() ignores a
+  // cleared timer). It is cleared only after the body is fully consumed.
   const deadline = withDeadline(JSON_REQUEST_TIMEOUT_MS);
-  let response: Response;
   try {
-    response = await fetch(`${apiBase}${endpoint}`, {
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
-      ...options,
-      signal: deadline.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${apiBase}${endpoint}`, {
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+        ...options,
+        signal: deadline.signal,
+      });
+    } catch (error) {
+      if (deadline.timedOut()) {
+        throw new APIError('The server did not respond in time', {
+          code: 'timeout',
+          retryable: true,
+        });
+      }
+      if (isAbortError(error)) throw error;
+      throw new APIError('Network request failed', {
+        code: 'network_error',
+        retryable: true,
+      });
+    }
+
+    if (!response.ok) {
+      const errorData = await readErrorResponse(response);
+      throw new APIError(
+        errorMessage(errorData, `HTTP ${response.status}: ${response.statusText}`),
+        {
+          status: response.status,
+          code: errorCode(errorData),
+          retryable: isRetryableStatus(response.status),
+        }
+      );
+    }
+
+    return await response.json() as T;
   } catch (error) {
+    // A deadline abort during the body read surfaces here as an AbortError.
     if (deadline.timedOut()) {
       throw new APIError('The server did not respond in time', {
         code: 'timeout',
         retryable: true,
       });
     }
-    if (isAbortError(error)) throw error;
-    throw new APIError('Network request failed', {
-      code: 'network_error',
-      retryable: true,
-    });
+    throw error;
   } finally {
     deadline.clear();
   }
-
-  if (!response.ok) {
-    const errorData = await readErrorResponse(response);
-    throw new APIError(
-      errorMessage(errorData, `HTTP ${response.status}: ${response.statusText}`),
-      {
-        status: response.status,
-        code: errorCode(errorData),
-        retryable: isRetryableStatus(response.status),
-      }
-    );
-  }
-
-  return response.json();
 }
 
 /**
@@ -405,8 +419,10 @@ export class ChatAPI {
     }
 
     if (!response.ok) {
-      firstByte.clear();
+      // Read the error body while the first-byte deadline still governs, so
+      // a stalled error body cannot hang here; then clear it.
       const errorData = await readErrorResponse(response);
+      firstByte.clear();
       if (errorData.captcha_required) throw new CaptchaRequiredError();
 
       throw new APIError(

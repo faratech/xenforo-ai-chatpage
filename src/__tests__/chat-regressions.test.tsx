@@ -201,6 +201,31 @@ describe('transactional branch operations', () => {
     expect(apiMocks.sendMessage).toHaveBeenCalledTimes(2);
     expect(messageParagraphs('First answer')).toHaveLength(1);
   });
+
+  it('restores the original branch when a regeneration is stopped before any output', async () => {
+    await bootWithExchange();
+    // The turn hangs until aborted, producing no partial text.
+    apiMocks.sendMessage.mockImplementationOnce((_message: string, options: {
+      signal: AbortSignal;
+    }) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        reject(new StreamCancelledError('cancelled', ''));
+      }, { once: true });
+    }));
+
+    fireEvent.click(screen.getByLabelText('Regenerate response'));
+    fireEvent.click(await screen.findByLabelText('Stop generation'));
+
+    // Stopping before any output must NOT leave the branch truncated: the
+    // previous answer is restored, and the turn is flagged for resync.
+    expect(await screen.findByText('First answer')).toBeInTheDocument();
+    expect(messageParagraphs('First question')).toHaveLength(1);
+    await waitFor(() => {
+      const stored = Object.values(readStore('42').conversations)
+        .find(conversation => conversation.messages.some(message => message.rawContent === 'First answer'));
+      expect(stored?.needsServerResync).toBe(true);
+    });
+  });
 });
 
 describe('/clear', () => {

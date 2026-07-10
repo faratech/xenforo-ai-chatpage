@@ -6,9 +6,13 @@ const identityMocks = vi.hoisted(() => ({
   getUserData: vi.fn(),
 }));
 
-vi.mock('../services/api', () => ({
-  ChatAPI: { getUserData: identityMocks.getUserData },
-}));
+vi.mock('../services/api', async importOriginal => {
+  const actual = await importOriginal<typeof import('../services/api')>();
+  return {
+    ...actual,
+    ChatAPI: { getUserData: identityMocks.getUserData },
+  };
+});
 
 vi.mock('../components/ChatWindow', () => ({
   ChatWindow: ({ userId }: { userId: string }) => (
@@ -16,6 +20,7 @@ vi.mock('../components/ChatWindow', () => ({
   ),
 }));
 
+import { APIError } from '../services/api';
 import App from '../App';
 
 beforeAll(() => {
@@ -71,6 +76,28 @@ describe('identity lifecycle', () => {
     expect(screen.queryByText('chat-user-42')).not.toBeInTheDocument();
   });
 
+  it('re-runs a coalesced revalidation so an account switch mid-request is not missed', async () => {
+    identityMocks.getUserData.mockResolvedValueOnce(user(42));
+    render(<App />);
+    await screen.findByText('chat-user-42');
+
+    // First revalidation is slow; a second trigger arrives while it is in
+    // flight and must be honored once the first settles.
+    let resolveFirst: ((value: unknown) => void) | undefined;
+    identityMocks.getUserData
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce(user(99));
+
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    act(() => { window.dispatchEvent(new Event('focus')); }); // coalesced
+
+    await act(async () => { resolveFirst?.(user(42)); });
+
+    // The queued re-run picks up the switched account.
+    expect(await screen.findByText('chat-user-99')).toBeInTheDocument();
+    expect(identityMocks.getUserData).toHaveBeenCalledTimes(3);
+  });
+
   it('hides the existing history while revalidation is in flight', async () => {
     identityMocks.getUserData.mockResolvedValueOnce(user(42));
     render(<App />);
@@ -105,20 +132,39 @@ describe('identity lifecycle', () => {
     await waitFor(() => expect(identityMocks.getUserData).toHaveBeenCalledTimes(2));
   });
 
-  it('shows the error state instead of stale history when revalidation fails', async () => {
+  it('keeps the established chat mounted when a revalidation fails transiently', async () => {
     identityMocks.getUserData.mockResolvedValueOnce(user(42));
     render(<App />);
     await screen.findByText('chat-user-42');
 
-    identityMocks.getUserData.mockRejectedValueOnce(new Error('session check failed'));
-    act(() => {
+    identityMocks.getUserData.mockRejectedValueOnce(
+      new APIError('network down', { code: 'network_error', retryable: true }),
+    );
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    // Transient failure: the chat stays, plus a non-destructive notice.
+    expect(screen.getByText('chat-user-42')).toBeInTheDocument();
+    expect(screen.queryByText(/could not verify your WindowsForum session/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/still using your last verified session/)).toBeInTheDocument();
+  });
+
+  it('tears down the chat when a revalidation fails authoritatively', async () => {
+    identityMocks.getUserData.mockResolvedValueOnce(user(42));
+    render(<App />);
+    await screen.findByText('chat-user-42');
+
+    identityMocks.getUserData.mockRejectedValueOnce(
+      new APIError('forbidden', { status: 403, retryable: false }),
+    );
+    await act(async () => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
 
     expect(await screen.findByText(/could not verify your WindowsForum session/)).toBeInTheDocument();
     expect(screen.queryByText('chat-user-42')).not.toBeInTheDocument();
 
-    // Retry restores the chat.
     identityMocks.getUserData.mockResolvedValueOnce(user(42));
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('chat-user-42')).toBeInTheDocument();
@@ -128,5 +174,19 @@ describe('identity lifecycle', () => {
     identityMocks.getUserData.mockResolvedValue(user(0));
     render(<App />);
     expect(await screen.findByText(/could not verify your WindowsForum session/)).toBeInTheDocument();
+  });
+
+  it('tears down the chat when revalidation returns an unstable identity', async () => {
+    identityMocks.getUserData.mockResolvedValueOnce(user(42));
+    render(<App />);
+    await screen.findByText('chat-user-42');
+
+    identityMocks.getUserData.mockResolvedValueOnce(user(0));
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    expect(await screen.findByText(/could not verify your WindowsForum session/)).toBeInTheDocument();
+    expect(screen.queryByText('chat-user-42')).not.toBeInTheDocument();
   });
 });

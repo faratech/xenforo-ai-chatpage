@@ -48,6 +48,18 @@ describe('markdownToSpeechText', () => {
     expect(markdownToSpeechText('')).toBe('');
     expect(markdownToSpeechText('```\nonly code\n```')).toBe('');
   });
+
+  it('processes a long whitespace run in linear time (no catastrophic backtracking)', () => {
+    // A long space run followed by a non-matching character used to trigger
+    // cubic regex backtracking that froze the main thread for minutes.
+    const input = `Answer:\n${' '.repeat(8_000)}y\nDone.`;
+    const start = performance.now();
+    const output = markdownToSpeechText(input);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(500);
+    expect(output).toContain('y');
+    expect(output).toContain('Done.');
+  });
 });
 
 describe('splitSpeechChunks', () => {

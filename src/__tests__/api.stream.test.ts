@@ -108,6 +108,34 @@ describe('request deadlines', () => {
     await expectation;
   });
 
+  it('times out a JSON request whose body stalls after headers arrive', async () => {
+    vi.useFakeTimers();
+    // Headers resolve immediately; the body read hangs until the deadline
+    // aborts the signal. The deadline must still cover this window.
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => Promise.resolve({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: () => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      }),
+    } as unknown as Response)));
+
+    const promise = ChatAPI.getUserData();
+    const expectation = expect(promise).rejects.toMatchObject({
+      name: 'APIError',
+      code: 'timeout',
+      retryable: true,
+    });
+    await vi.advanceTimersByTimeAsync(JSON_REQUEST_TIMEOUT_MS + 1);
+    await expectation;
+  });
+
   it('applies the between-chunk inactivity limit only after the first byte', async () => {
     vi.useFakeTimers();
     const body = new ReadableStream<Uint8Array>({
