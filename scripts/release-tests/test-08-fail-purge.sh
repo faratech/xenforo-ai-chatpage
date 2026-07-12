@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cloudflare purge fails after switches and template sync: full restore,
+# Cloudflare purge fails after switches and template import: full restore,
 # re-purge succeeds, restored state re-verifies.
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

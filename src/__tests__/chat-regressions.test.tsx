@@ -324,6 +324,7 @@ describe('server deletion retries', () => {
     const conversationId = apiMocks.sendMessage.mock.calls[0][1].conversationId as string;
 
     fireEvent.click(screen.getByLabelText('Open chat history'));
+    expect(document.getElementById('wf-chat-window')).toContainElement(await screen.findByText('Recent chats'));
     fireEvent.click(await screen.findByLabelText('Delete conversation'));
 
     await waitFor(() => {

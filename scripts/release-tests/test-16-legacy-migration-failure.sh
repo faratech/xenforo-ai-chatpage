@@ -9,11 +9,11 @@ setup_sandbox
 make_legacy_public_dir "$PUBLIC_LINK"
 make_legacy_public_dir "$PEER_PUBLIC_LINK"
 
-add_rule php 1 skip:1 'sync-templates'
+add_rule php 1 skip:1 'import-templates'
 
 rc=0
 run_deploy || rc=$?
-[[ "$rc" -ne 0 ]] || fail_test "deploy should have failed at template sync"
+[[ "$rc" -ne 0 ]] || fail_test "deploy should have failed at template import"
 
 # Both hosts are plain directories again with the original payload
 assert_plain_dir "$PUBLIC_LINK"

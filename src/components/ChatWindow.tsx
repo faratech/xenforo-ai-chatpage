@@ -47,8 +47,11 @@ import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 const MAX_MESSAGE_BYTES = 500;
 /** Local history items sent with every request as server recovery context. */
 const HISTORY_CONTEXT_ITEMS = 20;
+const HISTORY_CONTEXT_ITEM_BYTES = 4_000;
 const TURNSTILE_LOAD_TIMEOUT_MS = 15_000;
 const PENDING_DELETION_RETRY_MS = 60_000;
+const utf8Encoder = new TextEncoder();
+const byteLength = (value: string): number => utf8Encoder.encode(value).length;
 
 const messageId = (suffix = ''): string => {
   const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -123,6 +126,22 @@ const getMessageText = (message: Message): string => message.rawContent.trim();
 
 /** Trailing markers appended to stopped/interrupted responses are UI, not context. */
 const INTERRUPTION_MARKER = /\n\n_(?:Generation stopped|Response interrupted)\._$/;
+const HISTORY_TRUNCATION_MARKER = '\n[truncated]';
+
+const truncateHistoryContent = (content: string): string => {
+  if (byteLength(content) <= HISTORY_CONTEXT_ITEM_BYTES) return content;
+
+  const byteBudget = HISTORY_CONTEXT_ITEM_BYTES - byteLength(HISTORY_TRUNCATION_MARKER);
+  let bytes = 0;
+  let end = 0;
+  for (const character of content) {
+    const characterBytes = byteLength(character);
+    if (bytes + characterBytes > byteBudget) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return `${content.slice(0, end)}${HISTORY_TRUNCATION_MARKER}`;
+};
 
 const serializeConversationHistory = (messages: Message[]): ChatMessageHistoryItem[] => messages
   .map((message, index) => ({ message, index }))
@@ -133,10 +152,13 @@ const serializeConversationHistory = (messages: Message[]): ChatMessageHistoryIt
       && message.status !== 'sending'
       && !(index === 0 && message.role === 'ai' && text.startsWith('Welcome to WindowsForum.com'));
   })
-  .map(({ message }) => ({
-    role: message.role === 'ai' ? 'assistant' as const : 'user' as const,
-    content: getMessageText(message).replace(INTERRUPTION_MARKER, '').trim(),
-  }))
+  .map(({ message }) => {
+    const content = getMessageText(message).replace(INTERRUPTION_MARKER, '').trim();
+    return {
+      role: message.role === 'ai' ? 'assistant' as const : 'user' as const,
+      content: truncateHistoryContent(content),
+    };
+  })
   .filter(item => item.content !== '');
 
 type TurnstileApi = NonNullable<Window['turnstile']>;
@@ -197,8 +219,6 @@ const loadTurnstile = (): Promise<TurnstileApi> => {
   return loader;
 };
 
-const byteLength = (value: string): number => new TextEncoder().encode(value).length;
-
 export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
   const theme = useTheme();
   const isGuest = userId.startsWith('guest_');
@@ -253,7 +273,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const skipNextAutoFollowRef = useRef(false);
   const textFieldRef = useRef<HTMLDivElement>(null);
   const conversationsRef = useRef(conversations);
   const currentConversationIdRef = useRef(currentConversationId);
@@ -1005,12 +1025,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   const scrollToLatest = useCallback(() => {
     setAutoFollow(true);
-    messagesEndRef.current?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth' });
+    const element = messagesContainerRef.current;
+    if (!element) return;
+    if (reduceMotion) {
+      element.scrollTop = element.scrollHeight;
+      return;
+    }
+    skipNextAutoFollowRef.current = true;
+    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
   }, [reduceMotion]);
 
   useEffect(() => {
     if (!autoFollow) return;
-    const frame = requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ block: 'end' }));
+    if (skipNextAutoFollowRef.current) {
+      skipNextAutoFollowRef.current = false;
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const element = messagesContainerRef.current;
+      if (element) element.scrollTop = element.scrollHeight;
+    });
     return () => cancelAnimationFrame(frame);
   }, [autoFollow, currentConversation.messages, streamingState]);
 
@@ -1071,7 +1105,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const usageTooltip = `AI messages today · ${usageTierLabel}`;
 
   return (
-    <Box className="wf-chat-window" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
+    <Box id="wf-chat-window" className="wf-chat-window" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
       <ConversationSidebar
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -1194,7 +1228,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               Jump to latest
             </Button>
           )}
-          <div ref={messagesEndRef} />
         </Box>
 
         <InputArea

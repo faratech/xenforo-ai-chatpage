@@ -30,7 +30,7 @@ for (const icon of manifest.icons || []) {
 }
 
 const requiredMarkup = [
-  /<div id="root"><\/div>/,
+  /<div id="root" class="google-anno-skip" style="min-height:100vh"><\/div>/,
   /<script type="module"[^>]+src="\/chatpage\/static\/js\/main\.js\?v=2"/,
   /<link rel="stylesheet"[^>]+href="\/chatpage\/static\/css\/main\.css\?v=2"/,
 ];

@@ -33,7 +33,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
       onClose={onClose}
       // Keep the portal inside the scoped chat wrapper so the embedded
       // XenForo page never receives chat DOM or styling.
-      ModalProps={{ container: () => document.getElementById('react-chat-container') }}
+      ModalProps={{ container: () => document.getElementById('wf-chat-window') }}
       sx={{ '& .MuiDrawer-paper': { width: 288, backgroundColor: 'background.paper' } }}
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>

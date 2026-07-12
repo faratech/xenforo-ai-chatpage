@@ -1,0 +1,86 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+
+const xenForoRoot = path.resolve(process.argv[2] || '/web/public_html');
+const stylesRoot = path.resolve(
+  process.argv[3] || path.join(xenForoRoot, 'src/styles'),
+);
+const requireChatContract = process.argv.includes('--require-chat-contract');
+
+const templates = [
+  '_page_node.313',
+  '_widget_ai_chat.html',
+  'react_chat_container.html',
+];
+const requiredMarkup = requireChatContract ? [
+  '<div id="root" class="google-anno-skip" style="min-height:100vh"></div>',
+  'href="https://windowsforum.com/chatpage/static/css/main.css?v=2"',
+  'type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"',
+] : [];
+const styleSpecs = [
+  { designer: 'wf3', compiledStyleIds: [40, 50] },
+  { designer: 'wf3_domperf', compiledStyleIds: [47] },
+];
+const languageIds = [0, 1];
+
+const md5 = (contents) => createHash('md5').update(contents).digest('hex');
+
+for (const { designer, compiledStyleIds } of styleSpecs) {
+  const templatesRoot = path.join(stylesRoot, designer, 'templates');
+  const metadata = JSON.parse(
+    await readFile(path.join(templatesRoot, '_metadata.json'), 'utf8'),
+  );
+
+  for (const template of templates) {
+    const sourcePath = path.join(templatesRoot, 'public', template);
+    const source = await readFile(sourcePath, 'utf8');
+    const sourceHash = md5(source);
+    const metadataKey = `public/${template}`;
+
+    if (metadata[metadataKey]?.hash !== sourceHash) {
+      throw new Error(
+        `${designer}/${metadataKey} metadata hash does not match the imported source`,
+      );
+    }
+
+    for (const markup of requiredMarkup) {
+      if (!source.includes(markup)) {
+        throw new Error(`${designer}/${metadataKey} is missing ${markup}`);
+      }
+    }
+
+    const compiledName = template.endsWith('.html')
+      ? template.slice(0, -5)
+      : template;
+
+    for (const languageId of languageIds) {
+      for (const styleId of compiledStyleIds) {
+        const compiledPath = path.join(
+          xenForoRoot,
+          'internal_data/code_cache/templates',
+          `l${languageId}`,
+          `s${styleId}`,
+          'public',
+          `${compiledName}.php`,
+        );
+        const compiled = await readFile(compiledPath, 'utf8');
+
+        if (!compiled.includes(`// FROM HASH: ${sourceHash}`)) {
+          throw new Error(
+            `${compiledPath} was not compiled from ${designer}/${metadataKey}`,
+          );
+        }
+        for (const markup of requiredMarkup) {
+          if (!compiled.includes(markup)) {
+            throw new Error(`${compiledPath} is missing ${markup}`);
+          }
+        }
+      }
+    }
+  }
+}
+
+console.log(
+  `Verified six imported XenForo chat templates and 18 language/style compiled consumers${requireChatContract ? ' against the current chat contract' : ''}.`,
+);

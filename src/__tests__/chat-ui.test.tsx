@@ -43,6 +43,10 @@ import { Message } from '../components/Message';
 
 const theme = createTheme();
 const renderThemed = (node: React.ReactNode) => render(<ThemeProvider theme={theme}>{node}</ThemeProvider>);
+const scrollIntoViewMock = vi.fn();
+const elementScrollToMock = vi.fn();
+const windowScrollToMock = vi.fn();
+let prefersReducedMotion = false;
 
 beforeAll(() => {
   const values = new Map<string, string>();
@@ -59,7 +63,7 @@ beforeAll(() => {
   Object.defineProperty(window, 'matchMedia', {
     writable: true,
     value: vi.fn().mockImplementation((query: string) => ({
-      matches: false,
+      matches: query === '(prefers-reduced-motion: reduce)' && prefersReducedMotion,
       media: query,
       onchange: null,
       addEventListener: vi.fn(),
@@ -71,12 +75,24 @@ beforeAll(() => {
   });
   Object.defineProperty(Element.prototype, 'scrollIntoView', {
     configurable: true,
-    value: vi.fn(),
+    value: scrollIntoViewMock,
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+    configurable: true,
+    value: elementScrollToMock,
+  });
+  Object.defineProperty(window, 'scrollTo', {
+    configurable: true,
+    value: windowScrollToMock,
   });
 });
 
 beforeEach(() => {
+  prefersReducedMotion = false;
   window.localStorage.clear();
+  scrollIntoViewMock.mockClear();
+  elementScrollToMock.mockClear();
+  windowScrollToMock.mockClear();
   apiMocks.sendMessage.mockReset();
   apiMocks.getUsage.mockReset().mockResolvedValue({ logged_in: true, used: 1, limit: 10 });
   apiMocks.clearConversation.mockReset().mockResolvedValue({ success: true });
@@ -159,6 +175,61 @@ describe('ChatWindow state ownership', () => {
     });
     expect(await screen.findByText('Verified reply')).toBeInTheDocument();
     expect(screen.getAllByText('Guest question').filter(element => element.tagName === 'P')).toHaveLength(1);
+  });
+});
+
+describe('message scrolling', () => {
+  const setScrollGeometry = (element: HTMLElement) => {
+    Object.defineProperties(element, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_200 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+  };
+
+  it('keeps automatic following inside the message pane', async () => {
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Contained answer', annotations: [] });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const messagePane = await screen.findByLabelText('Chat messages');
+    setScrollGeometry(messagePane);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Contained question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('Contained answer')).toBeInTheDocument();
+    await waitFor(() => expect(messagePane.scrollTop).toBe(1_200));
+    expect(elementScrollToMock).not.toHaveBeenCalled();
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
+    expect(windowScrollToMock).not.toHaveBeenCalled();
+  });
+
+  it('smoothly jumps within the message pane when the user requests it', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const messagePane = await screen.findByLabelText('Chat messages');
+    setScrollGeometry(messagePane);
+    fireEvent.scroll(messagePane);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
+
+    expect(elementScrollToMock).toHaveBeenCalledWith({ top: 1_200, behavior: 'smooth' });
+    expect(messagePane.scrollTop).toBe(0);
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
+    expect(windowScrollToMock).not.toHaveBeenCalled();
+  });
+
+  it('jumps immediately inside the message pane when reduced motion is requested', async () => {
+    prefersReducedMotion = true;
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const messagePane = await screen.findByLabelText('Chat messages');
+    setScrollGeometry(messagePane);
+    fireEvent.scroll(messagePane);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
+
+    expect(messagePane.scrollTop).toBe(1_200);
+    expect(elementScrollToMock).not.toHaveBeenCalled();
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
+    expect(windowScrollToMock).not.toHaveBeenCalled();
   });
 });
 

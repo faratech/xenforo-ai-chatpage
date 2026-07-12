@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rollback: assets AND the rolled-back release's template bundle go live on
-# both nodes, designer sync re-runs, Cloudflare is purged, previous pointers
+# both nodes, designer import re-runs, Cloudflare is purged, previous pointers
 # flip to the rolled-back-from release on each host.
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -18,7 +18,7 @@ r2="$(current_release)"
 grep -q 'v2' "$XENFORO_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \
   || fail_test "v2 templates should be live before rollback"
 
-syncs_before="$(stub_calls php 'sync-templates')"
+imports_before="$(stub_calls php 'import-templates')"
 purges_before="$(stub_calls curl 'purge_cache')"
 
 run_deploy rollback || fail_test "rollback failed"
@@ -26,14 +26,14 @@ run_deploy rollback || fail_test "rollback failed"
 assert_link_target "$PUBLIC_LINK" "$r1"
 assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$r1")"
 
-# r1's template bundle (v1) was applied on both nodes and re-synced
+# r1's template bundle (v1) was applied on both nodes and re-imported
 assert_templates_match_bundle "$r1/xenforo-templates"
 grep -q 'v1' "$XENFORO_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \
   || fail_test "rollback did not restore the v1 templates"
 grep -q 'v1' "$PEER_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \
   || fail_test "rollback did not restore the v1 templates on the peer"
-[[ "$(stub_calls php 'sync-templates')" -gt "$syncs_before" ]] \
-  || fail_test "designer sync did not run during rollback"
+[[ "$(stub_calls php 'import-templates')" -gt "$imports_before" ]] \
+  || fail_test "designer import did not run during rollback"
 [[ "$(stub_calls curl 'purge_cache')" -gt "$purges_before" ]] \
   || fail_test "Cloudflare was not purged during rollback"
 

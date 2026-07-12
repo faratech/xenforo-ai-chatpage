@@ -50,6 +50,7 @@ setup_sandbox() {
   mkdir -p \
     "$SB/local/releases" \
     "$SB/local/public_html" \
+    "$SB/local/db-templates" \
     "$SB/peer/releases" \
     "$SB/peer/public_html" \
     "$SB/bin" "$SB/control" "$SB/app/scripts" "$SB/dist" "$SB/env"
@@ -70,6 +71,7 @@ setup_sandbox() {
   export DEPLOY_OWNER
   export ORIGIN_IP="127.0.0.1"
   export PEER_ORIGIN_IP="10.99.99.2"
+  export PUBLIC_EDGE_IP="203.0.113.10"
   export LIVE_ORIGIN="https://windowsforum.com"
   export RETAIN_RELEASES="${RETAIN_RELEASES:-5}"
   export DEPLOY_RETRY_DELAY=0
@@ -90,6 +92,7 @@ setup_sandbox() {
 
   make_fake_styles "$XENFORO_STYLES_ROOT" "v1"
   make_fake_styles "$PEER_STYLES_ROOT" "v1"
+  snapshot_fake_db_from_styles
   make_fake_dist "$DIST_DIR" "build-1"
   make_app_repo
   write_stubs
@@ -99,12 +102,30 @@ make_app_repo() {
   cp "$RT_APP_SRC/deploy.sh" "$SB/app/deploy.sh"
   cp "$RT_APP_SRC/scripts/verify-dist.mjs" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/verify-xenforo-templates.mjs" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/verify-xenforo-compiled-templates.mjs" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/snapshot-xenforo-template-db.php" "$SB/app/scripts/"
   chmod 755 "$SB/app/deploy.sh"
   git -C "$SB/app" init -q
   git -C "$SB/app" config user.email release-tests@sandbox.invalid
   git -C "$SB/app" config user.name "Release Tests"
   git -C "$SB/app" add -A
   git -C "$SB/app" commit -qm 'sandbox baseline'
+}
+
+snapshot_fake_db_from_styles() {
+  local style template target
+  for style in wf3 wf3_domperf; do
+    target="$SANDBOX_LOCAL/db-templates/$style"
+    mkdir -p "$target"
+    for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
+      cp -f -- "$XENFORO_STYLES_ROOT/$style/templates/public/$template" \
+        "$target/$template"
+      sed -i \
+        -e 's/<div id="root" class="google-anno-skip" style="min-height:100vh"><\/div>/<div id="root"><\/div>/' \
+        -e 's/?v=2/?ver=legacy-db/g' \
+        "$target/$template"
+    done
+  done
 }
 
 # make_fake_styles <styles_root> <version-tag>
@@ -115,7 +136,7 @@ make_fake_styles() {
     mkdir -p "$dir"
     for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
       cat >"$dir/$template" <<TEMPLATE
-<div id="root"></div>
+<div id="root" class="google-anno-skip" style="min-height:100vh"></div>
 <link rel="stylesheet" href="https://windowsforum.com/chatpage/static/css/main.css?v=2">
 <script type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"></script>
 <!-- $style/$template $tag -->
@@ -154,14 +175,14 @@ write_style_metadata() {
 
 # mutate_styles <version-tag> — change the chat templates on both nodes (as the
 # lsyncd-mirrored production trees would be) without touching metadata, i.e. a
-# pending, designer-sync-allowed chat template edit.
+# pending, designer-import-allowed chat template edit.
 mutate_styles() {
   local tag="$1" root style template
   for root in "$XENFORO_STYLES_ROOT" "$PEER_STYLES_ROOT"; do
     for style in wf3 wf3_domperf; do
       for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
         cat >"$root/$style/templates/public/$template" <<TEMPLATE
-<div id="root"></div>
+<div id="root" class="google-anno-skip" style="min-height:100vh"></div>
 <link rel="stylesheet" href="https://windowsforum.com/chatpage/static/css/main.css?v=2">
 <script type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"></script>
 <!-- $style/$template $tag -->
@@ -206,7 +227,7 @@ MANIFEST
     <link rel="stylesheet" crossorigin href="/chatpage/static/css/main.css?v=2">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root" class="google-anno-skip" style="min-height:100vh"></div>
   </body>
 </html>
 HTML
@@ -463,9 +484,24 @@ if [[ "$url" == *api.cloudflare.com*purge_cache* ]]; then
   exit 0
 fi
 
+if [[ "$url" == 'http://127.0.0.1/__hj_cache_purge' ]]; then
+  exit 0
+fi
+
 path="${url#*://}"
 path="/${path#*/}"
 path="${path%%\?*}"
+
+if [[ "$path" == '/pages/ai/' ]]; then
+  if [[ -n "$resolve" && "$resolve" == *":${PEER_ORIGIN_IP}" ]]; then
+    file="$SANDBOX_PEER/public_html/src/styles/wf3/templates/public/_page_node.313"
+  else
+    file="$SANDBOX_LOCAL/public_html/src/styles/wf3/templates/public/_page_node.313"
+  fi
+  if [[ -n "$out" ]]; then cp -f -- "$file" "$out"; else cat -- "$file"; fi
+  exit 0
+fi
+
 rel="${path#/chatpage/}"
 
 if [[ -n "$resolve" && "$resolve" == *":${PEER_ORIGIN_IP}" ]]; then
@@ -510,6 +546,68 @@ case "$mode" in
     exit "${mode#skip:}"
     ;;
 esac
+
+if [[ "${1:-}" == *snapshot-xenforo-template-db.php ]]; then
+  output_root="${3:-}"
+  [[ -n "$output_root" ]] || exit 2
+  mkdir -p "$output_root"
+  cp -a "$SANDBOX_LOCAL/db-templates/." "$output_root/"
+  exit 0
+fi
+
+if [[ "$*" == *"xf-designer:import-templates"* ]]; then
+  designer="${@: -1}"
+  case "$designer" in
+    wf3) style_ids=(40 50) ;;
+    wf3_domperf) style_ids=(47) ;;
+    *) echo "php stub: unexpected designer mode $designer" >&2; exit 1 ;;
+  esac
+
+  templates_root="$PWD/src/styles/$designer/templates"
+  node - "$templates_root" <<'NODE'
+const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.argv[2];
+const metadata = {};
+const walk = (dir, prefix = '') => {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('_metadata.') || entry.name.startsWith('.')) continue;
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, rel);
+    else metadata[rel] = {
+      hash: createHash('md5').update(fs.readFileSync(full)).digest('hex'),
+    };
+  }
+};
+walk(root);
+fs.writeFileSync(path.join(root, '_metadata.json'), JSON.stringify(metadata, null, 2));
+NODE
+
+  for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
+    source="$templates_root/public/$template"
+    hash="$(md5sum "$source" | awk '{print $1}')"
+    compiled_name="${template%.html}"
+    for language_id in 0 1; do
+      for style_id in "${style_ids[@]}"; do
+        compiled_dir="$PWD/internal_data/code_cache/templates/l$language_id/s$style_id/public"
+        mkdir -p "$compiled_dir"
+        {
+          printf '<?php\n// FROM HASH: %s\n' "$hash"
+          cat "$source"
+        } >"$compiled_dir/$compiled_name.php"
+      done
+    done
+  done
+
+  db_templates="$SANDBOX_LOCAL/db-templates/$designer"
+  mkdir -p "$db_templates"
+  cp -f -- "$templates_root/public/_page_node.313" \
+    "$templates_root/public/_widget_ai_chat.html" \
+    "$templates_root/public/react_chat_container.html" \
+    "$db_templates/"
+fi
 exit 0
 PHPSTUB
 
@@ -529,7 +627,23 @@ esac
 exit 0
 NPMSTUB
 
-  chmod 755 "$SB/bin/ssh" "$SB/bin/rsync" "$SB/bin/curl" "$SB/bin/php" "$SB/bin/npm"
+  # ---- redis-cli -----------------------------------------------------------
+  cat >"$SB/bin/redis-cli" <<'REDISSTUB'
+#!/usr/bin/env bash
+set -u
+STUB_NAME=redis-cli
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/.stub-lib.sh"
+text="remote=${FAKE_REMOTE:-0} $*"
+stub_log "$text"
+mode="$(decide_mode "$text")"
+case "$mode" in
+  skip:*) exit "${mode#skip:}" ;;
+esac
+printf 'OK\n'
+REDISSTUB
+
+  chmod 755 "$SB/bin/ssh" "$SB/bin/rsync" "$SB/bin/curl" "$SB/bin/php" "$SB/bin/npm" "$SB/bin/redis-cli"
 }
 
 # add_rule <cmd> <nth[.+]> <mode> <extended-regex>
@@ -623,6 +737,17 @@ assert_templates_match_bundle() {
       cmp -s "$bundle_root/$style/$template" \
         "$PEER_STYLES_ROOT/$style/templates/public/$template" \
         || fail_test "peer $style/$template does not match bundle $bundle_root"
+    done
+  done
+}
+
+assert_fake_db_matches_bundle() {
+  local bundle_root="$1" style template
+  for style in wf3 wf3_domperf; do
+    for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
+      cmp -s "$bundle_root/$style/$template" \
+        "$SANDBOX_LOCAL/db-templates/$style/$template" \
+        || fail_test "database $style/$template does not match bundle $bundle_root"
     done
   done
 }

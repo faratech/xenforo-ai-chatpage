@@ -180,8 +180,6 @@
 }
 #react-chat-container ::-webkit-scrollbar-thumb:hover { background-color: var(--wf-muted); background-clip: padding-box; }
 
-#react-chat-container .chat-messages-container { scroll-behavior: smooth; }
-
 #react-chat-container .jump-to-latest {
   position: sticky !important;
   left: 50%;

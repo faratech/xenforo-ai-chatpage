@@ -14,14 +14,17 @@ interface ChatIdentity {
   userId: string;
 }
 
+const ACTIVATION_BURST_MS = 500;
+
 /**
  * Main App Component — resolves the XenForo identity and initializes chat.
  *
- * The identity is revalidated whenever the page is restored or refocused
- * (pageshow, focus, visibility). While revalidation is in flight the existing
- * history is hidden behind a full-viewport overlay — another account may have
- * logged in — and ChatWindow is keyed by the resolved user id, so an identity
- * change remounts it onto that user's own store.
+ * The identity is revalidated when a cached page is restored or the page is
+ * reactivated after the last verification has gone stale. Correlated focus and
+ * visibility events are treated as one activation. While revalidation is in
+ * flight the existing history stays mounted in a dimension-preserving shell,
+ * and ChatWindow is keyed by the resolved user id so an identity change
+ * remounts it onto that user's own store.
  *
  * A revalidation that only fails transiently (network/timeout/5xx) keeps the
  * established session mounted; only an authoritative signal — a successful
@@ -35,10 +38,10 @@ const App: React.FC = () => {
   const [revalidationNotice, setRevalidationNotice] = useState('');
   const identityRequestRef = useRef<Promise<void> | null>(null);
   const identityRef = useRef<ChatIdentity | null>(null);
+  const lastActivationAtRef = useRef(Number.NEGATIVE_INFINITY);
   const revalidationQueuedRef = useRef(false);
-  const revalidateRef = useRef<() => void>(() => {});
-
-  useEffect(() => { identityRef.current = identity; }, [identity]);
+  const focusBeforeRevalidationRef = useRef<HTMLElement | null>(null);
+  const restoreFocusRef = useRef(false);
 
   const fetchIdentity = useCallback((): Promise<void> => {
     if (identityRequestRef.current) return identityRequestRef.current;
@@ -56,11 +59,13 @@ const App: React.FC = () => {
             retryable: false,
           });
         }
-        setIdentity({
+        const nextIdentity = {
           userAvatar: data.avatar || `${domain}/images/default-avatar.webp`,
           userName: data.name || 'Guest',
           userId: resolvedId,
-        });
+        };
+        identityRef.current = nextIdentity;
+        setIdentity(nextIdentity);
         setIdentityError('');
         setRevalidationNotice('');
       } catch (error) {
@@ -73,6 +78,7 @@ const App: React.FC = () => {
           // revalidates again.
           setRevalidationNotice('Could not recheck your session just now; still using your last verified session.');
         } else {
+          identityRef.current = null;
           setIdentity(null);
           setIdentityError('Chat could not verify your WindowsForum session. No local history was loaded.');
         }
@@ -86,24 +92,50 @@ const App: React.FC = () => {
   }, [domain]);
 
   const revalidateIdentity = useCallback(() => {
-    if (!identityRef.current) return; // Initial load path owns this state.
+    const established = identityRef.current;
+    if (!established) return; // Initial load path owns this state.
     if (identityRequestRef.current) {
-      // A check is already running; remember to run once more when it settles
-      // so an account switch that happened mid-request is not missed.
+      // A distinct activation arrived during the request. Run one more check
+      // after it settles so an account switch mid-request is not missed.
       revalidationQueuedRef.current = true;
       return;
     }
+
+    const activeElement = document.activeElement;
+    focusBeforeRevalidationRef.current = activeElement instanceof HTMLElement && activeElement !== document.body
+      ? activeElement
+      : null;
+    restoreFocusRef.current = false;
     setRevalidating(true);
-    void fetchIdentity().finally(() => {
-      setRevalidating(false);
-      if (revalidationQueuedRef.current) {
+
+    const runRevalidation = async () => {
+      do {
         revalidationQueuedRef.current = false;
-        revalidateRef.current();
-      }
+        await fetchIdentity();
+      } while (revalidationQueuedRef.current && identityRef.current !== null);
+    };
+
+    void runRevalidation().finally(() => {
+      const identityUnchanged = identityRef.current?.userId === established.userId;
+      const currentFocus = document.activeElement;
+      const focusWasNotMovedElsewhere = currentFocus === focusBeforeRevalidationRef.current
+        || currentFocus === document.body
+        || currentFocus === document.documentElement
+        || currentFocus === null;
+      restoreFocusRef.current = identityUnchanged && focusWasNotMovedElsewhere;
+      if (!identityUnchanged) focusBeforeRevalidationRef.current = null;
+      setRevalidating(false);
     });
   }, [fetchIdentity]);
 
-  useEffect(() => { revalidateRef.current = revalidateIdentity; }, [revalidateIdentity]);
+  useEffect(() => {
+    if (revalidating || !restoreFocusRef.current) return;
+
+    restoreFocusRef.current = false;
+    const element = focusBeforeRevalidationRef.current;
+    focusBeforeRevalidationRef.current = null;
+    if (element?.isConnected) element.focus({ preventScroll: true });
+  }, [revalidating]);
 
   const retryIdentity = useCallback(() => {
     setIdentityError('');
@@ -115,16 +147,25 @@ const App: React.FC = () => {
   }, [fetchIdentity]);
 
   useEffect(() => {
-    const onRevalidate = () => revalidateIdentity();
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') revalidateIdentity();
+    const onActivation = () => {
+      const now = Date.now();
+      const timeSinceActivation = now - lastActivationAtRef.current;
+      if (timeSinceActivation >= 0 && timeSinceActivation <= ACTIVATION_BURST_MS) return;
+      lastActivationAtRef.current = now;
+      revalidateIdentity();
     };
-    window.addEventListener('pageshow', onRevalidate);
-    window.addEventListener('focus', onRevalidate);
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) onActivation();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onActivation();
+    };
+    window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('focus', onActivation);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      window.removeEventListener('pageshow', onRevalidate);
-      window.removeEventListener('focus', onRevalidate);
+      window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('focus', onActivation);
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [revalidateIdentity]);
@@ -151,15 +192,14 @@ const App: React.FC = () => {
   }
 
   return (
-    <>
+    <Box sx={{ position: 'relative', minHeight: '100vh' }} aria-busy={revalidating}>
       {revalidating && (
-        // A full-viewport overlay above the MUI modal layer, so it also covers
-        // the history drawer (which portals into the wrapper, not into the
-        // hidden Box below) while the session is being rechecked.
         <Box
           aria-label="Rechecking chat identity"
+          aria-live="polite"
+          role="status"
           sx={{
-            position: 'fixed',
+            position: 'absolute',
             inset: 0,
             zIndex: (t) => t.zIndex.modal + 2,
             display: 'grid',
@@ -167,22 +207,25 @@ const App: React.FC = () => {
             backgroundColor: 'background.default',
           }}
         >
-          <CircularProgress size={28} />
+          <Box sx={{ display: 'grid', justifyItems: 'center', gap: 1 }}>
+            <CircularProgress size={28} aria-hidden="true" />
+            <Box component="span" sx={{ typography: 'body2' }}>Rechecking your session…</Box>
+          </Box>
         </Box>
       )}
       {revalidationNotice && !revalidating && (
-        <Box sx={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: (t) => t.zIndex.modal + 1, p: 1 }}>
+        <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: (t) => t.zIndex.modal + 1, p: 1 }}>
           <Alert severity="warning" onClose={() => setRevalidationNotice('')}>
             {revalidationNotice}
           </Alert>
         </Box>
       )}
-      {/* Hidden, not unmounted: a same-user refocus must not kill an in-flight
-          response. An identity change remounts via the key. */}
-      <Box sx={{ display: revalidating ? 'none' : 'contents' }}>
+      {/* Visually hidden, not collapsed or unmounted: revalidation must not
+          shift the XenForo page or kill an in-flight response. */}
+      <Box sx={{ visibility: revalidating ? 'hidden' : 'visible' }} aria-hidden={revalidating || undefined}>
         <ChatWindow key={identity.userId} {...identity} />
       </Box>
-    </>
+    </Box>
   );
 };
 

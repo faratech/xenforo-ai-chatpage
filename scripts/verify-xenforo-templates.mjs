@@ -42,7 +42,7 @@ for (const style of styles) {
       'utf8',
     );
     const requiredMarkup = [
-      '<div id="root"></div>',
+      '<div id="root" class="google-anno-skip" style="min-height:100vh"></div>',
       'href="https://windowsforum.com/chatpage/static/css/main.css?v=2"',
       'type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"',
     ];
@@ -69,5 +69,5 @@ for (const style of styles) {
 }
 
 console.log(
-  `Verified six XenForo chat consumers; ${changedFiles.length} scoped template changes await normal designer sync.`,
+  `Verified six XenForo chat consumers; ${changedFiles.length} scoped template changes await normal designer import.`,
 );

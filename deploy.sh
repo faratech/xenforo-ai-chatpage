@@ -14,9 +14,9 @@
 #   - XenForo chat template payloads are bundled into every release
 #     ($release/xenforo-templates/<style>/<template>); the live templates are
 #     snapshotted before any switch, and both forward activation and rollback
-#     apply the selected release's bundle + designer sync on BOTH nodes.
+#     apply the selected release's bundle + designer import on BOTH nodes.
 #   - Any failure after activation begins restores the previous assets AND the
-#     snapshotted templates, re-runs designer sync, re-purges Cloudflare and
+#     snapshotted templates, re-runs designer import, re-purges Cloudflare and
 #     re-verifies the restored state before exiting nonzero.
 #   - Ambiguous SSH failures (rc=255) are reconciled by re-probing the peer
 #     (peer_probe_state -> switched / not-switched / unreachable).
@@ -61,6 +61,12 @@ readonly LIVE_ORIGIN="${LIVE_ORIGIN:-https://windowsforum.com}"
 readonly ORIGIN_IP="${ORIGIN_IP:-127.0.0.1}"
 readonly PEER_HOST="${PEER_HOST:-root@10.10.0.3}"
 readonly PEER_ORIGIN_IP="${PEER_ORIGIN_IP:-10.10.0.3}"
+PUBLIC_EDGE_IP="${PUBLIC_EDGE_IP:-}"
+if [[ -z "$PUBLIC_EDGE_IP" ]] && command -v dig >/dev/null 2>&1; then
+  PUBLIC_EDGE_IP="$(dig +short @1.1.1.1 windowsforum.com A 2>/dev/null \
+    | grep -Em1 '^[0-9]+(\.[0-9]+){3}$' || true)"
+fi
+readonly PUBLIC_EDGE_IP
 readonly PEER_SSH_KEY="${PEER_SSH_KEY:-/web/.oci/id_rsa}"
 readonly DEPLOY_OWNER="${DEPLOY_OWNER:-nobody:nobody}"
 readonly RETAIN_RELEASES="${RETAIN_RELEASES:-5}"
@@ -378,12 +384,18 @@ restore_after_failure() {
   fi
 
   if [[ -n "$TEMPLATE_SNAPSHOT_DIR" ]]; then
-    if ! apply_template_bundle "$TEMPLATE_SNAPSHOT_DIR"; then
+    if ! apply_template_bundle "$TEMPLATE_SNAPSHOT_DIR" 0; then
       notes+=("template-restore-failed")
+    fi
+    if ! restore_pending_template_sources; then
+      notes+=("template-source-restore-failed")
     fi
   fi
 
-  if ! purge_chatpage_prefix; then
+  if ! purge_origin_chat_page; then
+    notes+=("origin-page-cache-repurge-failed")
+  fi
+  if ! purge_chat_surfaces; then
     notes+=("repurge-failed")
   fi
 
@@ -394,7 +406,7 @@ restore_after_failure() {
     verify_root="$PREVIOUS_TARGET"
   fi
   if [[ -n "$verify_root" ]] && ((${#notes[@]} == 0)); then
-    if verify_live_release "$verify_root"; then
+    if verify_live_release "$verify_root" 0; then
       log "Re-verified the restored release on both origins."
     else
       notes+=("reverify-failed")
@@ -485,7 +497,7 @@ read_env_value() {
   printf '%s' "$value"
 }
 
-purge_chatpage_prefix() {
+purge_chat_surfaces() {
   local token="${CLOUDFLARE_PURGE_TOKEN:-}"
   local zone="${CLOUDFLARE_ZONE_ID:-}"
   local response_file
@@ -505,7 +517,7 @@ purge_chatpage_prefix() {
     "https://api.cloudflare.com/client/v4/zones/$zone/purge_cache" \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
-    --data '{"prefixes":["windowsforum.com/chatpage"]}' \
+    --data '{"prefixes":["windowsforum.com/chatpage","windowsforum.com/pages/ai"]}' \
     --output "$response_file" \
     || { fail "Cloudflare purge request failed"; return 1; }
 
@@ -518,7 +530,29 @@ if (response.success !== true) {
 }
 NODE
 
-  log "Purged only the windowsforum.com/chatpage Cloudflare prefix."
+  log "Purged the chat assets and /pages/ai Cloudflare prefixes."
+}
+
+purge_origin_chat_page() {
+  redis-cli -n 1 FLUSHDB >/dev/null \
+    || { fail "Cannot flush the local Redis page cache"; return 1; }
+  peer_ssh redis-cli -n 1 FLUSHDB >/dev/null \
+    || { fail "Cannot flush the peer Redis page cache"; return 1; }
+
+  curl --fail --silent --show-error \
+    --request POST \
+    --header 'x-litespeed-purge: tag=public' \
+    'http://127.0.0.1/__hj_cache_purge' \
+    --output /dev/null \
+    || { fail "Cannot purge the local httpjet public page cache"; return 1; }
+  peer_ssh curl --fail --silent --show-error \
+    --request POST \
+    --header 'x-litespeed-purge: tag=public' \
+    'http://127.0.0.1/__hj_cache_purge' \
+    --output /dev/null \
+    || { fail "Cannot purge the peer httpjet public page cache"; return 1; }
+
+  log "Purged Redis DB1 and httpjet public page caches on both nodes."
 }
 
 assert_header() {
@@ -531,7 +565,10 @@ assert_header() {
     headers="$(curl --fail --silent --show-error --head \
       --resolve "windowsforum.com:443:$PEER_ORIGIN_IP" "$url")" || { fail "HEAD $url failed on peer"; return 1; }
   else
-    headers="$(curl --fail --silent --show-error --head "$url")" || { fail "HEAD $url failed"; return 1; }
+    [[ -n "$PUBLIC_EDGE_IP" ]] || { fail "Cannot resolve the public Cloudflare edge"; return 1; }
+    headers="$(curl --fail --silent --show-error --head \
+      --resolve "windowsforum.com:443:$PUBLIC_EDGE_IP" "$url")" \
+      || { fail "HEAD $url failed at the public edge"; return 1; }
   fi
 
   printf '%s\n' "$headers" | tr -d '\r' | grep -Eiq "$expected" \
@@ -561,11 +598,13 @@ assert_public_hash() {
 
   expected_hash="$(sha256sum -- "$expected_file" | awk '{print $1}')" \
     || { fail "Cannot hash $expected_file"; return 1; }
+  [[ -n "$PUBLIC_EDGE_IP" ]] || { fail "Cannot resolve the public Cloudflare edge"; return 1; }
   download="$(mktemp)" || return 1
   TEMP_FILES+=("$download")
 
   for attempt in 1 2 3 4 5 6; do
     if curl --fail --silent --show-error \
+      --resolve "windowsforum.com:443:$PUBLIC_EDGE_IP" \
       "$LIVE_ORIGIN/chatpage/$relative?v=2" --output "$download"; then
       actual_hash="$(sha256sum -- "$download" | awk '{print $1}')"
       if [[ "$actual_hash" == "$expected_hash" ]]; then
@@ -580,8 +619,46 @@ assert_public_hash() {
   fail "Public $relative did not converge to the activated release"
 }
 
+assert_chat_page_markup() {
+  local mode="$1" download attempt max_attempts=1
+
+  download="$(mktemp)" || return 1
+  TEMP_FILES+=("$download")
+  [[ "$mode" == public ]] && max_attempts=6
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if [[ "$mode" == origin ]]; then
+      curl --fail --silent --show-error \
+        --resolve "windowsforum.com:443:$ORIGIN_IP" \
+        "$LIVE_ORIGIN/pages/ai/" --output "$download" || return 1
+    elif [[ "$mode" == peer ]]; then
+      curl --fail --silent --show-error \
+        --resolve "windowsforum.com:443:$PEER_ORIGIN_IP" \
+        "$LIVE_ORIGIN/pages/ai/" --output "$download" || return 1
+    else
+      [[ -n "$PUBLIC_EDGE_IP" ]] || { fail "Cannot resolve the public Cloudflare edge"; return 1; }
+      curl --fail --silent --show-error \
+        --resolve "windowsforum.com:443:$PUBLIC_EDGE_IP" \
+        "$LIVE_ORIGIN/pages/ai/" --output "$download" || true
+    fi
+
+    if grep -Fq '<div id="root" class="google-anno-skip" style="min-height:100vh"></div>' "$download" \
+      && grep -Fq 'href="https://windowsforum.com/chatpage/static/css/main.css?v=2"' "$download" \
+      && grep -Fq 'type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"' "$download" \
+      && ! grep -Eq 'chatpage/static/(css|js)/main\.(css|js)\?ver=' "$download"; then
+      return 0
+    fi
+
+    if ((attempt < max_attempts)); then
+      sleep "$DEPLOY_PUBLIC_RETRY_DELAY"
+    fi
+  done
+
+  fail "$mode /pages/ai/ did not render the imported chat template contract"
+}
+
 verify_live_release() {
-  local release="$1" hashed_file hashed_relative
+  local release="$1" require_chat_contract="${2:-1}" hashed_file hashed_relative
 
   assert_origin_hash 'static/js/main.js' "$release/static/js/main.js" "$ORIGIN_IP" || return 1
   assert_origin_hash 'static/css/main.css' "$release/static/css/main.css" "$ORIGIN_IP" || return 1
@@ -592,6 +669,12 @@ verify_live_release() {
   assert_public_hash 'static/js/main.js' "$release/static/js/main.js" || return 1
   assert_public_hash 'static/css/main.css' "$release/static/css/main.css" || return 1
   assert_public_hash 'bot-avatar.webp' "$release/bot-avatar.webp" || return 1
+
+  if [[ "$require_chat_contract" == 1 ]]; then
+    assert_chat_page_markup origin || return 1
+    assert_chat_page_markup peer || return 1
+    assert_chat_page_markup public || return 1
+  fi
 
   assert_header "$LIVE_ORIGIN/chatpage/static/js/main.js?v=2" \
     'cache-control:.*no-cache.*must-revalidate' public || return 1
@@ -613,7 +696,11 @@ verify_live_release() {
       'cache-control:.*max-age=31536000.*immutable' peer || return 1
   fi
 
-  log "Verified both origins, public hashes, and stable/immutable cache headers."
+  if [[ "$require_chat_contract" == 1 ]]; then
+    log "Verified both origins, public hashes, rendered /pages/ai markup, and cache headers."
+  else
+    log "Verified both origins, public hashes, and cache headers for the restored release."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -634,25 +721,94 @@ stage_template_bundle() {
 }
 
 snapshot_active_templates() {
-  local stamp style template source
+  local stamp style template source pending_root
   stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   TEMPLATE_SNAPSHOT_DIR="$DEPLOY_RECOVERY_ROOT/templates-$stamp"
+  pending_root="$TEMPLATE_SNAPSHOT_DIR/pending-sources"
+
   for style in "${XF_STYLES[@]}"; do
-    mkdir -p -- "$TEMPLATE_SNAPSHOT_DIR/$style" || return 1
+    mkdir -p -- "$pending_root/$style" || return 1
     for template in "${XF_CHAT_TEMPLATES[@]}"; do
       source="$XENFORO_STYLES_ROOT/$style/templates/public/$template"
-      [[ -f "$source" ]] || { fail "Missing live XenForo template: $source"; return 1; }
-      cp -f -- "$source" "$TEMPLATE_SNAPSHOT_DIR/$style/$template" || return 1
+      [[ -f "$source" ]] || { fail "Missing designer template source: $source"; return 1; }
+      cp -f -- "$source" "$pending_root/$style/$template" || return 1
     done
   done
-  log "Snapshotted the live XenForo chat templates to $TEMPLATE_SNAPSHOT_DIR"
+
+  php "$APP_ROOT/scripts/snapshot-xenforo-template-db.php" \
+    "$XENFORO_ROOT" "$TEMPLATE_SNAPSHOT_DIR" \
+    || return 1
+
+  for style in "${XF_STYLES[@]}"; do
+    for template in "${XF_CHAT_TEMPLATES[@]}"; do
+      source="$TEMPLATE_SNAPSHOT_DIR/$style/$template"
+      [[ -f "$source" ]] || { fail "Missing database template snapshot: $source"; return 1; }
+    done
+  done
+  log "Snapshotted the authoritative pre-import XenForo templates to $TEMPLATE_SNAPSHOT_DIR"
+}
+
+# After a failed activation, runtime is rolled back from the database-backed
+# snapshot. Put the pre-deploy designer files back without importing them so a
+# pending source edit is not destroyed and remains visible as FS/metadata drift.
+restore_pending_template_sources() {
+  local pending_root="$TEMPLATE_SNAPSHOT_DIR/pending-sources"
+  local style template source dest
+  local -a payloads
+
+  for style in "${XF_STYLES[@]}"; do
+    payloads=()
+    for template in "${XF_CHAT_TEMPLATES[@]}"; do
+      source="$pending_root/$style/$template"
+      dest="$XENFORO_STYLES_ROOT/$style/templates/public/$template"
+      [[ -f "$source" ]] || { fail "Missing pending template snapshot: $source"; return 1; }
+      cp -f -- "$source" "$dest" || return 1
+      payloads+=("$dest")
+    done
+    peer_rsync "${payloads[@]}" \
+      "$PEER_HOST:$XENFORO_STYLES_ROOT/$style/templates/public/" \
+      || { fail "Cannot restore pending $style sources on $PEER_HOST"; return 1; }
+  done
+
+  log "Restored the pre-deploy designer sources without re-importing them."
+}
+
+# verify_compiled_template_runtime — prove that the imported designer sources,
+# metadata, and every live language/style compiled consumer agree on both nodes.
+verify_compiled_template_runtime() {
+  local require_chat_contract="${1:-1}"
+  local verifier="$APP_ROOT/scripts/verify-xenforo-compiled-templates.mjs"
+  local remote_verifier="$XENFORO_ROOT/internal_data/.wf-chat-template-verify.$$.mjs"
+  local -a verifier_args=()
+
+  [[ "$require_chat_contract" == 1 ]] && verifier_args+=(--require-chat-contract)
+
+  node "$verifier" "$XENFORO_ROOT" "$XENFORO_STYLES_ROOT" \
+    "${verifier_args[@]}" \
+    || { fail "Local compiled XenForo chat templates are stale"; return 1; }
+
+  peer_rsync "$verifier" "$PEER_HOST:$remote_verifier" \
+    || { fail "Cannot stage the compiled-template verifier on $PEER_HOST"; return 1; }
+
+  peer_ssh bash -s -- "$remote_verifier" "$XENFORO_ROOT" "$XENFORO_STYLES_ROOT" "$require_chat_contract" <<'REMOTE' \
+    || { peer_ssh rm -f -- "$remote_verifier" >/dev/null 2>&1 || true; fail "Peer compiled XenForo chat templates are stale"; return 1; }
+# wf-peer-verify-chat-templates
+set -Eeuo pipefail
+verifier="$1"; xenforo_root="$2"; styles_root="$3"; require_chat_contract="$4"
+trap 'rm -f -- "$verifier"' EXIT
+args=()
+[[ "$require_chat_contract" == 1 ]] && args+=(--require-chat-contract)
+node "$verifier" "$xenforo_root" "$styles_root" "${args[@]}"
+REMOTE
+
+  log "Verified imported and compiled XenForo chat templates on both nodes."
 }
 
 # apply_template_bundle <bundle_root> — copy payloads into the styles roots on
-# both nodes and run the designer sync on both nodes. Written with explicit
+# both nodes and run the designer import on both nodes. Written with explicit
 # error chaining so it also works in errexit-suppressed (restore) contexts.
 apply_template_bundle() {
-  local bundle_root="$1" style template source dest
+  local bundle_root="$1" verify_chat_contract="${2:-1}" style template source dest
   local -a payloads
 
   for style in "${XF_STYLES[@]}"; do
@@ -676,9 +832,11 @@ apply_template_bundle() {
 
   (
     cd "$XENFORO_ROOT" || exit 1
-    php cmd.php xf-designer:sync-templates wf3 || exit 1
-    php cmd.php xf-designer:sync-templates wf3_domperf || exit 1
-  ) || { fail "Local xf-designer:sync-templates failed"; return 1; }
+    php cmd.php xf-designer:import-templates wf3 || exit 1
+    php cmd.php xf-designer:import-templates wf3_domperf || exit 1
+    php cmd.php xf-designer:rebuild-metadata wf3 || exit 1
+    php cmd.php xf-designer:rebuild-metadata wf3_domperf || exit 1
+  ) || { fail "Local XenForo template import/metadata rebuild failed"; return 1; }
 
   for style in "${XF_STYLES[@]}"; do
     peer_rsync "$XENFORO_STYLES_ROOT/$style/templates/_metadata.json" \
@@ -686,15 +844,17 @@ apply_template_bundle() {
       || { fail "Cannot push $style template metadata to $PEER_HOST"; return 1; }
   done
 
-  peer_ssh bash -s -- "$XENFORO_ROOT" <<'REMOTE' || { fail "Peer xf-designer:sync-templates failed"; return 1; }
-# wf-peer-sync-templates
+  peer_ssh bash -s -- "$XENFORO_ROOT" <<'REMOTE' || { fail "Peer xf-designer:import-templates failed"; return 1; }
+# wf-peer-import-templates
 set -Eeuo pipefail
 cd "$1"
-php cmd.php xf-designer:sync-templates wf3
-php cmd.php xf-designer:sync-templates wf3_domperf
+php cmd.php xf-designer:import-templates wf3
+php cmd.php xf-designer:import-templates wf3_domperf
 REMOTE
 
-  log "Applied the XenForo chat template bundle and synced designer templates on both nodes."
+  verify_compiled_template_runtime "$verify_chat_contract" || return 1
+
+  log "Applied the XenForo chat template bundle and imported designer templates on both nodes."
 }
 
 # ---------------------------------------------------------------------------
@@ -1106,7 +1266,8 @@ activate_release() {
   TEMPLATES_APPLIED=1
   record_state templates-synced
 
-  purge_chatpage_prefix || die "Cloudflare purge failed"
+  purge_origin_chat_page || die "Origin page-cache purge failed"
+  purge_chat_surfaces || die "Cloudflare purge failed"
   PURGED=1
   record_state purged
 
@@ -1188,7 +1349,7 @@ REMOTE
   record_state remote-switched
 
   if [[ -d "$rollback_target/xenforo-templates" ]]; then
-    apply_template_bundle "$rollback_target/xenforo-templates" \
+    apply_template_bundle "$rollback_target/xenforo-templates" 0 \
       || die "Applying the rollback template bundle failed"
     TEMPLATES_APPLIED=1
   else
@@ -1196,11 +1357,12 @@ REMOTE
   fi
   record_state templates-synced
 
-  purge_chatpage_prefix || die "Cloudflare purge failed"
+  purge_origin_chat_page || die "Origin page-cache purge failed"
+  purge_chat_surfaces || die "Cloudflare purge failed"
   PURGED=1
   record_state purged
 
-  verify_live_release "$rollback_target" || die "Live verification of the rollback release failed"
+  verify_live_release "$rollback_target" 0 || die "Live verification of the rollback release failed"
   record_state verified
 
   record_previous_releases "$current" "$remote_current"

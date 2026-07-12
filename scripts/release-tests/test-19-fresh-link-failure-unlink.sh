@@ -6,11 +6,11 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 setup_sandbox
 
-add_rule php 1 skip:1 'sync-templates'
+add_rule php 1 skip:1 'import-templates'
 
 rc=0
 run_deploy || rc=$?
-[[ "$rc" -ne 0 ]] || fail_test "first deploy should have failed at template sync"
+[[ "$rc" -ne 0 ]] || fail_test "first deploy should have failed at template import"
 
 assert_absent "$PUBLIC_LINK"
 assert_absent "$PEER_PUBLIC_LINK"
@@ -18,5 +18,9 @@ assert_contains "$RT_LAST_OUTPUT" "Unlinked freshly created" "fresh unlink messa
 assert_state remote-switched rolled-back
 assert_eq "$(state_field fresh_local)" true "fresh_local"
 assert_eq "$(state_field fresh_remote)" true "fresh_remote"
+grep -q '?ver=legacy-db' "$SANDBOX_LOCAL/db-templates/wf3/_page_node.313" \
+  || fail_test "failed first deploy did not restore the pre-import database template"
+grep -q 'google-anno-skip' "$XENFORO_STYLES_ROOT/wf3/templates/public/_page_node.313" \
+  || fail_test "failed first deploy destroyed the pending designer source"
 assert_no_next_litter
 echo "OK"
