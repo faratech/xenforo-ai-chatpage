@@ -104,6 +104,7 @@ make_app_repo() {
   cp "$RT_APP_SRC/scripts/verify-xenforo-templates.mjs" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/verify-xenforo-compiled-templates.mjs" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/snapshot-xenforo-template-db.php" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/sync-xenforo-db-style.php" "$SB/app/scripts/"
   chmod 755 "$SB/app/deploy.sh"
   git -C "$SB/app" init -q
   git -C "$SB/app" config user.email release-tests@sandbox.invalid
@@ -554,6 +555,31 @@ if [[ "${1:-}" == *snapshot-xenforo-template-db.php ]]; then
   [[ -n "$output_root" ]] || exit 2
   mkdir -p "$output_root"
   cp -a "$SANDBOX_LOCAL/db-templates/." "$output_root/"
+  exit 0
+fi
+
+if [[ "${1:-}" == *sync-xenforo-db-style.php || "${1:-}" == *.wf-chat-db-style-sync.*.php ]]; then
+  xenforo_root="${2:-}"
+  source_root="${3:-}"
+  style_id="${4:-}"
+  [[ -n "$xenforo_root" && -d "$source_root" && "$style_id" == 17 ]] || exit 2
+
+  db_style="$xenforo_root/db-style-$style_id"
+  mkdir -p "$db_style"
+  for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
+    source="$source_root/$template"
+    hash="$(md5sum "$source" | awk '{print $1}')"
+    compiled_name="${template%.html}"
+    cp -f -- "$source" "$db_style/$template"
+    for language_id in 0 1; do
+      compiled_dir="$xenforo_root/internal_data/code_cache/templates/l$language_id/s$style_id/public"
+      mkdir -p "$compiled_dir"
+      {
+        printf '<?php\n// FROM HASH: %s\n' "$hash"
+        cat "$source"
+      } >"$compiled_dir/$compiled_name.php"
+    done
+  done
   exit 0
 fi
 

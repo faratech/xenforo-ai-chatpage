@@ -83,6 +83,7 @@ readonly INVENTORY_NAME="RELEASE-INVENTORY.sha256"
 
 readonly -a XF_STYLES=(wf3 wf3_domperf)
 readonly -a XF_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
+readonly LEGACY_CHAT_STYLE_ID="${LEGACY_CHAT_STYLE_ID:-17}"
 
 ACTION=""
 STATE_ENABLED=0
@@ -810,6 +811,35 @@ REMOTE
   log "Verified imported and compiled XenForo chat templates on both nodes."
 }
 
+# Style 17 predates designer mode and keeps its templates only in XenForo's
+# database. Mirror the canonical wf3 chat templates into that style on both
+# nodes so a cached guest page and a member-selected style cannot bootstrap
+# different stable entry URLs. The helper also recompiles unchanged rows on
+# each node because compiled template storage is node-local.
+sync_database_chat_style() {
+  local syncer="$APP_ROOT/scripts/sync-xenforo-db-style.php"
+  local source_root="$XENFORO_STYLES_ROOT/wf3/templates/public"
+  local remote_syncer="$XENFORO_ROOT/internal_data/.wf-chat-db-style-sync.$$.php"
+
+  php "$syncer" "$XENFORO_ROOT" "$source_root" "$LEGACY_CHAT_STYLE_ID" \
+    || { fail "Local database-managed chat style sync failed"; return 1; }
+
+  peer_rsync "$syncer" "$PEER_HOST:$remote_syncer" \
+    || { fail "Cannot stage the database-managed style sync helper on the peer"; return 1; }
+
+  peer_ssh bash -s -- \
+    "$remote_syncer" "$XENFORO_ROOT" "$source_root" "$LEGACY_CHAT_STYLE_ID" <<'REMOTE' \
+    || { peer_ssh rm -f -- "$remote_syncer" >/dev/null 2>&1 || true; fail "Peer database-managed chat style sync failed"; return 1; }
+# wf-peer-sync-database-chat-style
+set -Eeuo pipefail
+syncer="$1"; xenforo_root="$2"; source_root="$3"; style_id="$4"
+trap 'rm -f -- "$syncer"' EXIT
+php "$syncer" "$xenforo_root" "$source_root" "$style_id"
+REMOTE
+
+  log "Synchronized database-managed chat style $LEGACY_CHAT_STYLE_ID on both nodes."
+}
+
 # apply_template_bundle <bundle_root> — copy payloads into the styles roots on
 # both nodes and run the designer import on both nodes. Written with explicit
 # error chaining so it also works in errexit-suppressed (restore) contexts.
@@ -858,6 +888,7 @@ php cmd.php xf-designer:import-templates wf3
 php cmd.php xf-designer:import-templates wf3_domperf
 REMOTE
 
+  sync_database_chat_style || return 1
   verify_compiled_template_runtime "$verify_chat_contract" || return 1
 
   log "Applied the XenForo chat template bundle and imported designer templates on both nodes."

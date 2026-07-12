@@ -19,7 +19,9 @@ const requiredMarkup = requireChatContract ? [
   'type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"',
 ] : [];
 const styleSpecs = [
-  { designer: 'wf3', compiledStyleIds: [40, 50] },
+  // Style 17 is database-managed but deploy.sh intentionally synchronizes it
+  // from the canonical wf3 chat sources on each node.
+  { designer: 'wf3', compiledStyleIds: [17, 40, 50] },
   { designer: 'wf3_domperf', compiledStyleIds: [47] },
 ];
 const languageIds = [0, 1];
@@ -82,5 +84,5 @@ for (const { designer, compiledStyleIds } of styleSpecs) {
 }
 
 console.log(
-  `Verified six imported XenForo chat templates and 18 language/style compiled consumers${requireChatContract ? ' against the current chat contract' : ''}.`,
+  `Verified six canonical XenForo chat templates and 24 language/style compiled consumers${requireChatContract ? ' against the current chat contract' : ''}.`,
 );

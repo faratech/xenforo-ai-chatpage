@@ -30,6 +30,14 @@ assert_templates_match_bundle "$r1/xenforo-templates"
 assert_eq "$(stub_calls php 'remote=0 .*import-templates')" 2 "local designer imports"
 assert_eq "$(stub_calls php 'remote=1 .*import-templates')" 2 "peer designer imports"
 assert_eq "$(stub_calls php 'remote=0 .*rebuild-metadata')" 2 "local metadata rebuilds"
+assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-db-style.php')" 1 "local database style syncs"
+assert_eq "$(stub_calls php 'remote=1 .*wf-chat-db-style-sync')" 1 "peer database style syncs"
+cmp -s "$r1/xenforo-templates/wf3/_page_node.313" \
+  "$XENFORO_ROOT/db-style-17/_page_node.313" \
+  || fail_test "database-managed style 17 does not match canonical wf3 template"
+cmp -s "$r1/xenforo-templates/wf3/_page_node.313" \
+  "$SANDBOX_PEER/public_html/db-style-17/_page_node.313" \
+  || fail_test "peer database-managed style 17 does not match canonical wf3 template"
 assert_eq "$(stub_calls curl 'purge_cache')" 1 "purge calls"
 assert_eq "$(stub_calls redis-cli 'remote=0 .*FLUSHDB')" 1 "local Redis DB1 flushes"
 assert_eq "$(stub_calls redis-cli 'remote=1 .*FLUSHDB')" 1 "peer Redis DB1 flushes"
