@@ -359,7 +359,9 @@ if ((has_stdin)); then
   declare -a pos=()
   seen=0
   for w in "${tcmd[@]}"; do
-    if ((seen)); then pos+=("$w"); fi
+    # OpenSSH serializes argv into a remote shell command, so empty arguments
+    # disappear unless callers replace them with an explicit sentinel.
+    if ((seen)) && [[ -n "$w" ]]; then pos+=("$w"); fi
     if [[ "$w" == "--" ]]; then seen=1; fi
   done
   FAKE_REMOTE=1 bash "$tscript" "${pos[@]}"

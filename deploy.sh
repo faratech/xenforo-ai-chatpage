@@ -333,10 +333,12 @@ restore_peer_public_link() {
   elif ((FRESH_REMOTE)) || [[ -z "$REMOTE_PREVIOUS_TARGET" ]]; then
     mode="fresh"
   fi
-  peer_ssh bash -s -- "$mode" "$PUBLIC_LINK" "$REMOTE_PREVIOUS_TARGET" "$LEGACY_REMOTE" "$INVENTORY_NAME" <<'REMOTE' || return 1
+  peer_ssh bash -s -- "$mode" "$PUBLIC_LINK" "${REMOTE_PREVIOUS_TARGET:--}" "${LEGACY_REMOTE:--}" "$INVENTORY_NAME" <<'REMOTE' || return 1
 # wf-peer-restore
 set -Eeuo pipefail
 mode="$1"; link="$2"; previous="$3"; legacy="$4"; inv="$5"
+[[ "$previous" == - ]] && previous=""
+[[ "$legacy" == - ]] && legacy=""
 case "$mode" in
   migrated)
     if [[ -L "$link" ]]; then rm -f -- "$link"; fi
@@ -545,12 +547,16 @@ purge_origin_chat_page() {
     'http://127.0.0.1/__hj_cache_purge' \
     --output /dev/null \
     || { fail "Cannot purge the local httpjet public page cache"; return 1; }
-  peer_ssh curl --fail --silent --show-error \
-    --request POST \
-    --header 'x-litespeed-purge: tag=public' \
-    'http://127.0.0.1/__hj_cache_purge' \
-    --output /dev/null \
+  peer_ssh bash -s <<'REMOTE' \
     || { fail "Cannot purge the peer httpjet public page cache"; return 1; }
+# wf-peer-purge-public-page-cache
+set -Eeuo pipefail
+curl --fail --silent --show-error \
+  --request POST \
+  --header 'x-litespeed-purge: tag=public' \
+  'http://127.0.0.1/__hj_cache_purge' \
+  --output /dev/null
+REMOTE
 
   log "Purged Redis DB1 and httpjet public page caches on both nodes."
 }
