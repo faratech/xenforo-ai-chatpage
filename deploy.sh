@@ -75,6 +75,13 @@ readonly DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-$RELEASE_ROOT/.deploy.lock}"
 readonly DEPLOY_STATE_FILE="${DEPLOY_STATE_FILE:-$RELEASE_ROOT/.deploy-state.json}"
 readonly DEPLOY_RECOVERY_ROOT="${DEPLOY_RECOVERY_ROOT:-$RELEASE_ROOT/.recovery}"
 readonly DEPLOY_ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
+# Single-node topology (see /web/CLAUDE.md, 2026-07-13): the OCI peer no longer
+# serves. It still answers SSH and completes a TLS handshake, but drops HTTPS
+# requests that do not come from Cloudflare, so the peer origin probes below can
+# never pass. With this set, every peer staging, import, and probe step is
+# skipped; all local checks, the atomic switch, rollback, the XenForo template
+# import, the Cloudflare purge, and local-origin/public-edge verification stay.
+readonly DEPLOY_SINGLE_NODE="${DEPLOY_SINGLE_NODE:-0}"
 readonly DEPLOY_RETRY_DELAY="${DEPLOY_RETRY_DELAY:-2}"
 readonly DEPLOY_PUBLIC_RETRY_DELAY="${DEPLOY_PUBLIC_RETRY_DELAY:-5}"
 readonly DEPLOY_SSH_CONNECT_TIMEOUT="${DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
@@ -222,7 +229,20 @@ atomic_link() {
   fi
 }
 
+# True when the peer participates in this deploy. Callers that parse peer output
+# must gate on this rather than relying on peer_ssh/peer_rsync no-oping, because
+# an empty response would be indistinguishable from a malformed one.
+peer_enabled() {
+  [[ "$DEPLOY_SINGLE_NODE" != 1 ]]
+}
+
+# skip_peer <what> — uniform log line for a step the single-node topology drops.
+skip_peer() {
+  log "Single-node mode: skipping $1."
+}
+
 peer_ssh() {
+  peer_enabled || { fail "peer_ssh called in single-node mode"; return 1; }
   ssh -i "$PEER_SSH_KEY" \
     -o BatchMode=yes \
     -o "ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
@@ -234,6 +254,7 @@ peer_ssh() {
 # content while keeping the same size within the same mtime second, which the
 # rsync quick-check would silently skip.
 peer_rsync() {
+  peer_enabled || { fail "peer_rsync called in single-node mode"; return 1; }
   rsync -a --checksum "$@" \
     -e "ssh -i $PEER_SSH_KEY -o BatchMode=yes -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT -o StrictHostKeyChecking=no"
 }
@@ -328,6 +349,7 @@ restore_local_public_link() {
 }
 
 restore_peer_public_link() {
+  peer_enabled || { skip_peer "the peer public-link restore"; return 0; }
   local mode="link"
   if ((MIGRATED_REMOTE)); then
     mode="migrated"
@@ -453,6 +475,7 @@ verify_xenforo_templates() {
 }
 
 verify_peer_template_sources() {
+  peer_enabled || { skip_peer "peer template-source verification"; return 0; }
   local style template source local_hash remote_hash attempt matched
 
   for style in "${XF_STYLES[@]}"; do
@@ -539,8 +562,6 @@ NODE
 purge_origin_chat_page() {
   redis-cli -n 1 FLUSHDB >/dev/null \
     || { fail "Cannot flush the local Redis page cache"; return 1; }
-  peer_ssh redis-cli -n 1 FLUSHDB >/dev/null \
-    || { fail "Cannot flush the peer Redis page cache"; return 1; }
 
   curl --fail --silent --show-error \
     --request POST \
@@ -548,6 +569,15 @@ purge_origin_chat_page() {
     'http://127.0.0.1/__hj_cache_purge' \
     --output /dev/null \
     || { fail "Cannot purge the local httpjet public page cache"; return 1; }
+
+  if ! peer_enabled; then
+    skip_peer "the peer Redis and httpjet page-cache purge"
+    log "Purged Redis DB1 and the httpjet public page cache."
+    return 0
+  fi
+
+  peer_ssh redis-cli -n 1 FLUSHDB >/dev/null \
+    || { fail "Cannot flush the peer Redis page cache"; return 1; }
   peer_ssh bash -s <<'REMOTE' \
     || { fail "Cannot purge the peer httpjet public page cache"; return 1; }
 # wf-peer-purge-public-page-cache
@@ -564,6 +594,12 @@ REMOTE
 
 assert_header() {
   local url="$1" expected="$2" mode="${3:-public}" headers
+
+  # Gated here rather than at each call site so every caller — including the
+  # rollback path — drops its peer probes together.
+  if [[ "$mode" == peer ]] && ! peer_enabled; then
+    return 0
+  fi
 
   if [[ "$mode" == origin ]]; then
     headers="$(curl --fail --silent --show-error --head \
@@ -585,6 +621,10 @@ assert_header() {
 assert_origin_hash() {
   local relative="$1" expected_file="$2" origin_ip="$3"
   local expected_hash actual_hash download
+
+  if [[ "$origin_ip" == "$PEER_ORIGIN_IP" ]] && ! peer_enabled; then
+    return 0
+  fi
 
   expected_hash="$(sha256sum -- "$expected_file" | awk '{print $1}')" \
     || { fail "Cannot hash $expected_file"; return 1; }
@@ -628,6 +668,10 @@ assert_public_hash() {
 
 assert_chat_page_markup() {
   local mode="$1" download attempt max_attempts=1
+
+  if [[ "$mode" == peer ]] && ! peer_enabled; then
+    return 0
+  fi
 
   download="$(mktemp)" || return 1
   TEMP_FILES+=("$download")
@@ -703,10 +747,12 @@ verify_live_release() {
       'cache-control:.*max-age=31536000.*immutable' peer || return 1
   fi
 
+  local origins="both origins"
+  peer_enabled || origins="the local origin"
   if [[ "$require_chat_contract" == 1 ]]; then
-    log "Verified both origins, public hashes, rendered /pages/ai markup, and cache headers."
+    log "Verified $origins, public hashes, rendered /pages/ai markup, and cache headers."
   else
-    log "Verified both origins, public hashes, and cache headers for the restored release."
+    log "Verified $origins, public hashes, and cache headers for the restored release."
   fi
 }
 
@@ -772,6 +818,7 @@ restore_pending_template_sources() {
       cp -f -- "$source" "$dest" || return 1
       payloads+=("$dest")
     done
+    peer_enabled || continue
     peer_rsync "${payloads[@]}" \
       "$PEER_HOST:$XENFORO_STYLES_ROOT/$style/templates/public/" \
       || { fail "Cannot restore pending $style sources on $PEER_HOST"; return 1; }
@@ -793,6 +840,12 @@ verify_compiled_template_runtime() {
   node "$verifier" "$XENFORO_ROOT" "$XENFORO_STYLES_ROOT" \
     "${verifier_args[@]}" \
     || { fail "Local compiled XenForo chat templates are stale"; return 1; }
+
+  if ! peer_enabled; then
+    skip_peer "the peer compiled-template verification"
+    log "Verified imported and compiled XenForo chat templates."
+    return 0
+  fi
 
   peer_rsync "$verifier" "$PEER_HOST:$remote_verifier" \
     || { fail "Cannot stage the compiled-template verifier on $PEER_HOST"; return 1; }
@@ -823,6 +876,12 @@ sync_database_chat_style() {
 
   php "$syncer" "$XENFORO_ROOT" "$source_root" "$LEGACY_CHAT_STYLE_ID" \
     || { fail "Local database-managed chat style sync failed"; return 1; }
+
+  if ! peer_enabled; then
+    skip_peer "the peer database-managed style sync"
+    log "Synchronized database-managed chat style $LEGACY_CHAT_STYLE_ID."
+    return 0
+  fi
 
   peer_rsync "$syncer" "$PEER_HOST:$remote_syncer" \
     || { fail "Cannot stage the database-managed style sync helper on the peer"; return 1; }
@@ -857,6 +916,7 @@ apply_template_bundle() {
   done
 
   for style in "${XF_STYLES[@]}"; do
+    peer_enabled || break
     payloads=()
     for template in "${XF_CHAT_TEMPLATES[@]}"; do
       payloads+=("$XENFORO_STYLES_ROOT/$style/templates/public/$template")
@@ -874,24 +934,32 @@ apply_template_bundle() {
     php cmd.php xf-designer:rebuild-metadata wf3_domperf || exit 1
   ) || { fail "Local XenForo template import/metadata rebuild failed"; return 1; }
 
-  for style in "${XF_STYLES[@]}"; do
-    peer_rsync "$XENFORO_STYLES_ROOT/$style/templates/_metadata.json" \
-      "$PEER_HOST:$XENFORO_STYLES_ROOT/$style/templates/_metadata.json" \
-      || { fail "Cannot push $style template metadata to $PEER_HOST"; return 1; }
-  done
+  if peer_enabled; then
+    for style in "${XF_STYLES[@]}"; do
+      peer_rsync "$XENFORO_STYLES_ROOT/$style/templates/_metadata.json" \
+        "$PEER_HOST:$XENFORO_STYLES_ROOT/$style/templates/_metadata.json" \
+        || { fail "Cannot push $style template metadata to $PEER_HOST"; return 1; }
+    done
 
-  peer_ssh bash -s -- "$XENFORO_ROOT" <<'REMOTE' || { fail "Peer xf-designer:import-templates failed"; return 1; }
+    peer_ssh bash -s -- "$XENFORO_ROOT" <<'REMOTE' || { fail "Peer xf-designer:import-templates failed"; return 1; }
 # wf-peer-import-templates
 set -Eeuo pipefail
 cd "$1"
 php cmd.php xf-designer:import-templates wf3
 php cmd.php xf-designer:import-templates wf3_domperf
 REMOTE
+  else
+    skip_peer "the peer template push and designer import"
+  fi
 
   sync_database_chat_style || return 1
   verify_compiled_template_runtime "$verify_chat_contract" || return 1
 
-  log "Applied the XenForo chat template bundle and imported designer templates on both nodes."
+  if peer_enabled; then
+    log "Applied the XenForo chat template bundle and imported designer templates on both nodes."
+  else
+    log "Applied the XenForo chat template bundle and imported designer templates."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -901,6 +969,7 @@ REMOTE
 stage_peer_release() {
   local release="$1"
 
+  peer_enabled || { skip_peer "peer release staging"; return 0; }
   peer_ssh mkdir -p -- "$release" || die "Cannot create $release on $PEER_HOST"
   peer_rsync --delete "$release/" "$PEER_HOST:$release/" \
     || die "Cannot stage the release on $PEER_HOST"
@@ -1031,6 +1100,12 @@ REMOTE
 peer_prepare_switch() {
   local release="$1" legacy="$2" out rc=0
 
+  if ! peer_enabled; then
+    skip_peer "the peer switch preparation"
+    REMOTE_PREVIOUS_TARGET=""
+    return 0
+  fi
+
   out="$(peer_ssh bash -s -- "$release" "$PUBLIC_LINK" "$legacy" "$INVENTORY_NAME" <<'REMOTE'
 # wf-peer-prepare
 set -Eeuo pipefail
@@ -1136,6 +1211,8 @@ REMOTE
 peer_switch_with_reconcile() {
   local release="$1" rc=0 retry_rc=0 probe
 
+  peer_enabled || { skip_peer "the peer symlink switch"; return 0; }
+
   peer_switch_once "$release" || rc=$?
   if ((rc == 0)); then
     REMOTE_SWITCHED=1
@@ -1190,7 +1267,7 @@ record_previous_releases() {
     atomic_link "$previous" "$RELEASE_ROOT/previous" \
       || die "Cannot record the local previous release"
   fi
-  if [[ -n "$remote_previous" ]]; then
+  if [[ -n "$remote_previous" ]] && peer_enabled; then
     peer_ssh bash -s -- "$remote_previous" "$RELEASE_ROOT/previous" <<'REMOTE' \
       || die "Cannot record the previous release on the peer"
 # wf-peer-record-previous
@@ -1230,6 +1307,7 @@ prune_local_releases() {
 }
 
 prune_peer_releases() {
+  peer_enabled || { skip_peer "peer release pruning"; return 0; }
   peer_ssh bash -s -- "$RELEASE_ROOT" "$PUBLIC_LINK" "$RETAIN_RELEASES" <<'REMOTE' || return 1
 # wf-peer-prune
 set -Eeuo pipefail
@@ -1344,6 +1422,11 @@ rollback_release() {
     verify_rollback_release "$rollback_target" || die "Rollback refused: previous release is incomplete"
   fi
 
+  if ! peer_enabled; then
+    skip_peer "peer previous-release verification"
+    remote_current=""
+    remote_rollback_target=""
+  else
   out="$(peer_ssh bash -s -- "$PUBLIC_LINK" "$RELEASE_ROOT" "$INVENTORY_NAME" <<'REMOTE'
 # wf-peer-rollback-check
 set -Eeuo pipefail
@@ -1370,6 +1453,7 @@ REMOTE
   remote_rollback_target="$(printf '%s\n' "$out" | sed -n 's/^target://p')"
   [[ -n "$remote_current" && -n "$remote_rollback_target" ]] \
     || die "Rollback refused: could not read the peer link state"
+  fi
 
   TARGET_RELEASE="$rollback_target"
   PREVIOUS_TARGET="$current"
