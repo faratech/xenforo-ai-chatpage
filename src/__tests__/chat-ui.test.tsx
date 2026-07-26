@@ -268,6 +268,38 @@ describe('composer and message integrity', () => {
     expect(screen.getByText('502 / 500 bytes')).toBeInTheDocument();
   });
 
+  it('keeps the composer editable and focused while a response streams', () => {
+    const onSend = vi.fn();
+    const props = {
+      setInput: vi.fn(),
+      isListening: false,
+      isSpeechRecognitionSupported: false,
+      isMuted: true,
+      voiceEnabled: false,
+      onSend,
+      onStop: vi.fn(),
+      onStartListening: vi.fn(),
+      onStopListening: vi.fn(),
+      onToggleMute: vi.fn(),
+      textFieldRef: createRef<HTMLDivElement>(),
+      maxMessageBytes: 500,
+      input: 'drafting the next question',
+      inputBytes: 26,
+    };
+    renderThemed(<InputArea {...props} isLoading />);
+
+    const textbox = screen.getByRole('textbox');
+    // Disabling the focused textarea moves focus to <body> on every send.
+    expect(textbox).not.toBeDisabled();
+    textbox.focus();
+    expect(document.activeElement).toBe(textbox);
+
+    // The submit action is still gated: Enter must not send mid-stream.
+    fireEvent.keyDown(textbox, { key: 'Enter', shiftKey: false });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Stop generation' })).toBeInTheDocument();
+  });
+
   it('opens the editor with the original Markdown rather than flattened rendered text', () => {
     const onEdit = vi.fn();
     renderThemed(

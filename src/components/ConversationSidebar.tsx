@@ -1,4 +1,4 @@
-import React from 'react';
+import { memo } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Typography from '@mui/material/Typography';
@@ -17,7 +17,14 @@ import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 /**
  * ConversationSidebar Component — branded WindowsForum chat history.
  */
-export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
+/**
+ * Memoized: ChatWindow re-renders every animation frame while a response
+ * streams, and this body eagerly maps the whole conversation list — allocating
+ * an element tree and a nested sx object per conversation — even when the
+ * Drawer is closed and MUI discards the children. Callers must pass stable
+ * handlers for the memo to hold.
+ */
+export const ConversationSidebar = memo<ConversationSidebarProps>(({
   open,
   onClose,
   conversations,
@@ -157,4 +164,6 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
       </Box>
     </Drawer>
   );
-};
+});
+
+ConversationSidebar.displayName = 'ConversationSidebar';

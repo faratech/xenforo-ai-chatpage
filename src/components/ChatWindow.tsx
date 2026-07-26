@@ -1088,6 +1088,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     });
   }, []);
 
+  // Stable identities: InputArea and ConversationSidebar are memoized, and a
+  // fresh arrow here would defeat that on every streaming frame.
+  const handleSend = useCallback(() => { void handleSendMessage(); }, [handleSendMessage]);
+  const handleStop = useCallback(() => abortActiveTurn(true), [abortActiveTurn]);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
   const handleScroll = useCallback(() => {
     const element = messagesContainerRef.current;
     if (!element) return;
@@ -1179,7 +1185,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     <Box id="wf-chat-window" className="wf-chat-window" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
       <ConversationSidebar
         open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        onClose={closeDrawer}
         conversations={sortedConversations}
         currentConversationId={currentConversationId}
         onSelectConversation={handleSelectConversation}
@@ -1311,8 +1317,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           voiceEnabled={ENV.ENABLE_VOICE}
           inputBytes={inputBytes}
           maxMessageBytes={MAX_MESSAGE_BYTES}
-          onSend={() => { void handleSendMessage(); }}
-          onStop={() => abortActiveTurn(true)}
+          onSend={handleSend}
+          onStop={handleStop}
           onStartListening={handleStartListening}
           onStopListening={stopListening}
           onToggleMute={toggleMute}

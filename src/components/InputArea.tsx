@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { memo, useCallback } from 'react';
 import Box from '@mui/material/Box';
 import TextField from '@mui/material/TextField';
 import Stack from '@mui/material/Stack';
@@ -17,8 +17,15 @@ import { ASSISTANT_NAME } from '../config/brand';
 
 /**
  * InputArea Component — WindowsForum "Ask the AI" composer.
+ *
+ * Memoized deliberately. ChatWindow re-renders once per animation frame for
+ * the whole duration of a streaming response, and this subtree contains MUI's
+ * TextareaAutosize, whose layout effect has no dependency array: every render
+ * runs getComputedStyle plus two scrollHeight reads before paint. Left
+ * unmemoized that is a forced synchronous reflow ~60 times a second, on a DOM
+ * the stream is simultaneously mutating. Callers must pass stable handlers.
  */
-export const InputArea: React.FC<InputAreaProps> = ({
+export const InputArea = memo<InputAreaProps>(({
   input,
   setInput,
   isLoading,
@@ -42,9 +49,11 @@ export const InputArea: React.FC<InputAreaProps> = ({
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      onSend();
+      // The composer stays editable while a response streams, so Enter must be
+      // gated here rather than by disabling the field.
+      if (canSend) onSend();
     }
-  }, [onSend]);
+  }, [canSend, onSend]);
 
   return (
     <Box
@@ -114,7 +123,11 @@ export const InputArea: React.FC<InputAreaProps> = ({
                 'aria-label': 'Type your message',
               },
             }}
-            disabled={isLoading}
+            // Deliberately not disabled while loading. Disabling the focused
+            // textarea moves focus to <body> on every send, so keyboard and
+            // screen-reader users lose their place each turn and nobody can
+            // draft the next message during a long response. Only the submit
+            // action is gated (canSend / handleKeyDown).
           />
 
           {voiceEnabled && (
@@ -177,7 +190,9 @@ export const InputArea: React.FC<InputAreaProps> = ({
           </Typography>
           <Typography
             variant="caption"
-            aria-live="polite"
+            // Announce only once the limit is exceeded. A live region here
+            // queued an announcement of the byte count on every keystroke.
+            aria-live={isOverLimit ? 'polite' : 'off'}
             sx={{ color: isOverLimit ? 'error.main' : 'text.secondary', fontSize: 11 }}
           >
             {inputBytes} / {maxMessageBytes} bytes
@@ -186,4 +201,6 @@ export const InputArea: React.FC<InputAreaProps> = ({
       </Box>
     </Box>
   );
-};
+});
+
+InputArea.displayName = 'InputArea';
