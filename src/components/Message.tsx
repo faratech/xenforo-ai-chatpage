@@ -14,7 +14,7 @@ import EditIcon from '@mui/icons-material/Edit';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import type { Annotation, MessageProps } from '../types';
-import { parseHttpUrl, sanitizeAndParse } from '../utils/helpers';
+import { parseHttpUrl, sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 
 const citationLabel = (annotation: Annotation): string => {
@@ -99,6 +99,20 @@ export const Message = memo<MessageProps>(({
     [msg.rawContent, isStreaming]
   );
 
+  // While streaming, format the part of the answer that is structurally
+  // complete and leave the unfinished tail as plain text. Splitting is a cheap
+  // line scan; the parse below is keyed on the prefix, which only changes when
+  // a block closes, so it does not run on every animation frame.
+  const streamingSplit = useMemo(
+    () => (isStreaming ? splitStreamingMarkdown(msg.rawContent) : null),
+    [msg.rawContent, isStreaming]
+  );
+  const streamingClosed = streamingSplit?.closed ?? '';
+  const renderedStreamingPrefix = useMemo(
+    () => (streamingClosed ? sanitizeAndParse(streamingClosed) : ''),
+    [streamingClosed]
+  );
+
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(msg.rawContent);
@@ -133,9 +147,16 @@ export const Message = memo<MessageProps>(({
       <Box component="span" />
     </Box>
   ) : isStreaming ? (
-    <Box className="message-content wf-streaming-plain">
-      {msg.rawContent}
-      <Box component="span" className="streaming-cursor" aria-hidden="true" />
+    <Box className="message-content">
+      {renderedStreamingPrefix && (
+        <Box dangerouslySetInnerHTML={{ __html: renderedStreamingPrefix }} />
+      )}
+      {/* The unfinished tail stays a React text child, so it is escaped by
+          React and never reaches the Markdown parser. */}
+      <Box component="span" className="wf-streaming-plain">
+        {streamingSplit?.trailing ?? ''}
+        <Box component="span" className="streaming-cursor" aria-hidden="true" />
+      </Box>
     </Box>
   ) : (
     <Box

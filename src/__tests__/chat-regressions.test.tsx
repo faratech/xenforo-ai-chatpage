@@ -467,4 +467,52 @@ describe('citation rendering', () => {
     expect(document.querySelector('.wf-streaming-plain img')).toBeNull();
     expect(document.querySelector('.wf-streaming-plain strong')).toBeNull();
   });
+
+  const renderStreaming = (rawContent: string) => renderThemed(
+    <Message
+      msg={{ id: 'stream-x', role: 'ai', rawContent, timestamp: Date.now(), status: 'sending' }}
+      userAvatar="/avatar.webp"
+      userName="Member"
+      onEdit={vi.fn()}
+      onRegenerate={vi.fn()}
+      onRetry={vi.fn()}
+      isLastMessage
+      isStreaming
+    />
+  );
+
+  it('formats the completed blocks of a streaming answer', () => {
+    renderStreaming('**Install updates**\n\n## Free up storage\n\npartial senten');
+
+    // Everything before the last blank line is structurally settled.
+    expect(document.querySelector('.message-content strong')?.textContent).toBe('Install updates');
+    expect(document.querySelector('.message-content h2')?.textContent).toBe('Free up storage');
+    // The unfinished tail is still inert text.
+    expect(document.querySelector('.wf-streaming-plain')?.textContent).toContain('partial senten');
+  });
+
+  it('never renders an unterminated code fence as markup mid-stream', () => {
+    renderStreaming('Run this:\n\n```bash\nsfc /scannow\n\nDISM /Online');
+
+    // The fence is still open, so the boundary must stay before it.
+    expect(document.querySelector('.message-content pre')).toBeNull();
+    const tail = document.querySelector('.wf-streaming-plain')?.textContent ?? '';
+    expect(tail).toContain('```bash');
+    expect(tail).toContain('sfc /scannow');
+  });
+
+  it('keeps hostile markup inert in the unfinished tail', () => {
+    renderStreaming('Some prose.\n\n<img src=x onerror=alert(1)> and <script>alert(1)</script>');
+
+    expect(document.querySelector('.message-content img')).toBeNull();
+    expect(document.querySelector('.message-content script')).toBeNull();
+    expect(document.querySelector('.wf-streaming-plain')?.textContent).toContain('<img src=x');
+  });
+
+  it('closes a fence and formats it once the block completes', () => {
+    renderStreaming('Run this:\n\n```bash\nsfc /scannow\n```\n\nNext');
+
+    expect(document.querySelector('.message-content pre code')?.textContent).toContain('sfc /scannow');
+    expect(document.querySelector('.wf-streaming-plain')?.textContent).toBe('Next');
+  });
 });

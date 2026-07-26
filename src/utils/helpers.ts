@@ -443,6 +443,53 @@ export const sanitizeAndParse = (content: string): string => {
   return sanitized;
 };
 
+/** An opening or closing code fence, allowing CommonMark's 3-space indent. */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
+
+/**
+ * Splits streaming content into the part that is safe to render as Markdown
+ * and the tail that is not finished yet.
+ *
+ * The boundary is the last blank line that is not inside an open code fence.
+ * Markdown separates block constructs on blank lines, so everything before one
+ * is structurally complete and cannot be changed by text that arrives later —
+ * which is exactly the property needed to format a response as it streams
+ * without the whole message re-flowing when it ends.
+ *
+ * The tail is returned verbatim for the caller to render as plain text; it is
+ * never handed to the Markdown parser, so a half-written fence, link, or table
+ * cannot render as markup mid-stream.
+ */
+export const splitStreamingMarkdown = (content: string): { closed: string; trailing: string } => {
+  if (!content) return { closed: '', trailing: '' };
+
+  const lines = content.split('\n');
+  let openFence: string | null = null;
+  let boundary = -1;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const fence = FENCE_LINE.exec(lines[index]);
+    if (fence) {
+      if (openFence === null) {
+        openFence = fence[1];
+      } else if (fence[1][0] === openFence[0] && fence[1].length >= openFence.length) {
+        openFence = null;
+      }
+      continue;
+    }
+    // A boundary is only recorded outside a fence, so a blank line inside an
+    // unterminated code block never becomes a split point.
+    if (openFence === null && lines[index].trim() === '') boundary = index;
+  }
+
+  if (boundary < 0) return { closed: '', trailing: content };
+
+  return {
+    closed: lines.slice(0, boundary).join('\n'),
+    trailing: lines.slice(boundary + 1).join('\n'),
+  };
+};
+
 /**
  * Generates a unique conversation ID
  */

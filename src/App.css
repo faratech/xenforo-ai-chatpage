@@ -63,10 +63,19 @@
   font-size: 15px;
 }
 
-/* Streaming responses render as escaped plain text until completion. */
+/* The unfinished tail of a streaming response: escaped plain text whose
+   newlines must survive until the block closes and it is parsed as Markdown. */
 #react-chat-container .wf-streaming-plain {
+  display: inline-block;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  width: 100%;
+}
+
+/* No leading gap when the tail follows already-formatted blocks. */
+#react-chat-container .message-content > *:last-child > .wf-streaming-plain:first-child,
+#react-chat-container .message-content > .wf-streaming-plain:empty {
+  margin-top: 0;
 }
 
 #react-chat-container .message-content h1,
