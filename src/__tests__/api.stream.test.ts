@@ -51,7 +51,7 @@ describe('terminal event handling', () => {
     });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(body)));
 
-    await expect(ChatAPI.sendMessage('hi')).resolves.toEqual({
+    await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({
       text: 'Answer',
       annotations: [],
       responseId: undefined,
@@ -243,5 +243,112 @@ describe('citation annotations', () => {
       { type: 'container_file_citation', containerId: 'cont_1', fileId: 'file_2', filename: 'run.log' },
       { type: 'file_path', fileId: 'file_3' },
     ]);
+  });
+});
+
+describe('frame separators', () => {
+  /**
+   * A server that mixes CRLF and LF terminators produces a 3-byte separator.
+   * Inferring the length from the first character alone consumed 4, ate the
+   * next frame's leading "d", and the mangled frame was then dropped without
+   * an error — losing a delta, or the terminal event with it.
+   */
+  it.each([
+    ['LF', '\n\n', '\n\n'],
+    ['CRLF', '\r\n\r\n', '\r\n\r\n'],
+    ['CRLF then LF', '\r\n\n', '\n\n'],
+    ['LF then CRLF', '\n\r\n', '\n\n'],
+  ])('parses every frame across a %s separator', async (_label, first, second) => {
+    const payload = `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'A' })}${first}`
+      + `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'B' })}${second}`
+      + `data: ${JSON.stringify({ type: 'chat.stream.completed', response_id: 'resp_sep' })}\n\n`;
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(payload));
+          controller.close();
+        },
+      })
+    )));
+
+    await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({
+      text: 'AB',
+      responseId: 'resp_sep',
+    });
+  });
+});
+
+describe('empty-answer classification', () => {
+  const streamOf = (payload: string) => streamResponse(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(payload));
+      controller.close();
+    },
+  }));
+
+  it('reports a truncated stream distinctly from one that never started', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(
+      sse({ type: 'response.output_text.delta', delta: 'half an answer' })
+    )));
+
+    await expect(ChatAPI.sendMessage('hi')).rejects.toMatchObject({
+      name: 'IncompleteStreamError',
+      code: 'stream_truncated',
+      partialText: 'half an answer',
+    });
+  });
+
+  it('reports a stream that delivered nothing at all', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(': keepalive\n\n')));
+
+    await expect(ChatAPI.sendMessage('hi')).rejects.toMatchObject({
+      name: 'IncompleteStreamError',
+      code: 'stream_no_terminal',
+      partialText: '',
+    });
+  });
+
+  it('carries diagnostics that identify the turn and what arrived', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(
+      sse({ type: 'response.output_text.delta', delta: 'x' })
+    )));
+
+    await expect(ChatAPI.sendMessage('hi', { turnId: 'turn-abc' })).rejects.toMatchObject({
+      diagnostics: {
+        turnId: 'turn-abc',
+        eventTypes: ['response.output_text.delta'],
+      },
+    });
+  });
+
+  it('sends the turn id as a header so the server log can be correlated', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamOf(
+      sse({ type: 'chat.stream.completed' })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await ChatAPI.sendMessage('hi', { turnId: 'turn-xyz' });
+
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    expect(headers['X-WF-Turn-Id']).toBe('turn-xyz');
+  });
+});
+
+describe('keepalive comments', () => {
+  it('treats comment lines as no-ops that keep the stream alive', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(': keepalive\n\n'));
+          controller.enqueue(encoder.encode(sse({ type: 'response.output_text.delta', delta: 'ok' })));
+          controller.enqueue(encoder.encode(': keepalive\n\n'));
+          controller.enqueue(encoder.encode(sse({ type: 'chat.stream.completed' })));
+          controller.close();
+        },
+      })
+    )));
+
+    await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({ text: 'ok' });
   });
 });

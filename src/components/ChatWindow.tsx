@@ -18,12 +18,13 @@ import type {
   ChatWindowProps,
   Conversation,
   Message,
+  StreamingResponse,
   UsageData,
 } from '../types';
 import { Message as MessageComponent } from './Message';
 import { ConversationSidebar } from './ConversationSidebar';
 import { InputArea } from './InputArea';
-import { EXAMPLE_PROMPTS, generateConversationId } from '../utils/helpers';
+import { EXAMPLE_PROMPTS, generateConversationId, generateTurnId } from '../utils/helpers';
 import {
   APIError,
   CaptchaRequiredError,
@@ -50,8 +51,29 @@ const HISTORY_CONTEXT_ITEMS = 20;
 const HISTORY_CONTEXT_ITEM_BYTES = 4_000;
 const TURNSTILE_LOAD_TIMEOUT_MS = 15_000;
 const PENDING_DELETION_RETRY_MS = 60_000;
+/** One retry for transient failures that consumed no output. */
+const RETRY_BACKOFF_MS = 400;
+const RETRY_JITTER_MS = 400;
 const utf8Encoder = new TextEncoder();
 const byteLength = (value: string): number => utf8Encoder.encode(value).length;
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Safe to send again: the error is transient and no part of an answer was
+ * delivered, so retrying cannot duplicate output or splice two answers
+ * together. A cancelled turn is the user's decision and is never retried.
+ */
+const isSafelyRetryable = (error: unknown): boolean => {
+  if (error instanceof StreamCancelledError || error instanceof CaptchaRequiredError) return false;
+  if (error instanceof APIError) return error.retryable && !error.partialText;
+  if (error instanceof IncompleteStreamError || error instanceof StreamProtocolError) {
+    // A truncated stream already showed the user text; replaying it would
+    // duplicate content. Only a turn that produced nothing may be retried.
+    return !error.partialText;
+  }
+  return false;
+};
 
 const messageId = (suffix = ''): string => {
   const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -592,10 +614,28 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   }, []);
 
   const getErrorText = useCallback((error: unknown): string => {
-    if (error instanceof IncompleteStreamError) return 'The response was interrupted before completion. You can retry it.';
+    // A turn id makes a user report traceable to the exact server request
+    // instead of a wall-clock guess across four log files.
+    const reference = error instanceof IncompleteStreamError && error.diagnostics
+      ? ` (ref: ${error.diagnostics.turnId})`
+      : '';
+
+    if (error instanceof IncompleteStreamError) {
+      if (error.code === 'completed_empty') {
+        return `The assistant finished without producing an answer. Please retry.${reference}`;
+      }
+      return `The response was interrupted before completion. You can retry it.${reference}`;
+    }
     if (error instanceof StreamProtocolError) return 'The server returned an invalid streaming response. Please retry.';
     if (error instanceof APIError) {
-      if (error.status === 429 || error.status === 400 || error.status === 413) return error.message;
+      if (error.status === 429 || error.status === 400 || error.status === 413) {
+        // Upstream detail can be long and internal; show a readable prefix only.
+        return error.message.length > 200 ? `${error.message.slice(0, 200)}…` : error.message;
+      }
+      // Session errors are not retryable — telling the user to retry guarantees failure.
+      if (error.status === 401 || error.status === 403) {
+        return 'Your session expired. Reload the page, or sign in, and try again.';
+      }
       if (error.code === 'timeout') return 'The AI service took too long to respond. Please retry.';
       if (error.code === 'network_error') return 'Network error. Check your connection and retry.';
       if (error.retryable) return 'The AI service is temporarily unavailable. Please retry.';
@@ -648,6 +688,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       || createNewConversation(conversationId, welcomeMessage);
     const baseMessages = params.baseMessages ?? existingConversation.messages;
     const resetConversation = Boolean(params.forceReset || existingConversation.needsServerResync);
+    // NOTE: history is uploaded on every turn but chat.php only consumes it
+    // when it has no conversation record yet (chat.php:1242). Gating it on
+    // `resetConversation` alone is NOT safe: when the server has silently lost
+    // its record, that is exactly the turn that must re-seed, and the client
+    // cannot tell. Skipping it needs a server-side `history_required` signal.
     const history = serializeConversationHistory(baseMessages).slice(-HISTORY_CONTEXT_ITEMS);
 
     stopListening();
@@ -729,12 +774,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     };
 
     try {
-      const result = await ChatAPI.sendMessage(content, {
+      const send = (turnId: string) => ChatAPI.sendMessage(content, {
         signal: controller.signal,
         captchaToken: params.captchaToken,
         conversationId,
         resetConversation: resetConversation || undefined,
         history,
+        turnId,
         onChunk: (partialText, annotations) => {
           const active = activeTurnRef.current;
           if (!active || active.requestId !== requestId) return;
@@ -746,9 +792,34 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         },
       });
 
+      let result: StreamingResponse;
+      try {
+        result = await send(generateTurnId());
+      } catch (error) {
+        // Retry once, but only when the failure is transient AND nothing was
+        // consumed: with no output delivered the server has not committed a
+        // turn, so a second attempt cannot duplicate or interleave an answer.
+        if (!isSafelyRetryable(error) || controller.signal.aborted) throw error;
+        const active = activeTurnRef.current;
+        if (!active || active.requestId !== requestId) throw error;
+        await sleep(RETRY_BACKOFF_MS + Math.random() * RETRY_JITTER_MS);
+        if (activeTurnRef.current?.requestId !== requestId || controller.signal.aborted) throw error;
+        result = await send(generateTurnId());
+      }
+
       if (activeTurnRef.current?.requestId !== requestId) return;
       if (!result.text.trim()) {
-        throw new IncompleteStreamError('The completed stream contained no response text.');
+        // The stream completed cleanly and the backend still produced nothing.
+        // Distinct from a truncated transport, and it means we very likely
+        // paid for an answer the user never saw — keep the diagnostics.
+        throw new IncompleteStreamError(
+          'The completed stream contained no response text.',
+          '',
+          [],
+          result.responseId,
+          'completed_empty',
+          result.diagnostics
+        );
       }
       updateConversationById(conversationId, conversation => ({
         messages: [...conversation.messages, {

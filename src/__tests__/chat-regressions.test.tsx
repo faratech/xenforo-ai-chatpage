@@ -39,6 +39,7 @@ vi.mock('../services/speech', () => ({
 import {
   APIError,
   CaptchaRequiredError,
+  IncompleteStreamError,
   StreamCancelledError,
 } from '../services/api';
 import { ChatWindow } from '../components/ChatWindow';
@@ -158,12 +159,19 @@ describe('transactional branch operations', () => {
 
   it('restores the original branch when regeneration fails', async () => {
     await bootWithExchange();
-    apiMocks.sendMessage.mockRejectedValueOnce(
-      new APIError('Network request failed', { code: 'network_error', retryable: true }),
-    );
+    // Both attempts fail: a transient error that consumed no output is
+    // retried once, so the branch may only be restored after that too.
+    apiMocks.sendMessage
+      .mockRejectedValueOnce(
+        new APIError('Network request failed', { code: 'network_error', retryable: true }),
+      )
+      .mockRejectedValueOnce(
+        new APIError('Network request failed', { code: 'network_error', retryable: true }),
+      );
     fireEvent.click(screen.getByLabelText('Regenerate response'));
 
-    expect(await screen.findByText(/Network error\. Check your connection/)).toBeInTheDocument();
+    expect(await screen.findByText(/Network error\. Check your connection/, undefined, { timeout: 3000 }))
+      .toBeInTheDocument();
     expect(messageParagraphs('First answer')).toHaveLength(1);
     expect(messageParagraphs('First question')).toHaveLength(1);
     expect(apiMocks.sendMessage.mock.calls[1][1]).toMatchObject({ resetConversation: true });
@@ -173,6 +181,33 @@ describe('transactional branch operations', () => {
         .find(conversation => conversation.messages.some(message => message.rawContent === 'First answer'));
       expect(stored?.needsServerResync).toBe(true);
     });
+  });
+
+  it('recovers from a transient failure that delivered nothing', async () => {
+    await bootWithExchange();
+    const callsBefore = apiMocks.sendMessage.mock.calls.length;
+    apiMocks.sendMessage.mockRejectedValueOnce(
+      new APIError('Network request failed', { code: 'network_error', retryable: true }),
+    );
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Recovered answer', annotations: [] });
+    fireEvent.click(screen.getByLabelText('Regenerate response'));
+
+    expect(await screen.findByText('Recovered answer', undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText(/Network error/)).not.toBeInTheDocument();
+    expect(apiMocks.sendMessage.mock.calls.length).toBe(callsBefore + 2);
+  });
+
+  it('never retries a turn that already delivered part of an answer', async () => {
+    await bootWithExchange();
+    const callsBefore = apiMocks.sendMessage.mock.calls.length;
+    // Replaying this would duplicate text the user has already seen.
+    apiMocks.sendMessage.mockRejectedValueOnce(
+      new IncompleteStreamError('truncated', 'partial text', [], undefined, 'stream_truncated'),
+    );
+    fireEvent.click(screen.getByLabelText('Regenerate response'));
+
+    expect(await screen.findByText(/interrupted before completion/)).toBeInTheDocument();
+    expect(apiMocks.sendMessage.mock.calls.length).toBe(callsBefore + 1);
   });
 
   it('replaces the branch when regeneration succeeds', async () => {

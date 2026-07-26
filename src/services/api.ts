@@ -13,7 +13,9 @@ import type {
   SSEAnnotation,
   SSEEvent,
   ErrorResponse,
+  StreamDiagnostics,
 } from '../types';
+import { generateTurnId } from '../utils/helpers';
 
 const apiBase = ENV.getApiBase();
 
@@ -23,6 +25,11 @@ export const JSON_REQUEST_TIMEOUT_MS = 15_000;
 export const CHAT_FIRST_BYTE_TIMEOUT_MS = 130_000;
 /** Between-chunk inactivity limit once the stream has started. */
 export const READ_INACTIVITY_TIMEOUT_MS = 45_000;
+/** TTS is the one call that used to run unbounded; a stalled worker muted every later reply. */
+export const TTS_REQUEST_TIMEOUT_MS = 20_000;
+
+/** SSE frame separator. Kept module-level so the stream loop does not recompile it per frame. */
+const SSE_FRAME_SEPARATOR = /\r?\n\r?\n/;
 
 interface SendMessagePayload {
   message: string;
@@ -86,15 +93,34 @@ export class StreamCancelledError extends StreamStateError {
   }
 }
 
+/**
+ * Why a turn produced no usable answer. `stream_truncated` and
+ * `stream_no_terminal` mean the transport lost data we were sent;
+ * `completed_empty` means the backend genuinely produced nothing. They
+ * looked identical to users and to us until an answer went missing and
+ * there was no way to tell which had happened.
+ */
+export type IncompleteStreamCode =
+  | 'stream_truncated'
+  | 'stream_no_terminal'
+  | 'completed_empty';
+
 export class IncompleteStreamError extends StreamStateError {
+  readonly code: IncompleteStreamCode;
+  readonly diagnostics?: StreamDiagnostics;
+
   constructor(
     message = 'Stream ended before completion',
     partialText = '',
     annotations: Annotation[] = [],
-    responseId?: string
+    responseId?: string,
+    code: IncompleteStreamCode = 'stream_no_terminal',
+    diagnostics?: StreamDiagnostics
   ) {
     super(message, { partialText, annotations, responseId });
     this.name = 'IncompleteStreamError';
+    this.code = code;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -371,6 +397,7 @@ export class ChatAPI {
       conversationId?: string;
       resetConversation?: boolean;
       history?: ChatMessageHistoryItem[];
+      turnId?: string;
       onChunk?: (partialText: string, annotations: Annotation[]) => void;
     } = {}
   ): Promise<StreamingResponse> {
@@ -382,6 +409,10 @@ export class ChatAPI {
       history,
       onChunk,
     } = options;
+
+    // Correlates this turn with the server's log lines for the same request.
+    const turnId = options.turnId ?? generateTurnId();
+    const startedAt = Date.now();
 
     const payload: SendMessagePayload = { message };
     if (captchaToken) payload.captcha_token = captchaToken;
@@ -397,7 +428,7 @@ export class ChatAPI {
       response = await fetch(`${apiBase}${ENV.ENDPOINTS.CHAT}`, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-WF-Turn-Id': turnId },
         body: JSON.stringify(payload),
         signal: firstByte.signal,
       });
@@ -440,14 +471,23 @@ export class ChatAPI {
       throw new StreamProtocolError('ReadableStream not supported');
     }
 
-    return this.processStreamingResponse(response.body, firstByte, onChunk, signal);
+    return this.processStreamingResponse(
+      response.body,
+      firstByte,
+      onChunk,
+      signal,
+      turnId,
+      startedAt
+    );
   }
 
   private static async processStreamingResponse(
     body: ReadableStream<Uint8Array>,
     firstByte: DeadlineHandle,
     onChunk?: (partialText: string, annotations: Annotation[]) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    turnId = 'unknown',
+    startedAt = Date.now()
   ): Promise<StreamingResponse> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -457,6 +497,15 @@ export class ChatAPI {
     let responseId: string | undefined;
     let terminalReceived = false;
     let firstByteReceived = false;
+    let bytesReceived = 0;
+    const eventTypes = new Set<string>();
+
+    const diagnostics = (): StreamDiagnostics => ({
+      turnId,
+      bytesReceived,
+      eventTypes: [...eventTypes],
+      elapsedMs: Date.now() - startedAt,
+    });
 
     const state = () => ({ partialText, annotations, responseId });
     const notifyChunk = () => onChunk?.(partialText, [...annotations]);
@@ -504,6 +553,7 @@ export class ChatAPI {
       }
 
       const eventType = parsedData.type;
+      if (typeof eventType === 'string') eventTypes.add(eventType);
       const nestedError = typeof parsedData.error === 'string'
         ? parsedData.error
         : parsedData.error?.message;
@@ -648,17 +698,22 @@ export class ChatAPI {
           firstByte.clear();
         }
 
-        buffer += decoder.decode(value, { stream: true });
-        let boundary = buffer.search(/\r?\n\r?\n/);
-        while (boundary !== -1) {
-          const rawEvent = buffer.slice(0, boundary);
-          const separatorLength = buffer[boundary] === '\r' ? 4 : 2;
-          buffer = buffer.slice(boundary + separatorLength);
+        const decoded = decoder.decode(value, { stream: true });
+        bytesReceived += decoded.length;
+        buffer += decoded;
+        // Consume the separator's real length. It is 2, 3 or 4 bytes
+        // (\n\n, \r\n\n, \n\r\n, \r\n\r\n); inferring it from the first
+        // character alone drops a byte off the next frame on a mixed
+        // boundary, and the mangled frame is then silently discarded.
+        let separator = SSE_FRAME_SEPARATOR.exec(buffer);
+        while (separator) {
+          const rawEvent = buffer.slice(0, separator.index);
+          buffer = buffer.slice(separator.index + separator[0].length);
           handleEvent(rawEvent);
           // The terminal event resolves the turn immediately; the PHP
           // proxy may hold the transport open long after it.
           if (terminalReceived) break;
-          boundary = buffer.search(/\r?\n\r?\n/);
+          separator = SSE_FRAME_SEPARATOR.exec(buffer);
         }
       }
 
@@ -677,17 +732,27 @@ export class ChatAPI {
       }
 
       if (!terminalReceived) {
+        // Both mean the transport lost something we were sent, but they
+        // point at different layers: truncated after deltas vs nothing at
+        // all. Keeping them distinct is what makes a lost answer traceable.
         throw new IncompleteStreamError(
           partialText
             ? 'Stream ended before chat.stream.completed'
             : 'No completed response received from server',
           partialText,
           annotations,
-          responseId
+          responseId,
+          partialText ? 'stream_truncated' : 'stream_no_terminal',
+          diagnostics()
         );
       }
 
-      return { text: partialText, annotations: [...annotations], responseId };
+      return {
+        text: partialText,
+        annotations: [...annotations],
+        responseId,
+        diagnostics: diagnostics(),
+      };
     } catch (error) {
       if (
         error instanceof APIError
@@ -735,58 +800,89 @@ export class ChatAPI {
     }
   }
 
-  static async clearConversation(conversationId: string): Promise<{ success: boolean }> {
-    return fetchAPI<{ success: boolean }>(ENV.ENDPOINTS.CHAT, {
+  /**
+   * Server-side conversation deletes. Callers treat a resolved promise as
+   * proof the server forgot the conversation, so an unsuccessful body must
+   * reject rather than resolve — otherwise the client wipes its transcript
+   * while the server keeps answering from the context the user deleted.
+   */
+  private static async assertConversationCleared(
+    action: 'clearConversation' | 'deleteConversation',
+    conversationId: string
+  ): Promise<{ success: boolean }> {
+    const result = await fetchAPI<{ success?: boolean }>(ENV.ENDPOINTS.CHAT, {
       method: 'POST',
-      body: JSON.stringify({ action: 'clearConversation', client_conversation_id: conversationId }),
+      body: JSON.stringify({ action, client_conversation_id: conversationId }),
     });
+    if (result?.success !== true) {
+      throw new APIError('The server did not confirm the conversation was cleared', {
+        code: 'conversation_clear_unconfirmed',
+        retryable: true,
+      });
+    }
+    return { success: true };
+  }
+
+  static async clearConversation(conversationId: string): Promise<{ success: boolean }> {
+    return this.assertConversationCleared('clearConversation', conversationId);
   }
 
   static async deleteConversation(conversationId: string): Promise<{ success: boolean }> {
-    return fetchAPI<{ success: boolean }>(ENV.ENDPOINTS.CHAT, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'deleteConversation', client_conversation_id: conversationId }),
-    });
+    return this.assertConversationCleared('deleteConversation', conversationId);
   }
 
   static async requestTTS(
     text: string,
     options: { signal?: AbortSignal } = {}
   ): Promise<Blob> {
-    let response: Response;
+    // Deadline covers the body read, not just the headers: a worker that
+    // accepts the connection and stalls would otherwise leave the audio
+    // queue wedged and silence every later reply.
+    const deadline = withDeadline(TTS_REQUEST_TIMEOUT_MS, options.signal);
     try {
-      response = await fetch(`${apiBase}${ENV.ENDPOINTS.TTS}`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-        signal: options.signal,
-      });
-    } catch (error) {
-      if (options.signal?.aborted || isAbortError(error)) throw error;
-      throw new APIError('TTS network request failed', {
-        code: 'tts_network_error',
-        retryable: true,
-      });
-    }
+      let response: Response;
+      try {
+        response = await fetch(`${apiBase}${ENV.ENDPOINTS.TTS}`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+          signal: deadline.signal,
+        });
+      } catch (error) {
+        if (options.signal?.aborted || isAbortError(error)) throw error;
+        if (deadline.timedOut()) {
+          throw new APIError('TTS request timed out', {
+            code: 'tts_timeout',
+            retryable: true,
+          });
+        }
+        throw new APIError('TTS network request failed', {
+          code: 'tts_network_error',
+          retryable: true,
+        });
+      }
 
-    if (!response.ok) {
-      throw new APIError('TTS request failed', {
-        status: response.status,
-        code: 'tts_request_failed',
-        retryable: isRetryableStatus(response.status),
-      });
-    }
+      if (!response.ok) {
+        throw new APIError('TTS request failed', {
+          status: response.status,
+          code: 'tts_request_failed',
+          retryable: isRetryableStatus(response.status),
+        });
+      }
 
-    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-    if (!contentType.startsWith('audio/')) {
-      throw new APIError('TTS service returned a non-audio response', {
-        status: response.status,
-        code: 'invalid_tts_content_type',
-        retryable: true,
-      });
-    }
+      const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+      if (!contentType.startsWith('audio/')) {
+        throw new APIError('TTS service returned a non-audio response', {
+          status: response.status,
+          code: 'invalid_tts_content_type',
+          retryable: true,
+        });
+      }
 
-    return response.blob();
+      return await response.blob();
+    } finally {
+      deadline.clear();
+    }
   }
 }

@@ -447,7 +447,15 @@ export const sanitizeAndParse = (content: string): string => {
  * Generates a unique conversation ID
  */
 export const generateConversationId = (): string => {
-  return `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  return `conv_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+};
+
+/**
+ * Short id correlating one chat turn across the browser, chat.php, and the
+ * backend log. Short enough to read back from a user's screenshot.
+ */
+export const generateTurnId = (): string => {
+  return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
 };
 
 /**

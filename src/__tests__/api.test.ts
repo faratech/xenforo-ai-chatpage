@@ -45,7 +45,7 @@ describe('ChatAPI streaming protocol', () => {
       sse({ type: 'chat.stream.completed', response_id: 'resp_123' }),
     ])));
 
-    await expect(ChatAPI.sendMessage('hi', { onChunk })).resolves.toEqual({
+    await expect(ChatAPI.sendMessage('hi', { onChunk })).resolves.toMatchObject({
       text: 'Hello',
       annotations: [],
       responseId: 'resp_123',

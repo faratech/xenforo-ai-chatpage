@@ -75,10 +75,23 @@ export interface ChatStoreV3 {
   pendingServerDeletions: Record<string, number>;
 }
 
+/** What the transport actually saw, so a lost answer can be diagnosed after the fact. */
+export interface StreamDiagnostics {
+  /** Turn id shared with the server log for this request. */
+  turnId: string;
+  /** Decoded characters received across all chunks. */
+  bytesReceived: number;
+  /** Distinct SSE event types observed, in first-seen order. */
+  eventTypes: string[];
+  /** Milliseconds from request start to failure. */
+  elapsedMs: number;
+}
+
 export interface StreamingResponse {
   text: string;
   annotations: Annotation[];
   responseId?: string;
+  diagnostics?: StreamDiagnostics;
 }
 
 export interface ChatMessageHistoryItem {
