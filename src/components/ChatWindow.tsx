@@ -54,6 +54,15 @@ const PENDING_DELETION_RETRY_MS = 60_000;
 /** One retry for transient failures that consumed no output. */
 const RETRY_BACKOFF_MS = 400;
 const RETRY_JITTER_MS = 400;
+/** How long a smooth scroll is treated as in progress (no portable `scrollend`). */
+const SMOOTH_SCROLL_SETTLE_MS = 700;
+
+/**
+ * Read-aloud preference, scoped per account like every other stored key. It
+ * used to be a bare `chat_mute`, so on a shared browser one account's setting
+ * carried over to the next.
+ */
+const muteStorageKey = (userId: string): string => `chat_mute:v1:${encodeURIComponent(userId)}`;
 const utf8Encoder = new TextEncoder();
 const byteLength = (value: string): number => utf8Encoder.encode(value).length;
 
@@ -280,7 +289,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [errorMessage, setErrorMessage] = useState('');
   const [isMuted, setIsMuted] = useState<boolean>(() => {
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem('chat_mute') ?? 'true');
+      const stored: unknown = JSON.parse(localStorage.getItem(muteStorageKey(userId)) ?? 'true');
       return typeof stored === 'boolean' ? stored : true;
     } catch {
       return true;
@@ -296,6 +305,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const skipNextAutoFollowRef = useRef(false);
+  const programmaticScrollRef = useRef(false);
+  const programmaticScrollTimerRef = useRef<number | null>(null);
   const textFieldRef = useRef<HTMLDivElement>(null);
   const conversationsRef = useRef(conversations);
   const currentConversationIdRef = useRef(currentConversationId);
@@ -1082,7 +1093,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const toggleMute = useCallback(() => {
     setIsMuted(previous => {
       const next = !previous;
-      try { localStorage.setItem('chat_mute', JSON.stringify(next)); } catch { /* optional */ }
+      try { localStorage.setItem(muteStorageKey(userId), JSON.stringify(next)); } catch { /* optional */ }
       AudioService.setMuted(next || !ENV.ENABLE_VOICE);
       return next;
     });
@@ -1097,6 +1108,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const handleScroll = useCallback(() => {
     const element = messagesContainerRef.current;
     if (!element) return;
+    // A smooth programmatic scroll emits scroll events from far above the
+    // bottom. Reading those as "the user scrolled away" turned auto-follow
+    // back off mid-animation, which made the jump-to-latest button reappear
+    // and flicker on every use.
+    if (programmaticScrollRef.current) return;
     setAutoFollow(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
   }, []);
 
@@ -1109,6 +1125,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       return;
     }
     skipNextAutoFollowRef.current = true;
+    programmaticScrollRef.current = true;
+    if (programmaticScrollTimerRef.current !== null) {
+      window.clearTimeout(programmaticScrollTimerRef.current);
+    }
+    // `scrollend` is not available everywhere; fall back to a timer that
+    // comfortably outlasts a smooth scroll.
+    programmaticScrollTimerRef.current = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+      programmaticScrollTimerRef.current = null;
+    }, SMOOTH_SCROLL_SETTLE_MS);
     element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
   }, [reduceMotion]);
 
@@ -1130,6 +1156,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     activeTurnRef.current = null;
     active?.controller.abort();
     if (streamingFrameRef.current !== null) cancelAnimationFrame(streamingFrameRef.current);
+    if (programmaticScrollTimerRef.current !== null) {
+      window.clearTimeout(programmaticScrollTimerRef.current);
+    }
     if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
       // Unmount (navigation/account switch) interrupted a turn; persist the
       // resync marker directly since no further renders will run. A branch
@@ -1172,6 +1201,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const visibleStreamingMessage = streamingState?.conversationId === currentConversationId
     ? streamingState.message
     : null;
+
   const usageVisible = !isGuest && !!usage?.logged_in && !usage.unavailable;
   const usageTierLabel = usage?.tier === 'premium'
     ? 'Premium Supporter'
@@ -1223,22 +1253,37 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           aria-label="Chat messages"
           sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
         >
-          <Box role="log" aria-live="polite" aria-relevant="additions">
-            {currentConversation.messages.map((message, index) => (
-              <MessageComponent
-                key={message.id}
-                msg={message}
-                userAvatar={userAvatar}
-                userName={userName}
-                onEdit={handleEditMessage}
-                onRegenerate={handleRegenerateMessage}
-                onRetry={handleRetryMessage}
-                isLastMessage={index === currentConversation.messages.length - 1 && Boolean(lastUserMessageId)}
-                isLastUserMessage={message.id === lastUserMessageId}
-                isStreaming={false}
-                isBusy={isLoading}
-              />
-            ))}
+          {/* KNOWN LIMITATION: because this container is the live region, its
+              children being replaced on a conversation switch reads to
+              assistive tech as "all of these were just added", so the whole
+              transcript is announced. Fixing it properly needs a dedicated
+              announcer, which duplicates every answer's text in the DOM, or
+              suppression around the swap — neither is safe to ship without
+              testing against a real screen reader. `aria-relevant="additions"`
+              was dropped: it is already the default for role="log". */}
+          <Box role="log" aria-live="polite">
+            {currentConversation.messages.map((message, index) => {
+              const isLast = index === currentConversation.messages.length - 1
+                && Boolean(lastUserMessageId);
+              const isLastUser = message.id === lastUserMessageId;
+              return (
+                <MessageComponent
+                  key={message.id}
+                  msg={message}
+                  userAvatar={userAvatar}
+                  userName={userName}
+                  onEdit={handleEditMessage}
+                  onRegenerate={handleRegenerateMessage}
+                  onRetry={handleRetryMessage}
+                  isLastMessage={isLast}
+                  isLastUserMessage={isLastUser}
+                  isStreaming={false}
+                  // Only the rows that actually render busy-gated actions see
+                  // this flip, so the rest keep their memo across a turn.
+                  isBusy={isLoading && (isLast || isLastUser)}
+                />
+              );
+            })}
           </Box>
 
           {visibleStreamingMessage && (

@@ -217,6 +217,24 @@ describe('message scrolling', () => {
     expect(windowScrollToMock).not.toHaveBeenCalled();
   });
 
+  it('does not let a smooth jump cancel its own auto-follow', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const messagePane = await screen.findByLabelText('Chat messages');
+    setScrollGeometry(messagePane);
+    fireEvent.scroll(messagePane);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
+    expect(screen.queryByRole('button', { name: 'Jump to latest' })).not.toBeInTheDocument();
+
+    // A smooth scroll emits intermediate events from far above the bottom.
+    // Reacting to them turned auto-follow back off mid-animation, which made
+    // the button reappear and flicker on every use.
+    fireEvent.scroll(messagePane);
+    fireEvent.scroll(messagePane);
+
+    expect(screen.queryByRole('button', { name: 'Jump to latest' })).not.toBeInTheDocument();
+  });
+
   it('jumps immediately inside the message pane when reduced motion is requested', async () => {
     prefersReducedMotion = true;
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);

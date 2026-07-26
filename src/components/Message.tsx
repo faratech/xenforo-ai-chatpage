@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, memo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Avatar from '@mui/material/Avatar';
@@ -113,6 +113,11 @@ export const Message = memo<MessageProps>(({
     [streamingClosed]
   );
 
+  const copyResetRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+  }, []);
+
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(msg.rawContent);
@@ -121,7 +126,13 @@ export const Message = memo<MessageProps>(({
       console.error('Clipboard write failed:', error);
       setCopyStatus('failed');
     }
-    window.setTimeout(() => setCopyStatus('idle'), 3500);
+    // Repeated clicks must not let an earlier timer clear a later "Copied!",
+    // and a pending timer must not outlive the component.
+    if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => {
+      copyResetRef.current = null;
+      setCopyStatus('idle');
+    }, 3500);
   }, [msg.rawContent]);
 
   const handleEdit = useCallback(() => {
