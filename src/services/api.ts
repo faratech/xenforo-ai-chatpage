@@ -13,6 +13,7 @@ import type {
   SSEAnnotation,
   SSEEvent,
   ErrorResponse,
+  StreamActivity,
   StreamDiagnostics,
 } from '../types';
 import { generateTurnId } from '../utils/helpers';
@@ -30,6 +31,46 @@ export const TTS_REQUEST_TIMEOUT_MS = 20_000;
 
 /** SSE frame separator. Kept module-level so the stream loop does not recompile it per frame. */
 const SSE_FRAME_SEPARATOR = /\r?\n\r?\n/;
+
+/**
+ * Human labels for the work the assistant does before answering. The backend
+ * already streams every Responses API event through the PHP proxy; these were
+ * simply being discarded, leaving users watching an anonymous spinner.
+ *
+ * Keys are the function-tool names the chat surface is actually offered
+ * (tool_handler.get_tools) plus the built-in call item types.
+ */
+const ACTIVITY_LABELS: Record<string, string> = {
+  // Built-in tool item types
+  file_search_call: 'Searching WindowsForum',
+  web_search_call: 'Searching the web',
+  code_interpreter_call: 'Running code',
+  image_generation_call: 'Creating an image',
+  mcp_call: 'Using a tool',
+  reasoning: 'Thinking it through',
+  // Function tools
+  search: 'Searching WindowsForum',
+  searchWindowsForum: 'Searching WindowsForum',
+  searchThreads: 'Searching threads',
+  fetch: 'Reading a page',
+  extractWebpageContent: 'Reading a page',
+  fetchThreadPosts: 'Reading a thread',
+  fetchThreadInfo: 'Looking up a thread',
+  fetchPostInfo: 'Looking up a post',
+  fetchUserInfo: 'Looking up a member',
+  fetchForumUpdates: 'Checking recent activity',
+  getTime: 'Checking the time',
+  assistant_get_weather: 'Checking the weather',
+  analyzeImage: 'Looking at an image',
+  generateImage: 'Creating an image',
+  processAttachments: 'Reading attachments',
+  getYouTubeTranscript: 'Reading a video transcript',
+};
+
+const activityLabel = (key: string | undefined): string | null => {
+  if (!key) return null;
+  return ACTIVITY_LABELS[key] ?? null;
+};
 
 interface SendMessagePayload {
   message: string;
@@ -399,6 +440,7 @@ export class ChatAPI {
       history?: ChatMessageHistoryItem[];
       turnId?: string;
       onChunk?: (partialText: string, annotations: Annotation[]) => void;
+      onActivity?: (activities: StreamActivity[]) => void;
     } = {}
   ): Promise<StreamingResponse> {
     const {
@@ -408,6 +450,7 @@ export class ChatAPI {
       resetConversation,
       history,
       onChunk,
+      onActivity,
     } = options;
 
     // Correlates this turn with the server's log lines for the same request.
@@ -477,7 +520,8 @@ export class ChatAPI {
       onChunk,
       signal,
       turnId,
-      startedAt
+      startedAt,
+      onActivity
     );
   }
 
@@ -487,7 +531,8 @@ export class ChatAPI {
     onChunk?: (partialText: string, annotations: Annotation[]) => void,
     signal?: AbortSignal,
     turnId = 'unknown',
-    startedAt = Date.now()
+    startedAt = Date.now(),
+    onActivity?: (activities: StreamActivity[]) => void
   ): Promise<StreamingResponse> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -506,6 +551,32 @@ export class ChatAPI {
       eventTypes: [...eventTypes],
       elapsedMs: Date.now() - startedAt,
     });
+
+    let activities: StreamActivity[] = [];
+    const notifyActivity = () => onActivity?.(activities);
+
+    /** Adds a step, or re-labels one already in flight. */
+    const upsertActivity = (id: string, label: string, activityState: StreamActivity['state']) => {
+      const existing = activities.find(activity => activity.id === id);
+      if (existing) {
+        if (existing.label === label && existing.state === activityState) return;
+        activities = activities.map(activity => (
+          activity.id === id ? { ...activity, label, state: activityState } : activity
+        ));
+      } else {
+        activities = [...activities, { id, label, state: activityState }];
+      }
+      notifyActivity();
+    };
+
+    const completeActivity = (id: string) => {
+      const existing = activities.find(activity => activity.id === id);
+      if (!existing || existing.state === 'done') return;
+      activities = activities.map(activity => (
+        activity.id === id ? { ...activity, state: 'done' as const } : activity
+      ));
+      notifyActivity();
+    };
 
     const state = () => ({ partialText, annotations, responseId });
     const notifyChunk = () => onChunk?.(partialText, [...annotations]);
@@ -652,7 +723,44 @@ export class ChatAPI {
           terminalReceived = true;
           break;
 
+        // Progress events: a new output item is the assistant starting a step.
+        case 'response.output_item.added': {
+          const item = parsedData.item;
+          const label = activityLabel(item?.name) ?? activityLabel(item?.type);
+          if (label) {
+            const id = item?.id
+              ?? `item_${typeof parsedData.output_index === 'number' ? parsedData.output_index : activities.length}`;
+            upsertActivity(id, label, 'active');
+          }
+          break;
+        }
+
+        case 'response.output_item.done': {
+          const id = parsedData.item?.id
+            ?? `item_${typeof parsedData.output_index === 'number' ? parsedData.output_index : -1}`;
+          completeActivity(id);
+          break;
+        }
+
         default:
+          // The Responses API emits many per-tool progress events
+          // (…_call.in_progress / .searching / .completed). Rather than
+          // enumerate every variant, derive the step from the event name so a
+          // new tool type shows up without a code change.
+          if (typeof eventType === 'string' && eventType.startsWith('response.')) {
+            const callMatch = /^response\.([a-z_]+_call)\.(in_progress|searching|completed)$/.exec(eventType);
+            if (callMatch) {
+              const label = activityLabel(callMatch[1]);
+              const id = parsedData.item_id
+                ?? `call_${typeof parsedData.output_index === 'number' ? parsedData.output_index : callMatch[1]}`;
+              if (label) {
+                if (callMatch[2] === 'completed') completeActivity(id);
+                else upsertActivity(id, callMatch[1] === 'web_search_call' && callMatch[2] === 'searching'
+                  ? 'Searching the web'
+                  : label, 'active');
+              }
+            }
+          }
           break;
       }
     };

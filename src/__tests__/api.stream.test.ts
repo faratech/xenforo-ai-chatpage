@@ -352,3 +352,85 @@ describe('keepalive comments', () => {
     await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({ text: 'ok' });
   });
 });
+
+describe('activity progress events', () => {
+  const streamOf = (payload: string) => streamResponse(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(payload));
+      controller.close();
+    },
+  }));
+
+  /**
+   * These events were already arriving — responses_router yields every
+   * upstream event and chat.php echoes it — and were being dropped by the
+   * client's `default: break;`, which is why the wait showed a bare spinner.
+   */
+  it('reports tool steps as they start and finish', async () => {
+    const updates: string[][] = [];
+    const payload = [
+      sse({ type: 'response.output_item.added', output_index: 0, item: { id: 'fc_1', type: 'function_call', name: 'searchWindowsForum' } }),
+      sse({ type: 'response.output_item.done', output_index: 0, item: { id: 'fc_1', type: 'function_call', name: 'searchWindowsForum' } }),
+      sse({ type: 'response.output_item.added', output_index: 1, item: { id: 'fs_1', type: 'file_search_call' } }),
+      sse({ type: 'response.output_text.delta', delta: 'Answer' }),
+      sse({ type: 'chat.stream.completed' }),
+    ].join('');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(payload)));
+
+    await ChatAPI.sendMessage('hi', {
+      onActivity: activities => updates.push(activities.map(a => `${a.label}:${a.state}`)),
+    });
+
+    expect(updates[0]).toEqual(['Searching WindowsForum:active']);
+    expect(updates[1]).toEqual(['Searching WindowsForum:done']);
+    expect(updates[updates.length - 1]).toEqual([
+      'Searching WindowsForum:done',
+      'Searching WindowsForum:active',
+    ]);
+  });
+
+  it('derives steps from per-tool progress events without enumerating each one', async () => {
+    const updates: string[][] = [];
+    const payload = [
+      sse({ type: 'response.web_search_call.in_progress', item_id: 'ws_1', output_index: 0 }),
+      sse({ type: 'response.web_search_call.searching', item_id: 'ws_1', output_index: 0 }),
+      sse({ type: 'response.web_search_call.completed', item_id: 'ws_1', output_index: 0 }),
+      sse({ type: 'chat.stream.completed' }),
+    ].join('');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(payload)));
+
+    await ChatAPI.sendMessage('hi', {
+      onActivity: activities => updates.push(activities.map(a => `${a.label}:${a.state}`)),
+    });
+
+    expect(updates[0]).toEqual(['Searching the web:active']);
+    expect(updates[updates.length - 1]).toEqual(['Searching the web:done']);
+  });
+
+  it('ignores unknown item types rather than showing raw internals', async () => {
+    const onActivity = vi.fn();
+    const payload = [
+      sse({ type: 'response.output_item.added', output_index: 0, item: { id: 'x_1', type: 'some_internal_thing' } }),
+      sse({ type: 'response.some_internal_thing.in_progress', item_id: 'x_1' }),
+      sse({ type: 'chat.stream.completed' }),
+    ].join('');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(payload)));
+
+    await ChatAPI.sendMessage('hi', { onActivity });
+    expect(onActivity).not.toHaveBeenCalled();
+  });
+
+  it('does not re-notify when a repeated event changes nothing', async () => {
+    const onActivity = vi.fn();
+    const payload = [
+      sse({ type: 'response.file_search_call.in_progress', item_id: 'fs_1' }),
+      sse({ type: 'response.file_search_call.in_progress', item_id: 'fs_1' }),
+      sse({ type: 'response.file_search_call.in_progress', item_id: 'fs_1' }),
+      sse({ type: 'chat.stream.completed' }),
+    ].join('');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(payload)));
+
+    await ChatAPI.sendMessage('hi', { onActivity });
+    expect(onActivity).toHaveBeenCalledTimes(1);
+  });
+});

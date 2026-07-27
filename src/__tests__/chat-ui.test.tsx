@@ -286,6 +286,34 @@ describe('composer and message integrity', () => {
     expect(screen.getByText('502 / 500 bytes')).toBeInTheDocument();
   });
 
+  it('shows what the assistant is doing instead of a bare spinner', async () => {
+    let emitActivity: ((activities: { id: string; label: string; state: 'active' | 'done' }[]) => void) | undefined;
+    apiMocks.sendMessage.mockImplementation((_message: string, options: {
+      onActivity?: (activities: { id: string; label: string; state: 'active' | 'done' }[]) => void;
+    }) => new Promise(() => {
+      // Never settles: hold the turn in its pre-answer phase.
+      emitActivity = options.onActivity;
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Why is my PC slow?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    // Before any progress event arrives, a generic wait is all we can say.
+    expect(await screen.findByText('Thinking…')).toBeInTheDocument();
+
+    await act(async () => {
+      emitActivity?.([
+        { id: 'a', label: 'Searching WindowsForum', state: 'done' },
+        { id: 'b', label: 'Reading a thread', state: 'active' },
+      ]);
+    });
+
+    expect(screen.getByText('Searching WindowsForum')).toBeInTheDocument();
+    expect(screen.getByText('Reading a thread')).toBeInTheDocument();
+    expect(screen.queryByText('Thinking…')).not.toBeInTheDocument();
+  });
+
   it('keeps the composer editable and focused while a response streams', () => {
     const onSend = vi.fn();
     const props = {

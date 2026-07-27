@@ -9,6 +9,7 @@ import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import AddIcon from '@mui/icons-material/Add';
+import CheckIcon from '@mui/icons-material/Check';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
 import MenuIcon from '@mui/icons-material/Menu';
 
@@ -18,6 +19,7 @@ import type {
   ChatWindowProps,
   Conversation,
   Message,
+  StreamActivity,
   StreamingResponse,
   UsageData,
 } from '../types';
@@ -139,6 +141,8 @@ interface ActiveTurn {
   userMessageId: string;
   partialText: string;
   annotations: Annotation[];
+  /** What the assistant is doing before/while it answers, for the wait UI. */
+  activities: StreamActivity[];
   /**
    * For branch operations (edit/regenerate/retry), the pre-turn messages
    * and title, so an abort before any output restores the original branch
@@ -295,6 +299,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       return true;
     }
   });
+  // What the assistant is doing while the user waits; replaces a bare spinner.
+  const [activities, setActivities] = useState<StreamActivity[]>([]);
   const [showCaptcha, setShowCaptcha] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [showExamples, setShowExamples] = useState(true);
@@ -421,6 +427,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     cancelStreamingFrame();
     setActiveRequestId(null);
     setStreamingState(null);
+    setActivities([]);
     return true;
   }, [cancelStreamingFrame]);
 
@@ -750,6 +757,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       userMessageId: userMessage.id,
       partialText: '',
       annotations: [],
+      activities: [],
       rollbackMessages: params.rollbackMessages,
       rollbackTitle: params.rollbackTitle,
     };
@@ -792,6 +800,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         resetConversation: resetConversation || undefined,
         history,
         turnId,
+        onActivity: (next) => {
+          const active = activeTurnRef.current;
+          if (!active || active.requestId !== requestId) return;
+          active.activities = next;
+          setActivities(next);
+        },
         onChunk: (partialText, annotations) => {
           const active = activeTurnRef.current;
           if (!active || active.requestId !== requestId) return;
@@ -1097,7 +1111,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       AudioService.setMuted(next || !ENV.ENABLE_VOICE);
       return next;
     });
-  }, []);
+  }, [userId]);
 
   // Stable identities: InputArea and ConversationSidebar are memoized, and a
   // fresh arrow here would defeat that on every streaming frame.
@@ -1303,8 +1317,43 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           )}
 
           {isLoading && !visibleStreamingMessage && (
-            <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }} aria-label="Waiting for assistant response">
-              <CircularProgress size={24} />
+            <Box
+              role="status"
+              aria-label="Waiting for assistant response"
+              sx={{ px: 3, py: 2.5, display: 'flex', justifyContent: 'center' }}
+            >
+              <Box sx={{ width: '100%', maxWidth: '52rem' }}>
+                {activities.length === 0 ? (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                    <CircularProgress size={16} />
+                    <Typography sx={{ fontSize: 14, color: 'text.secondary' }}>Thinking…</Typography>
+                  </Box>
+                ) : (
+                  activities.map(activity => (
+                    <Box
+                      key={activity.id}
+                      sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 0.4 }}
+                    >
+                      {activity.state === 'done' ? (
+                        <CheckIcon
+                          fontSize="small"
+                          sx={{ fontSize: 16, color: 'success.main', flexShrink: 0 }}
+                        />
+                      ) : (
+                        <CircularProgress size={14} sx={{ flexShrink: 0 }} />
+                      )}
+                      <Typography
+                        sx={{
+                          fontSize: 14,
+                          color: activity.state === 'done' ? 'text.secondary' : 'text.primary',
+                        }}
+                      >
+                        {activity.label}
+                      </Typography>
+                    </Box>
+                  ))
+                )}
+              </Box>
             </Box>
           )}
 

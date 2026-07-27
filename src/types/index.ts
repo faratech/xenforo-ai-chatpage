@@ -75,6 +75,18 @@ export interface ChatStoreV3 {
   pendingServerDeletions: Record<string, number>;
 }
 
+/**
+ * One step the assistant is taking before (or while) it answers — a tool call,
+ * a search, a reasoning pass. Surfaced so the wait shows what is happening
+ * instead of an anonymous spinner.
+ */
+export interface StreamActivity {
+  /** Stable per output item, so repeated status events update rather than append. */
+  id: string;
+  label: string;
+  state: 'active' | 'done';
+}
+
 /** What the transport actually saw, so a lost answer can be diagnosed after the fact. */
 export interface StreamDiagnostics {
   /** Turn id shared with the server log for this request. */
@@ -131,6 +143,10 @@ export interface SSEEvent {
   detail?: string;
   error?: string | { message?: string };
   message?: string;
+  /** Progress events: the output item a tool/reasoning step belongs to. */
+  item?: { id?: string; type?: string; name?: string };
+  item_id?: string;
+  output_index?: number;
   [key: string]: unknown;
 }
 
