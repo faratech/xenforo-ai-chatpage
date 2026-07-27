@@ -16,6 +16,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import type { Annotation, MessageProps } from '../types';
 import { parseHttpUrl, sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
+import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
 
 const citationLabel = (annotation: Annotation): string => {
   switch (annotation.type) {
@@ -244,8 +245,8 @@ export const Message = memo<MessageProps>(({
   );
 
   return (
-    <Box sx={{ px: { xs: 2, sm: 3, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
-      <Box sx={{ maxWidth: '52rem', mx: 'auto' }}>
+    <Box sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
+      <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
         {isUser ? (
           /* ---- User: right-aligned blue bubble + avatar ---- */
           <Stack direction="row" spacing={1.5} sx={{ justifyContent: 'flex-end', alignItems: 'flex-start' }}>

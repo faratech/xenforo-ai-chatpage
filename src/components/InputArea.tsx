@@ -14,6 +14,7 @@ import SendIcon from '@mui/icons-material/Send';
 import StopIcon from '@mui/icons-material/Stop';
 import type { InputAreaProps } from '../types';
 import { ASSISTANT_NAME } from '../config/brand';
+import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
 
 /**
  * InputArea Component — WindowsForum "Ask the AI" composer.
@@ -60,7 +61,7 @@ export const InputArea = memo<InputAreaProps>(({
       className="wf-input-area"
       sx={{
         borderTop: `1px solid ${theme.palette.divider}`,
-        p: { xs: 1.5, sm: 2 },
+        p: { xs: 1, sm: 2 },
         backgroundColor: 'background.paper',
         // The page scrolls rather than an inner pane, so the composer pins to
         // the bottom of the viewport instead of sitting at the end of a long
@@ -70,7 +71,7 @@ export const InputArea = memo<InputAreaProps>(({
         zIndex: 2,
       }}
     >
-      <Box sx={{ maxWidth: '52rem', mx: 'auto' }}>
+      <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
         <Box
           sx={{
             display: 'flex',

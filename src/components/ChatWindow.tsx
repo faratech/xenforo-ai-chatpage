@@ -46,6 +46,7 @@ import {
 } from '../services/storage';
 import { ENV } from '../config/env';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
+import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
 
 const MAX_MESSAGE_BYTES = 500;
 /** Local history items sent with every request as server recovery context. */
@@ -1324,7 +1325,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {/* Sticky: with the page scrolling instead of an inner pane, the
             history button and title would otherwise scroll out of reach. */}
-        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: 2, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0, position: 'sticky', top: 0, zIndex: 3 }}>
+        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: { xs: 1, sm: 2 }, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0, position: 'sticky', top: 0, zIndex: 3 }}>
           <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
           <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -1415,7 +1416,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               aria-label="Waiting for assistant response"
               sx={{ px: 3, py: 2.5, display: 'flex', justifyContent: 'center' }}
             >
-              <Box sx={{ width: '100%', maxWidth: '52rem' }}>
+              <Box sx={{ width: '100%', maxWidth: CHAT_CONTENT_MAX_WIDTH }}>
                 {activities.length === 0 ? (
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
                     <CircularProgress size={16} />
@@ -1473,7 +1474,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
           {showExamples && currentConversation.messages.length === 1 && !isLoading && (
             <Fade in timeout={reduceMotion ? 0 : undefined}>
-              <Box sx={{ maxWidth: '52rem', mx: 'auto', px: { xs: 2, sm: 3, md: 4 }, pb: 3 }}>
+              <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pb: 3 }}>
                 <Typography sx={{ display: 'flex', alignItems: 'center', gap: 0.75, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'text.secondary', mb: 1.5 }}>
                   <LightbulbIcon sx={{ fontSize: 16 }} /> Try asking
                 </Typography>
