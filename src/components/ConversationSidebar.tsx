@@ -59,8 +59,7 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
           <Box sx={{ minWidth: 0 }}>
             <Typography sx={{ fontWeight: 700, fontSize: 14, lineHeight: 1.1 }}>Ask the AI</Typography>
             <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
-              {ASSISTANT_NAME} ·{' '}
-              <Box component="span" sx={{ color: 'primary.main', fontWeight: 700 }}>BETA</Box>
+              {ASSISTANT_NAME}
             </Typography>
           </Box>
         </Box>
