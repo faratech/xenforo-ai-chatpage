@@ -183,6 +183,22 @@ describe('transactional branch operations', () => {
     });
   });
 
+  it('answers /usage locally without spending an AI message', async () => {
+    apiMocks.getUsage.mockResolvedValue({
+      logged_in: true, tier: 'premium', used: 7, limit: 100, remaining: 93,
+    });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByPlaceholderText(/Ask about Windows/);
+    const before = apiMocks.sendMessage.mock.calls.length;
+
+    sendText('/usage');
+
+    expect(await screen.findByText(/Premium Supporter/)).toBeInTheDocument();
+    expect(screen.getByText(/7 of 100/)).toBeInTheDocument();
+    // The whole point: asking how much quota is left must not consume any.
+    expect(apiMocks.sendMessage.mock.calls.length).toBe(before);
+  });
+
   it('recovers from a transient failure that delivered nothing', async () => {
     await bootWithExchange();
     const callsBefore = apiMocks.sendMessage.mock.calls.length;
