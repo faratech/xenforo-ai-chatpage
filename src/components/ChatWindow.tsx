@@ -1342,14 +1342,23 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                       ) : (
                         <CircularProgress size={14} sx={{ flexShrink: 0 }} />
                       )}
-                      <Typography
-                        sx={{
-                          fontSize: 14,
-                          color: activity.state === 'done' ? 'text.secondary' : 'text.primary',
-                        }}
-                      >
-                        {activity.label}
-                      </Typography>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography
+                          sx={{
+                            fontSize: 14,
+                            color: activity.state === 'done' ? 'text.secondary' : 'text.primary',
+                          }}
+                        >
+                          {activity.label}
+                        </Typography>
+                        {activity.detail && (
+                          <Typography
+                            sx={{ fontSize: 13, color: 'text.secondary', fontStyle: 'italic', mt: 0.25 }}
+                          >
+                            {activity.detail}
+                          </Typography>
+                        )}
+                      </Box>
                     </Box>
                   ))
                 )}

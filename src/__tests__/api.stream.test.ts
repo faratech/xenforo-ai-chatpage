@@ -434,3 +434,34 @@ describe('activity progress events', () => {
     expect(onActivity).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('reasoning summaries', () => {
+  /**
+   * gpt-5.6-luna reasons on every turn either way (it is in REASONING_MODELS,
+   * ~245 reasoning tokens/turn on this surface). Asking for `reasoning.summary`
+   * only makes it narrate what it is already doing, so the client is ready for
+   * that text before the backend opts in.
+   */
+  it('streams reasoning summary text into the step it belongs to', async () => {
+    const updates: { label: string; detail?: string }[][] = [];
+    const payload = [
+      sse({ type: 'response.output_item.added', output_index: 0, item: { id: 'rs_1', type: 'reasoning' } }),
+      sse({ type: 'response.reasoning_summary_text.delta', item_id: 'rs_1', delta: 'Checking ' }),
+      sse({ type: 'response.reasoning_summary_text.delta', item_id: 'rs_1', delta: 'driver reports' }),
+      sse({ type: 'response.reasoning_summary_text.done', item_id: 'rs_1' }),
+      sse({ type: 'chat.stream.completed' }),
+    ].join('');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(
+      new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(encoder.encode(payload)); controller.close(); },
+      })
+    )));
+
+    await ChatAPI.sendMessage('hi', {
+      onActivity: activities => updates.push(activities.map(a => ({ label: a.label, detail: a.detail }))),
+    });
+
+    const final = updates[updates.length - 1];
+    expect(final).toEqual([{ label: 'Thinking it through', detail: 'Checking driver reports' }]);
+  });
+});

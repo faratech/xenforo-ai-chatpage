@@ -85,6 +85,12 @@ export interface StreamActivity {
   id: string;
   label: string;
   state: 'active' | 'done';
+  /**
+   * Streamed reasoning summary for this step, when the backend asks for one
+   * (`reasoning.summary`). The model reasons either way — this is only whether
+   * it also narrates it — so this stays empty until that config is sent.
+   */
+  detail?: string;
 }
 
 /** What the transport actually saw, so a lost answer can be diagnosed after the fact. */

@@ -569,6 +569,25 @@ export class ChatAPI {
       notifyActivity();
     };
 
+    /** Appends streamed reasoning-summary text to the step it belongs to. */
+    const appendActivityDetail = (id: string, text: string) => {
+      if (!text) return;
+      const existing = activities.find(activity => activity.id === id);
+      if (existing) {
+        activities = activities.map(activity => (
+          activity.id === id ? { ...activity, detail: (activity.detail ?? '') + text } : activity
+        ));
+      } else {
+        activities = [...activities, {
+          id,
+          label: ACTIVITY_LABELS.reasoning,
+          state: 'active' as const,
+          detail: text,
+        }];
+      }
+      notifyActivity();
+    };
+
     const completeActivity = (id: string) => {
       const existing = activities.find(activity => activity.id === id);
       if (!existing || existing.state === 'done') return;
@@ -734,6 +753,19 @@ export class ChatAPI {
           }
           break;
         }
+
+        // Dormant unless the backend requests `reasoning.summary`; the model
+        // reasons regardless, this is only whether it narrates it.
+        case 'response.reasoning_summary_text.delta':
+          appendActivityDetail(
+            parsedData.item_id ?? 'reasoning',
+            typeof parsedData.delta === 'string' ? parsedData.delta : ''
+          );
+          break;
+
+        case 'response.reasoning_summary_text.done':
+          completeActivity(parsedData.item_id ?? 'reasoning');
+          break;
 
         case 'response.output_item.done': {
           const id = parsedData.item?.id
