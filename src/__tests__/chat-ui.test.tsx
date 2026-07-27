@@ -179,49 +179,58 @@ describe('ChatWindow state ownership', () => {
 });
 
 describe('message scrolling', () => {
-  const setScrollGeometry = (element: HTMLElement) => {
-    Object.defineProperties(element, {
-      clientHeight: { configurable: true, value: 200 },
-      scrollHeight: { configurable: true, value: 1_200 },
-      scrollTop: { configurable: true, writable: true, value: 0 },
+  /**
+   * The transcript deliberately has no scroll container of its own: it grows
+   * down the page and the document's own scrollbar moves it, so there is one
+   * scrollbar rather than a pane nested inside a scrolling page.
+   */
+  const setPageGeometry = ({ scrollHeight = 1_200, innerHeight = 200, scrollY = 0 } = {}) => {
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      configurable: true, value: scrollHeight,
     });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: innerHeight });
+    Object.defineProperty(window, 'scrollY', { configurable: true, writable: true, value: scrollY });
   };
 
-  it('keeps automatic following inside the message pane', async () => {
-    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Contained answer', annotations: [] });
+  it('the transcript is not its own scroll container', async () => {
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
     const messagePane = await screen.findByLabelText('Chat messages');
-    setScrollGeometry(messagePane);
+    // A second scrollbar here is exactly what this guards against.
+    expect(getComputedStyle(messagePane).overflowY).not.toBe('auto');
+    expect(getComputedStyle(messagePane).overflowY).not.toBe('scroll');
+  });
+
+  it('follows a new answer using the page scrollbar', async () => {
+    setPageGeometry();
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Contained answer', annotations: [] });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByLabelText('Chat messages');
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Contained question' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
 
     expect(await screen.findByText('Contained answer')).toBeInTheDocument();
-    await waitFor(() => expect(messagePane.scrollTop).toBe(1_200));
-    expect(elementScrollToMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(windowScrollToMock).toHaveBeenCalledWith(0, 1_200));
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
-    expect(windowScrollToMock).not.toHaveBeenCalled();
   });
 
-  it('smoothly jumps within the message pane when the user requests it', async () => {
+  it('smoothly jumps to the latest message when the user requests it', async () => {
+    setPageGeometry();
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    const messagePane = await screen.findByLabelText('Chat messages');
-    setScrollGeometry(messagePane);
-    fireEvent.scroll(messagePane);
+    await screen.findByLabelText('Chat messages');
+    fireEvent.scroll(window);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
 
-    expect(elementScrollToMock).toHaveBeenCalledWith({ top: 1_200, behavior: 'smooth' });
-    expect(messagePane.scrollTop).toBe(0);
+    expect(windowScrollToMock).toHaveBeenCalledWith({ top: 1_200, behavior: 'smooth' });
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
-    expect(windowScrollToMock).not.toHaveBeenCalled();
   });
 
   it('does not let a smooth jump cancel its own auto-follow', async () => {
+    setPageGeometry();
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    const messagePane = await screen.findByLabelText('Chat messages');
-    setScrollGeometry(messagePane);
-    fireEvent.scroll(messagePane);
+    await screen.findByLabelText('Chat messages');
+    fireEvent.scroll(window);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
     expect(screen.queryByRole('button', { name: 'Jump to latest' })).not.toBeInTheDocument();
@@ -229,25 +238,23 @@ describe('message scrolling', () => {
     // A smooth scroll emits intermediate events from far above the bottom.
     // Reacting to them turned auto-follow back off mid-animation, which made
     // the button reappear and flicker on every use.
-    fireEvent.scroll(messagePane);
-    fireEvent.scroll(messagePane);
+    fireEvent.scroll(window);
+    fireEvent.scroll(window);
 
     expect(screen.queryByRole('button', { name: 'Jump to latest' })).not.toBeInTheDocument();
   });
 
-  it('jumps immediately inside the message pane when reduced motion is requested', async () => {
+  it('jumps immediately when reduced motion is requested', async () => {
     prefersReducedMotion = true;
+    setPageGeometry();
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    const messagePane = await screen.findByLabelText('Chat messages');
-    setScrollGeometry(messagePane);
-    fireEvent.scroll(messagePane);
+    await screen.findByLabelText('Chat messages');
+    fireEvent.scroll(window);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
 
-    expect(messagePane.scrollTop).toBe(1_200);
-    expect(elementScrollToMock).not.toHaveBeenCalled();
+    expect(windowScrollToMock).toHaveBeenCalledWith(0, 1_200);
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
-    expect(windowScrollToMock).not.toHaveBeenCalled();
   });
 });
 

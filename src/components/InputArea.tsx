@@ -62,6 +62,12 @@ export const InputArea = memo<InputAreaProps>(({
         borderTop: `1px solid ${theme.palette.divider}`,
         p: { xs: 1.5, sm: 2 },
         backgroundColor: 'background.paper',
+        // The page scrolls rather than an inner pane, so the composer pins to
+        // the bottom of the viewport instead of sitting at the end of a long
+        // transcript the user would have to scroll to reach.
+        position: 'sticky',
+        bottom: 0,
+        zIndex: 2,
       }}
     >
       <Box sx={{ maxWidth: '52rem', mx: 'auto' }}>

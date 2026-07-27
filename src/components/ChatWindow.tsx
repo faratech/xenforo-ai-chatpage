@@ -1181,23 +1181,35 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const handleStop = useCallback(() => abortActiveTurn(true), [abortActiveTurn]);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
+  /**
+   * The transcript has no scroll container of its own: it grows down the page
+   * and the browser's own scrollbar moves it, so there is exactly one
+   * scrollbar rather than a pane nested inside the page.
+   */
+  const pageScrollBottomGap = (): number => {
+    const doc = document.documentElement;
+    return doc.scrollHeight - (window.scrollY + window.innerHeight);
+  };
+
   const handleScroll = useCallback(() => {
-    const element = messagesContainerRef.current;
-    if (!element) return;
     // A smooth programmatic scroll emits scroll events from far above the
     // bottom. Reading those as "the user scrolled away" turned auto-follow
     // back off mid-animation, which made the jump-to-latest button reappear
     // and flicker on every use.
     if (programmaticScrollRef.current) return;
-    setAutoFollow(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
+    setAutoFollow(pageScrollBottomGap() < 80);
   }, []);
+
+  useEffect(() => {
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [handleScroll]);
 
   const scrollToLatest = useCallback(() => {
     setAutoFollow(true);
-    const element = messagesContainerRef.current;
-    if (!element) return;
+    const target = document.documentElement.scrollHeight;
     if (reduceMotion) {
-      element.scrollTop = element.scrollHeight;
+      window.scrollTo(0, target);
       return;
     }
     skipNextAutoFollowRef.current = true;
@@ -1211,7 +1223,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       programmaticScrollRef.current = false;
       programmaticScrollTimerRef.current = null;
     }, SMOOTH_SCROLL_SETTLE_MS);
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+    window.scrollTo({ top: target, behavior: 'smooth' });
   }, [reduceMotion]);
 
   useEffect(() => {
@@ -1221,8 +1233,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       return;
     }
     const frame = requestAnimationFrame(() => {
-      const element = messagesContainerRef.current;
-      if (element) element.scrollTop = element.scrollHeight;
+      window.scrollTo(0, document.documentElement.scrollHeight);
     });
     return () => cancelAnimationFrame(frame);
   }, [autoFollow, currentConversation.messages, streamingState]);
@@ -1288,7 +1299,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const usageTooltip = `AI messages today · ${usageTierLabel}`;
 
   return (
-    <Box id="wf-chat-window" className="wf-chat-window" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
+    <Box
+      id="wf-chat-window"
+      className="wf-chat-window"
+      sx={{
+        display: 'flex',
+        // Fills the viewport on a short conversation and grows past it on a
+        // long one; the page scrolls rather than an inner pane. `dvh` keeps
+        // mobile browser chrome from cutting off the composer.
+        minHeight: ['100vh', '100dvh'],
+        backgroundColor: containerBg,
+      }}
+    >
       <ConversationSidebar
         open={drawerOpen}
         onClose={closeDrawer}
@@ -1300,7 +1322,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       />
 
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: 2, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0 }}>
+        {/* Sticky: with the page scrolling instead of an inner pane, the
+            history button and title would otherwise scroll out of reach. */}
+        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: 2, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0, position: 'sticky', top: 0, zIndex: 3 }}>
           <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
           <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -1325,9 +1349,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         <Box
           ref={messagesContainerRef}
           className="chat-messages-container"
-          onScroll={handleScroll}
           aria-label="Chat messages"
-          sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
+          // No overflow of its own: the transcript grows down the page and the
+          // browser's scrollbar moves it, so the page has one scrollbar
+          // instead of a pane nested inside a scrolling document.
+          sx={{ flex: 1, overflowX: 'hidden', position: 'relative' }}
         >
           {/* KNOWN LIMITATION: because this container is the live region, its
               children being replaced on a conversation switch reads to
