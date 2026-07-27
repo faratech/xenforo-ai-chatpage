@@ -25,3 +25,6 @@ yarn-error.log*
 
 # Playwright MCP session artifacts (snapshots, console logs)
 .playwright-mcp/
+
+# Playwright screenshots taken during debugging
+*.png
