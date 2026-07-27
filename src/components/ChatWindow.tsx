@@ -306,9 +306,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [showExamples, setShowExamples] = useState(true);
   const [usage, setUsage] = useState<UsageData | null>(null);
-  // Read by /usage without putting `usage` in runTurn's dependency list, which
-  // would churn that callback's identity on every quota refresh.
-  const usageRef = useRef<UsageData | null>(null);
   const [usageRefresh, setUsageRefresh] = useState(0);
   const [autoFollow, setAutoFollow] = useState(true);
   const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -665,46 +662,63 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     return 'Failed to send the message. Please retry.';
   }, []);
 
-  useEffect(() => { usageRef.current = usage; }, [usage]);
-
   /**
-   * Answers `/usage` locally from the quota already fetched for the header
-   * badge. Deliberately spends no AI call — asking how much you have left
-   * should not consume any of it.
+   * Answers `/usage` locally. It fetches the quota fresh rather than reading
+   * the cached value behind the header badge: that value is never populated
+   * for guests (the fetch is skipped for them) and may not have arrived yet
+   * for anyone else, which made the command report "not available" to people
+   * who had a perfectly good quota.
+   *
+   * Still spends no AI message — asking how much you have left should not
+   * consume any of it.
    */
-  const handleUsageCommand = useCallback((conversationId: string) => {
+  const handleUsageCommand = useCallback(async (conversationId: string) => {
     setInput('');
     setErrorMessage('');
     setShowExamples(false);
 
-    const current = usageRef.current;
     const lines: string[] = [];
 
-    if (!current || current.unavailable) {
-      lines.push('Usage information is not available right now.');
-    } else if (!current.logged_in) {
+    if (isGuest) {
       lines.push('You are chatting as a guest, so no per-account quota is tracked.');
       lines.push('');
-      lines.push('[Register](/register) or [log in](/login) for higher limits.');
+      lines.push('[Register](/register) or [log in](/login) for higher limits and saved history.');
     } else {
-      const tier = current.tier === 'premium'
-        ? 'Premium Supporter'
-        : current.tier === 'unlimited' ? 'Staff' : 'Free';
-      lines.push(`**Tier:** ${tier}`);
-      lines.push(current.unlimited
-        ? `**Messages today:** ${current.used ?? 0} (no limit)`
-        : `**Messages today:** ${current.used ?? 0} of ${current.limit ?? 0}`);
-      if (!current.unlimited && typeof current.remaining === 'number') {
-        lines.push(`**Remaining:** ${current.remaining}`);
+      let current: UsageData | null = null;
+      try {
+        current = await ChatAPI.getUsage();
+        setUsage(current);
+      } catch {
+        current = null;
       }
-      if (typeof current.tokens_today === 'number') {
-        lines.push(`**Tokens today:** ${current.tokens_today.toLocaleString()}`);
+
+      if (!current || current.unavailable) {
+        lines.push('Usage information is not available right now — the quota service did not respond.');
+      } else if (!current.logged_in) {
+        lines.push('You are chatting as a guest, so no per-account quota is tracked.');
+      } else {
+        const tier = current.tier === 'premium'
+          ? 'Premium Supporter'
+          : current.tier === 'unlimited' ? 'Staff' : 'Free';
+        lines.push(`**Tier:** ${tier}`);
+        lines.push(current.unlimited
+          ? `**Messages today:** ${current.used ?? 0} (no limit)`
+          : `**Messages today:** ${current.used ?? 0} of ${current.limit ?? 0}`);
+        if (!current.unlimited && typeof current.remaining === 'number') {
+          lines.push(`**Remaining:** ${current.remaining}`);
+        }
+        if (typeof current.tokens_today === 'number') {
+          lines.push(`**Tokens today:** ${current.tokens_today.toLocaleString()}`);
+        }
+        if (current.reset_at) {
+          const reset = new Date(current.reset_at);
+          lines.push(`**Resets:** ${Number.isNaN(reset.getTime()) ? current.reset_at : reset.toLocaleString()}`);
+        }
       }
-      if (current.reset_at) lines.push(`**Resets:** ${current.reset_at}`);
     }
 
     lines.push('');
-    lines.push('_This command is answered locally and does not use an AI message._');
+    lines.push('_Answered locally — this did not use an AI message._');
 
     updateConversationById(conversationId, conversation => ({
       messages: [...conversation.messages, {
@@ -715,8 +729,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         status: 'complete' as const,
       }],
     }));
-    setUsageRefresh(value => value + 1);
-  }, [updateConversationById]);
+  }, [isGuest, updateConversationById]);
 
   /** Transactionally resets the current conversation after the server confirms. */
   const handleClearCommand = useCallback(async (conversationId: string) => {
@@ -782,7 +795,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }
 
     if (params.kind === 'send' && content.toLowerCase() === '/usage') {
-      handleUsageCommand(conversationId);
+      await handleUsageCommand(conversationId);
       return;
     }
 

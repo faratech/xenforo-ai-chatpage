@@ -199,6 +199,34 @@ describe('transactional branch operations', () => {
     expect(apiMocks.sendMessage.mock.calls.length).toBe(before);
   });
 
+  it('fetches the quota for /usage rather than trusting the header cache', async () => {
+    // The header badge's value is never populated for guests and may not have
+    // arrived yet for anyone else, which made /usage report "not available" to
+    // people who had a perfectly good quota.
+    apiMocks.getUsage.mockRejectedValueOnce(new Error('badge fetch failed'));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByPlaceholderText(/Ask about Windows/);
+
+    apiMocks.getUsage.mockResolvedValueOnce({
+      logged_in: true, tier: 'unlimited', used: 7, unlimited: true, tokens_today: 246196,
+    });
+    sendText('/usage');
+
+    expect(await screen.findByText(/Staff/)).toBeInTheDocument();
+    expect(screen.getByText(/no limit/)).toBeInTheDocument();
+    expect(screen.getByText(/246,196/)).toBeInTheDocument();
+  });
+
+  it('tells a guest there is no per-account quota instead of an error', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_abc" />);
+    await screen.findByPlaceholderText(/Ask about Windows/);
+
+    sendText('/usage');
+
+    expect(await screen.findByText(/no per-account quota is tracked/)).toBeInTheDocument();
+    expect(screen.queryByText(/not available right now/)).not.toBeInTheDocument();
+  });
+
   it('recovers from a transient failure that delivered nothing', async () => {
     await bootWithExchange();
     const callsBefore = apiMocks.sendMessage.mock.calls.length;
