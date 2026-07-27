@@ -1353,7 +1353,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           // No overflow of its own: the transcript grows down the page and the
           // browser's scrollbar moves it, so the page has one scrollbar
           // instead of a pane nested inside a scrolling document.
-          sx={{ flex: 1, overflowX: 'hidden', position: 'relative' }}
+          //
+          // `clip` rather than `hidden` on the x-axis: per spec, a non-visible
+          // value on one axis forces the other to compute as `auto`, so
+          // `overflowX: hidden` would quietly turn this back into a scroll
+          // container — and re-create the second scrollbar on a long answer.
+          sx={{ flex: 1, overflowX: 'clip', position: 'relative' }}
         >
           {/* KNOWN LIMITATION: because this container is the live region, its
               children being replaced on a conversation switch reads to
