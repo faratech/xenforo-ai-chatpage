@@ -1226,19 +1226,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const usageTooltip = `AI messages today · ${usageTierLabel}`;
 
   return (
-    <Box
-      id="wf-chat-window"
-      className="wf-chat-window"
-      sx={{
-        display: 'flex',
-        height: '100vh',
-        backgroundColor: containerBg,
-        // Anchor for the history drawer, which is contained rather than
-        // viewport-fixed (see ConversationSidebar).
-        position: 'relative',
-        overflow: 'hidden',
-      }}
-    >
+    <Box id="wf-chat-window" className="wf-chat-window" sx={{ display: 'flex', height: '100vh', backgroundColor: containerBg }}>
       <ConversationSidebar
         open={drawerOpen}
         onClose={closeDrawer}
