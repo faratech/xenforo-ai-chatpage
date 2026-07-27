@@ -684,7 +684,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       lines.push('');
       lines.push('[Register](/register) or [log in](/login) for higher limits and saved history.');
     } else {
-      let current: UsageData | null = null;
+      let current: UsageData | null;
       try {
         current = await ChatAPI.getUsage();
         setUsage(current);
