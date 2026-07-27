@@ -40,8 +40,26 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
       onClose={onClose}
       // Keep the portal inside the scoped chat wrapper so the embedded
       // XenForo page never receives chat DOM or styling.
-      ModalProps={{ container: () => document.getElementById('wf-chat-window') }}
-      sx={{ '& .MuiDrawer-paper': { width: 288, backgroundColor: 'background.paper' } }}
+      //
+      // The drawer is positioned against that wrapper rather than the viewport.
+      // XenForo core sets `isolation: isolate` on .p-body, which makes it a
+      // stacking context, and the sticky .p-header (the logo strip) is its
+      // sibling at z-index 99 — so a viewport-fixed drawer inside .p-body can
+      // never paint above the header no matter how high its own z-index goes.
+      // Containing it also matches the embed: the chat owns its box, not the
+      // whole page.
+      ModalProps={{
+        container: () => document.getElementById('wf-chat-window'),
+        sx: { position: 'absolute' },
+      }}
+      slotProps={{ backdrop: { sx: { position: 'absolute' } } }}
+      sx={{
+        '& .MuiDrawer-paper': {
+          position: 'absolute',
+          width: 288,
+          backgroundColor: 'background.paper',
+        },
+      }}
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
         {/* Brand header */}
