@@ -172,7 +172,7 @@ const App: React.FC = () => {
 
   if (identityError) {
     return (
-      <Box sx={{ minHeight: '100dvh', display: 'grid', placeItems: 'center', p: 3 }}>
+      <Box className="wf-app" sx={{ display: 'grid', placeItems: 'center', p: 3 }}>
         <Alert
           severity="error"
           action={<Button color="inherit" size="small" onClick={retryIdentity}>Retry</Button>}
@@ -185,14 +185,14 @@ const App: React.FC = () => {
 
   if (!identity) {
     return (
-      <Box sx={{ minHeight: '100dvh', display: 'grid', placeItems: 'center' }} aria-label="Loading chat identity">
+      <Box className="wf-app" sx={{ display: 'grid', placeItems: 'center' }} aria-label="Loading chat identity">
         <CircularProgress size={28} />
       </Box>
     );
   }
 
   return (
-    <Box sx={{ position: 'relative', minHeight: '100dvh' }} aria-busy={revalidating}>
+    <Box className="wf-app" sx={{ position: 'relative' }} aria-busy={revalidating}>
       {revalidating && (
         <Box
           aria-label="Rechecking chat identity"
@@ -222,7 +222,7 @@ const App: React.FC = () => {
       )}
       {/* Visually hidden, not collapsed or unmounted: revalidation must not
           shift the XenForo page or kill an in-flight response. */}
-      <Box sx={{ visibility: revalidating ? 'hidden' : 'visible' }} aria-hidden={revalidating || undefined}>
+      <Box className="wf-app-view" sx={{ visibility: revalidating ? 'hidden' : 'visible' }} aria-hidden={revalidating || undefined}>
         <ChatWindow key={identity.userId} {...identity} />
       </Box>
     </Box>

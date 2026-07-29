@@ -71,10 +71,21 @@
    Deliberately not `position: sticky`: below 900px XenForo sets
    `overflow: hidden` on `.p-body-main`/`.p-body-content`, which become the
    sticky scrollport and quietly make any sticky descendant inert. A plain
-   fixed-height block behaves identically at every width. */
+   fixed-height block behaves identically at every width.
+
+   `.wf-app`/`.wf-app-view` are App.tsx's own wrappers, which sit between
+   ScopedCssBaseline and the pane. They are sized alongside it because a
+   percentage height chain breaks at the first ancestor whose own height is
+   `auto` — which is exactly what they were, so the app-shell embed could not
+   reach the pane through them. */
+#react-chat-container .wf-app,
+#react-chat-container .wf-app-view,
 #react-chat-container .wf-chat-window {
   height: 100vh;
   height: 100dvh;
+}
+
+#react-chat-container .wf-chat-window {
   overflow: hidden;
 }
 
@@ -84,6 +95,33 @@
 #react-chat-container .chat-messages-container {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+/* The relocated forum ad, as the last row of the shell. extra.less reserves
+   280px for every .adsense-wrapper on the site; inside a viewport-height app
+   that is a quarter of the conversation, so the band is pinned to a fixed
+   height here instead. Higher specificity than the site rule, deliberately.
+
+   Height is fixed rather than min-height so a taller creative cannot grow the
+   band and squeeze the transcript mid-turn; the wrapper already clips. */
+#react-chat-container .wf-chat-ad,
+#react-chat-container .wf-chat-ad .adsbygoogle {
+  min-height: 0;
+  height: 90px;
+}
+
+@media (max-width: 600px) {
+  #react-chat-container .wf-chat-ad,
+  #react-chat-container .wf-chat-ad .adsbygoogle {
+    height: 60px;
+  }
+}
+
+/* collapse.js sets this on a wrapper whose unit did not fill. The site rule
+   already collapses it; repeated here because the site stylesheet is absent on
+   the standalone route and in tests. */
+#react-chat-container .wf-chat-ad[data-wf-ad-empty="1"] {
+  display: none;
 }
 
 /* ===== Rich message content (rendered via dangerouslySetInnerHTML) ===== */

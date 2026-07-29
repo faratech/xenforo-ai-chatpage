@@ -27,6 +27,7 @@ import type {
   UsageData,
 } from '../types';
 import { Message as MessageComponent } from './Message';
+import { AdSlot } from './AdSlot';
 import { ConversationSidebar } from './ConversationSidebar';
 import { InputArea } from './InputArea';
 import { EXAMPLE_PROMPTS, generateConversationId, generateTurnId } from '../utils/helpers';
@@ -1695,6 +1696,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           onToggleMute={toggleMute}
           textFieldRef={textFieldRef}
         />
+
+        {/* The forum's breadcrumb ad, relocated here from above the chat so it
+            cannot take 280px (390px on a phone) out of a viewport that no
+            longer scrolls. Renders nothing for members or off the embed. */}
+        <AdSlot isGuest={isGuest} />
       </Box>
 
       {/* A fixed overlay cannot move document flow. Inline in the transcript

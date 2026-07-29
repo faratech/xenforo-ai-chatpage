@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import { createRef } from 'react';
+import { StrictMode, createRef } from 'react';
 
 const apiMocks = vi.hoisted(() => ({
   sendMessage: vi.fn(),
@@ -305,6 +305,66 @@ describe('message scrolling', () => {
     expect(elementScrollToMock).not.toHaveBeenCalled();
     expect(windowScrollToMock).not.toHaveBeenCalled();
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('the relocated forum ad', () => {
+  /**
+   * /pages/ai is a full-viewport shell that does not scroll, so the forum's
+   * 280px breadcrumb unit (390px on a phone) is no longer emitted above the
+   * chat — `_ads.html` skips it for `page-313` — and is rendered as the last
+   * row of the shell instead. Both gates here mirror the host rather than
+   * restating its policy, so this is what pins that.
+   */
+  const withAdSenseLoader = () => {
+    const script = document.createElement('script');
+    script.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=x';
+    document.head.appendChild(script);
+    return () => script.remove();
+  };
+
+  afterEach(() => {
+    document.querySelectorAll('script[src*="adsbygoogle.js"]').forEach(s => s.remove());
+    delete window.adsbygoogle;
+  });
+
+  it('renders for a guest on the embed and enqueues the slot exactly once', async () => {
+    const cleanup = withAdSenseLoader();
+    const pushed: Record<string, unknown>[] = [];
+    window.adsbygoogle = { push: (config: Record<string, unknown>) => { pushed.push(config); } } as never;
+
+    // StrictMode double-mounts in development, and AdSense throws on a second
+    // push into the same <ins>.
+    renderThemed(
+      <StrictMode>
+        <ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_abc" />
+      </StrictMode>,
+    );
+
+    const slot = await screen.findByLabelText('Advertisement');
+    expect(slot).toBeInTheDocument();
+    expect(slot.querySelector('ins.adsbygoogle')?.getAttribute('data-ad-slot')).toBe('6778196821');
+    // `auto` would let the unit resize itself, which is the one thing this
+    // position must never do.
+    expect(slot.querySelector('ins.adsbygoogle')?.getAttribute('data-ad-format')).toBe('horizontal');
+    expect(pushed).toHaveLength(1);
+    cleanup();
+  });
+
+  it('never renders for a member, who has never seen this unit', async () => {
+    const cleanup = withAdSenseLoader();
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    await screen.findByLabelText('Chat messages');
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    cleanup();
+  });
+
+  it('renders nothing off the embed, where no forum ad loader exists', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_abc" />);
+
+    await screen.findByLabelText('Chat messages');
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
   });
 });
 

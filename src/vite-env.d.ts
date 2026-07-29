@@ -25,6 +25,12 @@ declare global {
       reset: (widgetId: string) => void;
       remove: (widgetId: string) => void;
     };
+    /**
+     * AdSense's command queue. Typed as the array it starts life as — pushing
+     * before adsbygoogle.js loads is the documented way to enqueue a slot, and
+     * the object the script swaps in keeps the same push signature.
+     */
+    adsbygoogle?: Record<string, unknown>[];
   }
 }
 export {};
