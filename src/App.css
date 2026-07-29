@@ -73,19 +73,37 @@
    sticky scrollport and quietly make any sticky descendant inert. A plain
    fixed-height block behaves identically at every width.
 
-   `.wf-app`/`.wf-app-view` are App.tsx's own wrappers, which sit between
-   ScopedCssBaseline and the pane. They are sized alongside it because a
-   percentage height chain breaks at the first ancestor whose own height is
-   `auto` — which is exactly what they were, so the app-shell embed could not
-   reach the pane through them. */
+   Only the outermost wrapper takes a viewport height; everything below it
+   flexes. A percentage chain is not usable here — measured on the live embed,
+   `.p-body-content` is 843px because a flex parent *stretched* it, and
+   browsers do not treat a stretch-derived height as definite, so a
+   `height: 100%` child silently falls back to its content height. Flex sizing
+   has no such requirement, so the chain below is `flex: 1 1 auto` all the way
+   down and works identically in both hosts.
+
+   `.wf-app-center` is the transient loading/error state, which centres its
+   content instead of being the chat's flex column. */
 #react-chat-container .wf-app,
-#react-chat-container .wf-app-view,
-#react-chat-container .wf-chat-window {
+#react-chat-container .wf-app-center {
   height: 100vh;
   height: 100dvh;
 }
 
+#react-chat-container .wf-app {
+  display: flex;
+  flex-direction: column;
+}
+
+#react-chat-container .wf-app-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 #react-chat-container .wf-chat-window {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
 }
 

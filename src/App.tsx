@@ -172,7 +172,7 @@ const App: React.FC = () => {
 
   if (identityError) {
     return (
-      <Box className="wf-app" sx={{ display: 'grid', placeItems: 'center', p: 3 }}>
+      <Box className="wf-app-center" sx={{ display: 'grid', placeItems: 'center', p: 3 }}>
         <Alert
           severity="error"
           action={<Button color="inherit" size="small" onClick={retryIdentity}>Retry</Button>}
@@ -185,7 +185,7 @@ const App: React.FC = () => {
 
   if (!identity) {
     return (
-      <Box className="wf-app" sx={{ display: 'grid', placeItems: 'center' }} aria-label="Loading chat identity">
+      <Box className="wf-app-center" sx={{ display: 'grid', placeItems: 'center' }} aria-label="Loading chat identity">
         <CircularProgress size={28} />
       </Box>
     );
