@@ -1,8 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Avatar from '@mui/material/Avatar';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import CircularProgress from '@mui/material/CircularProgress';
+import Dialog from '@mui/material/Dialog';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
 import Fade from '@mui/material/Fade';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
@@ -57,8 +60,10 @@ const PENDING_DELETION_RETRY_MS = 60_000;
 /** One retry for transient failures that consumed no output. */
 const RETRY_BACKOFF_MS = 400;
 const RETRY_JITTER_MS = 400;
-/** How long a smooth scroll is treated as in progress (no portable `scrollend`). */
+/** Fallback for the `scrollend` event, and the floor for how long a guard lasts. */
 const SMOOTH_SCROLL_SETTLE_MS = 700;
+/** How close to the end of the transcript still counts as "following the tail". */
+const TAIL_FOLLOW_SLACK_PX = 80;
 
 /**
  * Read-aloud preference, scoped per account like every other stored key. It
@@ -311,9 +316,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const transcriptContentRef = useRef<HTMLDivElement>(null);
+  const turnAnchorRef = useRef<HTMLDivElement>(null);
+  const tailSpacerRef = useRef<HTMLDivElement>(null);
+  /** The user message the transcript is already anchored to; one anchor per turn. */
+  const lastAnchoredMessageIdRef = useRef<string | null>(null);
+  const anchoredConversationRef = useRef<string | null>(null);
+  const turnWasLoadingRef = useRef(false);
   const skipNextAutoFollowRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
+  const spacerFrameRef = useRef<number | null>(null);
   const textFieldRef = useRef<HTMLDivElement>(null);
   const conversationsRef = useRef(conversations);
   const currentConversationIdRef = useRef(currentConversationId);
@@ -1195,51 +1208,210 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const handleStop = useCallback(() => abortActiveTurn(true), [abortActiveTurn]);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
-  /**
-   * The transcript has no scroll container of its own: it grows down the page
-   * and the browser's own scrollbar moves it, so there is exactly one
-   * scrollbar rather than a pane nested inside the page.
-   */
-  const pageScrollBottomGap = (): number => {
-    const doc = document.documentElement;
-    return doc.scrollHeight - (window.scrollY + window.innerHeight);
-  };
+  const lastUserMessageId = useMemo(() => {
+    for (let index = currentConversation.messages.length - 1; index >= 0; index -= 1) {
+      if (currentConversation.messages[index].role === 'user') return currentConversation.messages[index].id;
+    }
+    return undefined;
+  }, [currentConversation.messages]);
+
+  // ===== Scrolling =====
+  // All of it belongs to the transcript, and nothing below ever moves the
+  // window. On the XenForo page node the document is roughly 770px taller than
+  // the chat — a 280px AdSense reservation and the page title above it, share
+  // buttons, a breadcrumb and the forum footer below — so the old
+  // `window.scrollTo(0, document.documentElement.scrollHeight)` did not scroll
+  // to the end of the conversation at all. It scrolled into the footer, once
+  // per streamed frame, carrying the reader away from the answer being written.
+
+  /** Following the tail is purely a question of how near the end we are. */
+  const syncAutoFollow = useCallback((element: HTMLElement) => {
+    setAutoFollow(element.scrollHeight - element.scrollTop - element.clientHeight < TAIL_FOLLOW_SLACK_PX);
+  }, []);
 
   const handleScroll = useCallback(() => {
+    const element = messagesContainerRef.current;
+    if (!element) return;
     // A smooth programmatic scroll emits scroll events from far above the
     // bottom. Reading those as "the user scrolled away" turned auto-follow
     // back off mid-animation, which made the jump-to-latest button reappear
     // and flicker on every use.
     if (programmaticScrollRef.current) return;
-    setAutoFollow(pageScrollBottomGap() < 80);
-  }, []);
+    syncAutoFollow(element);
+  }, [syncAutoFollow]);
 
-  useEffect(() => {
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, [handleScroll]);
-
-  const scrollToLatest = useCallback(() => {
-    setAutoFollow(true);
-    const target = document.documentElement.scrollHeight;
-    if (reduceMotion) {
-      window.scrollTo(0, target);
-      return;
-    }
-    skipNextAutoFollowRef.current = true;
+  /** Ends the programmatic-scroll guard, preferring `scrollend` to the timer. */
+  const armProgrammaticScrollGuard = useCallback((element: HTMLElement) => {
     programmaticScrollRef.current = true;
     if (programmaticScrollTimerRef.current !== null) {
       window.clearTimeout(programmaticScrollTimerRef.current);
-    }
-    // `scrollend` is not available everywhere; fall back to a timer that
-    // comfortably outlasts a smooth scroll.
-    programmaticScrollTimerRef.current = window.setTimeout(() => {
-      programmaticScrollRef.current = false;
       programmaticScrollTimerRef.current = null;
-    }, SMOOTH_SCROLL_SETTLE_MS);
-    window.scrollTo({ top: target, behavior: 'smooth' });
-  }, [reduceMotion]);
+    }
+    const release = () => {
+      programmaticScrollRef.current = false;
+      if (programmaticScrollTimerRef.current !== null) {
+        window.clearTimeout(programmaticScrollTimerRef.current);
+        programmaticScrollTimerRef.current = null;
+      }
+      element.removeEventListener('scrollend', release);
+    };
+    if ('onscrollend' in window) {
+      element.addEventListener('scrollend', release, { once: true });
+    }
+    // Kept as the fallback even when `scrollend` is available: a smooth scroll
+    // that lands on the position it started from never fires the event at all.
+    programmaticScrollTimerRef.current = window.setTimeout(release, SMOOTH_SCROLL_SETTLE_MS);
+  }, []);
 
+  const scrollToLatest = useCallback(() => {
+    setAutoFollow(true);
+    const element = messagesContainerRef.current;
+    if (!element) return;
+    if (reduceMotion) {
+      element.scrollTop = element.scrollHeight;
+      return;
+    }
+    skipNextAutoFollowRef.current = true;
+    armProgrammaticScrollGuard(element);
+    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+  }, [armProgrammaticScrollGuard, reduceMotion]);
+
+  /**
+   * Reserves enough room after the newest question that it can actually reach
+   * the top of the pane. Without it a short exchange has nothing to scroll
+   * into and the anchor below silently clamps to the bottom.
+   *
+   * It shrinks to nothing on its own once the answer outgrows a screenful, so
+   * a long response leaves no trailing gap. Written straight to `style` rather
+   * than through state: this is measured against a DOM the stream is mutating
+   * ~60 times a second, and a re-render per frame is exactly what commit
+   * 25a2280 removed.
+   */
+  const measureTailSpacer = useCallback(() => {
+    const pane = messagesContainerRef.current;
+    const spacer = tailSpacerRef.current;
+    if (!pane || !spacer) return;
+    const anchor = turnAnchorRef.current;
+    if (!anchor) {
+      spacer.style.height = '0px';
+      return;
+    }
+    const current = spacer.offsetHeight;
+    const contentHeight = pane.scrollHeight - current;
+    const anchorTop = pane.scrollTop + (anchor.getBoundingClientRect().top - pane.getBoundingClientRect().top);
+    const belowAnchor = contentHeight - anchorTop;
+    const next = Math.max(0, Math.round(pane.clientHeight - belowAnchor));
+    if (next !== current) spacer.style.height = `${next}px`;
+  }, []);
+
+  const scheduleTailSpacerMeasure = useCallback(() => {
+    if (spacerFrameRef.current !== null) return;
+    spacerFrameRef.current = requestAnimationFrame(() => {
+      spacerFrameRef.current = null;
+      measureTailSpacer();
+    });
+  }, [measureTailSpacer]);
+
+  // Driven by ResizeObserver rather than by an effect keyed on streamingState:
+  // that state is a fresh object every animation frame, so an effect would run
+  // ~60 times a second and force a layout read each time.
+  useEffect(() => {
+    const pane = messagesContainerRef.current;
+    const content = transcriptContentRef.current;
+    if (!pane || !content || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(scheduleTailSpacerMeasure);
+    observer.observe(pane);
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+      if (spacerFrameRef.current !== null) {
+        cancelAnimationFrame(spacerFrameRef.current);
+        spacerFrameRef.current = null;
+      }
+    };
+  }, [scheduleTailSpacerMeasure]);
+
+  /**
+   * One scroll per turn: the question the user just asked moves to the top of
+   * the pane and the answer is written into the stationary space below it.
+   * Chasing the end of the text instead — which is what this replaces — slides
+   * every line upward under the reader while they are trying to read it.
+   *
+   * Opening the app or switching conversations is handled here too, and first,
+   * so that loading a finished exchange lands at its end rather than anchoring
+   * a question that was answered days ago.
+   */
+  useLayoutEffect(() => {
+    const pane = messagesContainerRef.current;
+    if (!pane) return;
+
+    if (anchoredConversationRef.current !== currentConversationId) {
+      anchoredConversationRef.current = currentConversationId;
+      lastAnchoredMessageIdRef.current = lastUserMessageId ?? null;
+      if (tailSpacerRef.current) tailSpacerRef.current.style.height = '0px';
+      pane.scrollTop = pane.scrollHeight;
+      setAutoFollow(true);
+      return;
+    }
+
+    if (!lastUserMessageId || showCaptcha) return;
+    if (lastAnchoredMessageIdRef.current === lastUserMessageId) return;
+    lastAnchoredMessageIdRef.current = lastUserMessageId;
+    const anchor = turnAnchorRef.current;
+    if (!anchor) return;
+    // The spacer has to be in place before the scroll, or there is nothing to
+    // scroll into and the browser clamps the target back to the bottom.
+    measureTailSpacer();
+    const top = pane.scrollTop + (anchor.getBoundingClientRect().top - pane.getBoundingClientRect().top);
+    // Tail-follow has to stand down for the anchor to survive: it re-runs on
+    // every streamed frame, so leaving it on pinned the pane to the end of the
+    // text and the question never reached the top at all. It cannot be decided
+    // from geometry here either — mid-turn, "the answer fits on screen" and
+    // "the answer has not arrived yet" measure identically. "Jump to latest"
+    // is how the reader opts back into following.
+    setAutoFollow(false);
+    if (reduceMotion) {
+      pane.scrollTop = top;
+      return;
+    }
+    armProgrammaticScrollGuard(pane);
+    pane.scrollTo({ top, behavior: 'smooth' });
+  }, [
+    armProgrammaticScrollGuard,
+    currentConversationId,
+    lastUserMessageId,
+    measureTailSpacer,
+    reduceMotion,
+    showCaptcha,
+  ]);
+
+  /**
+   * Once a turn ends the ambiguity is gone, so the offer to follow can be
+   * settled honestly: an answer that fit on screen leaves nothing below the
+   * fold and should not keep showing "Jump to latest".
+   */
+  useEffect(() => {
+    if (isLoading) {
+      turnWasLoadingRef.current = true;
+      return;
+    }
+    if (!turnWasLoadingRef.current) return;
+    turnWasLoadingRef.current = false;
+    const frame = requestAnimationFrame(() => {
+      const pane = messagesContainerRef.current;
+      if (!pane) return;
+      measureTailSpacer();
+      syncAutoFollow(pane);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isLoading, measureTailSpacer, syncAutoFollow]);
+
+  /**
+   * Tail-follow, opt-in. After a turn is anchored the reader sits at the top
+   * of their own question rather than at the bottom, so this does not fire
+   * until they scroll down or press "Jump to latest" — at which point an
+   * answer still being written keeps up.
+   */
   useEffect(() => {
     if (!autoFollow) return;
     if (skipNextAutoFollowRef.current) {
@@ -1247,7 +1419,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       return;
     }
     const frame = requestAnimationFrame(() => {
-      window.scrollTo(0, document.documentElement.scrollHeight);
+      const element = messagesContainerRef.current;
+      if (element) element.scrollTop = element.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
   }, [autoFollow, currentConversation.messages, streamingState]);
@@ -1293,12 +1466,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     () => Object.values(conversations).sort((a, b) => b.updatedAt - a.updatedAt),
     [conversations]
   );
-  const lastUserMessageId = useMemo(() => {
-    for (let index = currentConversation.messages.length - 1; index >= 0; index -= 1) {
-      if (currentConversation.messages[index].role === 'user') return currentConversation.messages[index].id;
-    }
-    return undefined;
-  }, [currentConversation.messages]);
   const visibleStreamingMessage = streamingState?.conversationId === currentConversationId
     ? streamingState.message
     : null;
@@ -1316,14 +1483,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     <Box
       id="wf-chat-window"
       className="wf-chat-window"
-      sx={{
-        display: 'flex',
-        // Fills the viewport on a short conversation and grows past it on a
-        // long one; the page scrolls rather than an inner pane. `dvh` keeps
-        // mobile browser chrome from cutting off the composer.
-        minHeight: ['100vh', '100dvh'],
-        backgroundColor: containerBg,
-      }}
+      // Height and overflow live in App.css: MUI reads an sx array as
+      // breakpoints rather than as a fallback pair, so `100vh`/`100dvh` cannot
+      // be expressed here. See the `.wf-chat-window` block there.
+      sx={{ display: 'flex', backgroundColor: containerBg }}
     >
       <ConversationSidebar
         open={drawerOpen}
@@ -1336,9 +1499,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       />
 
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        {/* Sticky: with the page scrolling instead of an inner pane, the
-            history button and title would otherwise scroll out of reach. */}
-        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: { xs: 1, sm: 2 }, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0, position: 'sticky', top: 0, zIndex: 3 }}>
+        {/* Just the first row of a fixed-height column — no stickiness needed.
+            It was sticky only while the document was the scroller. */}
+        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: { xs: 1, sm: 2 }, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0 }}>
           <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
           <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -1364,151 +1527,149 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           ref={messagesContainerRef}
           className="chat-messages-container"
           aria-label="Chat messages"
-          // No overflow of its own: the transcript grows down the page and the
-          // browser's scrollbar moves it, so the page has one scrollbar
-          // instead of a pane nested inside a scrolling document.
-          //
-          // `clip` rather than `hidden` on the x-axis: per spec, a non-visible
-          // value on one axis forces the other to compute as `auto`, so
-          // `overflowX: hidden` would quietly turn this back into a scroll
-          // container — and re-create the second scrollbar on a long answer.
-          sx={{ flex: 1, overflowX: 'clip', position: 'relative' }}
+          onScroll={handleScroll}
+          // The app's only scroll container. `overscroll-behavior: contain`
+          // and `scrollbar-gutter` are in App.css alongside the pane sizing.
+          sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
         >
-          {/* KNOWN LIMITATION: because this container is the live region, its
-              children being replaced on a conversation switch reads to
-              assistive tech as "all of these were just added", so the whole
-              transcript is announced. Fixing it properly needs a dedicated
-              announcer, which duplicates every answer's text in the DOM, or
-              suppression around the swap — neither is safe to ship without
-              testing against a real screen reader. `aria-relevant="additions"`
-              was dropped: it is already the default for role="log". */}
-          <Box role="log" aria-live="polite">
-            {currentConversation.messages.map((message, index) => {
-              const isLast = index === currentConversation.messages.length - 1
-                && Boolean(lastUserMessageId);
-              const isLastUser = message.id === lastUserMessageId;
-              return (
+          <Box ref={transcriptContentRef}>
+            {/* KNOWN LIMITATION: because this container is the live region, its
+                children being replaced on a conversation switch reads to
+                assistive tech as "all of these were just added", so the whole
+                transcript is announced. Fixing it properly needs a dedicated
+                announcer, which duplicates every answer's text in the DOM, or
+                suppression around the swap — neither is safe to ship without
+                testing against a real screen reader. `aria-relevant="additions"`
+                was dropped: it is already the default for role="log". */}
+            <Box role="log" aria-live="polite">
+              {currentConversation.messages.map((message, index) => {
+                const isLast = index === currentConversation.messages.length - 1
+                  && Boolean(lastUserMessageId);
+                const isLastUser = message.id === lastUserMessageId;
+                return (
+                  <React.Fragment key={message.id}>
+                    {/* Where a new turn is scrolled to. Zero-height, so it costs
+                        the transcript nothing when no turn is in flight. */}
+                    {isLastUser && <Box ref={turnAnchorRef} aria-hidden data-wf-turn-anchor sx={{ height: 0 }} />}
+                    <MessageComponent
+                      msg={message}
+                      userAvatar={userAvatar}
+                      userName={userName}
+                      onEdit={handleEditMessage}
+                      onRegenerate={handleRegenerateMessage}
+                      onRetry={handleRetryMessage}
+                      isLastMessage={isLast}
+                      isLastUserMessage={isLastUser}
+                      isStreaming={false}
+                      // Only the rows that actually render busy-gated actions see
+                      // this flip, so the rest keep their memo across a turn.
+                      isBusy={isLoading && (isLast || isLastUser)}
+                    />
+                  </React.Fragment>
+                );
+              })}
+            </Box>
+
+            {visibleStreamingMessage && (
+              <Box aria-live="off">
                 <MessageComponent
-                  key={message.id}
-                  msg={message}
+                  msg={visibleStreamingMessage}
                   userAvatar={userAvatar}
                   userName={userName}
-                  onEdit={handleEditMessage}
-                  onRegenerate={handleRegenerateMessage}
-                  onRetry={handleRetryMessage}
-                  isLastMessage={isLast}
-                  isLastUserMessage={isLastUser}
-                  isStreaming={false}
-                  // Only the rows that actually render busy-gated actions see
-                  // this flip, so the rest keep their memo across a turn.
-                  isBusy={isLoading && (isLast || isLastUser)}
+                  onEdit={noopEdit}
+                  onRegenerate={noopRegenerate}
+                  onRetry={noopRetry}
+                  isLastMessage
+                  isStreaming
+                  isBusy
                 />
-              );
-            })}
-          </Box>
-
-          {visibleStreamingMessage && (
-            <Box aria-live="off">
-              <MessageComponent
-                msg={visibleStreamingMessage}
-                userAvatar={userAvatar}
-                userName={userName}
-                onEdit={noopEdit}
-                onRegenerate={noopRegenerate}
-                onRetry={noopRetry}
-                isLastMessage
-                isStreaming
-                isBusy
-              />
-            </Box>
-          )}
-
-          {isLoading && !visibleStreamingMessage && (
-            <Box
-              role="status"
-              aria-label="Waiting for assistant response"
-              sx={{ px: 3, py: 2.5, display: 'flex', justifyContent: 'center' }}
-            >
-              <Box sx={{ width: '100%', maxWidth: CHAT_CONTENT_MAX_WIDTH }}>
-                {activities.length === 0 ? (
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
-                    <CircularProgress size={16} />
-                    <Typography sx={{ fontSize: 14, color: 'text.secondary' }}>Thinking…</Typography>
-                  </Box>
-                ) : (
-                  activities.map(activity => (
-                    <Box
-                      key={activity.id}
-                      sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 0.4 }}
-                    >
-                      {activity.state === 'done' ? (
-                        <CheckIcon
-                          fontSize="small"
-                          sx={{ fontSize: 16, color: 'success.main', flexShrink: 0 }}
-                        />
-                      ) : (
-                        <CircularProgress size={14} sx={{ flexShrink: 0 }} />
-                      )}
-                      <Box sx={{ minWidth: 0 }}>
-                        <Typography
-                          sx={{
-                            fontSize: 14,
-                            color: activity.state === 'done' ? 'text.secondary' : 'text.primary',
-                          }}
-                        >
-                          {activity.label}
-                        </Typography>
-                        {activity.detail && (
-                          <Typography
-                            sx={{ fontSize: 13, color: 'text.secondary', fontStyle: 'italic', mt: 0.25 }}
-                          >
-                            {activity.detail}
-                          </Typography>
-                        )}
-                      </Box>
-                    </Box>
-                  ))
-                )}
               </Box>
-            </Box>
-          )}
+            )}
 
-          {errorMessage && (
-            <Box role="status" sx={{ px: 3, py: 1.5, textAlign: 'center' }}>
-              <Typography color="error">{errorMessage}</Typography>
-            </Box>
-          )}
-
-          {showCaptcha && (
-            <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }}>
-              <div id="turnstile-container" aria-label="Security check" />
-            </Box>
-          )}
-
-          {showExamples && currentConversation.messages.length === 1 && !isLoading && (
-            <Fade in timeout={reduceMotion ? 0 : undefined}>
-              <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pb: 3 }}>
-                <Typography sx={{ display: 'flex', alignItems: 'center', gap: 0.75, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'text.secondary', mb: 1.5 }}>
-                  <LightbulbIcon sx={{ fontSize: 16 }} /> Try asking
-                </Typography>
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.5 }}>
-                  {EXAMPLE_PROMPTS.map(prompt => (
-                    <Box
-                      key={prompt}
-                      component="button"
-                      onClick={() => { void handleSendMessage(prompt); }}
-                      sx={{ textAlign: 'left', cursor: 'pointer', font: 'inherit', display: 'flex', alignItems: 'center', gap: 1.25, p: 1.5, border: t => `1px solid ${t.palette.divider}`, borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary', transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s', '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' } }}
-                    >
-                      <Box sx={{ width: 32, height: 32, borderRadius: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'rgba(15,108,189,0.1)', color: 'primary.main' }}>
-                        <LightbulbIcon sx={{ fontSize: 16 }} />
-                      </Box>
-                      <Typography sx={{ fontSize: 14, fontWeight: 500 }}>{prompt}</Typography>
+            {isLoading && !visibleStreamingMessage && (
+              <Box
+                role="status"
+                aria-label="Waiting for assistant response"
+                sx={{ px: 3, py: 2.5, display: 'flex', justifyContent: 'center' }}
+              >
+                <Box sx={{ width: '100%', maxWidth: CHAT_CONTENT_MAX_WIDTH }}>
+                  {activities.length === 0 ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                      <CircularProgress size={16} />
+                      <Typography sx={{ fontSize: 14, color: 'text.secondary' }}>Thinking…</Typography>
                     </Box>
-                  ))}
+                  ) : (
+                    activities.map(activity => (
+                      <Box
+                        key={activity.id}
+                        sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 0.4 }}
+                      >
+                        {activity.state === 'done' ? (
+                          <CheckIcon
+                            fontSize="small"
+                            sx={{ fontSize: 16, color: 'success.main', flexShrink: 0 }}
+                          />
+                        ) : (
+                          <CircularProgress size={14} sx={{ flexShrink: 0 }} />
+                        )}
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography
+                            sx={{
+                              fontSize: 14,
+                              color: activity.state === 'done' ? 'text.secondary' : 'text.primary',
+                            }}
+                          >
+                            {activity.label}
+                          </Typography>
+                          {activity.detail && (
+                            <Typography
+                              sx={{ fontSize: 13, color: 'text.secondary', fontStyle: 'italic', mt: 0.25 }}
+                            >
+                              {activity.detail}
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                    ))
+                  )}
                 </Box>
               </Box>
-            </Fade>
-          )}
+            )}
+
+            {errorMessage && (
+              <Box role="status" sx={{ px: 3, py: 1.5, textAlign: 'center' }}>
+                <Typography color="error">{errorMessage}</Typography>
+              </Box>
+            )}
+
+            {showExamples && currentConversation.messages.length === 1 && !isLoading && (
+              <Fade in timeout={reduceMotion ? 0 : undefined}>
+                <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pb: 3 }}>
+                  <Typography sx={{ display: 'flex', alignItems: 'center', gap: 0.75, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'text.secondary', mb: 1.5 }}>
+                    <LightbulbIcon sx={{ fontSize: 16 }} /> Try asking
+                  </Typography>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.5 }}>
+                    {EXAMPLE_PROMPTS.map(prompt => (
+                      <Box
+                        key={prompt}
+                        component="button"
+                        onClick={() => { void handleSendMessage(prompt); }}
+                        sx={{ textAlign: 'left', cursor: 'pointer', font: 'inherit', display: 'flex', alignItems: 'center', gap: 1.25, p: 1.5, border: t => `1px solid ${t.palette.divider}`, borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary', transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s', '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' } }}
+                      >
+                        <Box sx={{ width: 32, height: 32, borderRadius: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'rgba(15,108,189,0.1)', color: 'primary.main' }}>
+                          <LightbulbIcon sx={{ fontSize: 16 }} />
+                        </Box>
+                        <Typography sx={{ fontSize: 14, fontWeight: 500 }}>{prompt}</Typography>
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
+              </Fade>
+            )}
+          </Box>
+
+          {/* Height is set imperatively by measureTailSpacer. */}
+          <Box ref={tailSpacerRef} aria-hidden data-wf-tail-spacer sx={{ flexShrink: 0 }} />
 
           {!autoFollow && (
             <Button className="jump-to-latest" size="small" variant="contained" onClick={scrollToLatest}>
@@ -1535,6 +1696,27 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           textFieldRef={textFieldRef}
         />
       </Box>
+
+      {/* A fixed overlay cannot move document flow. Inline in the transcript
+          this widget shifted the layout four times per challenge — the user's
+          message was pulled out of the transcript, the composer refilled, an
+          error line appeared, and then the iframe arrived asynchronously and
+          grew ~65px — and every one of those shifts moved the reader.
+          `keepMounted` so #turnstile-container exists for api.render(). */}
+      <Dialog
+        open={showCaptcha}
+        onClose={() => cancelPendingCaptcha(true)}
+        keepMounted
+        aria-labelledby="wf-captcha-title"
+        // Portalled inside the scoped wrapper, like the history drawer, so no
+        // chat DOM or styling reaches the surrounding XenForo page.
+        container={() => document.getElementById('wf-chat-window')}
+      >
+        <DialogTitle id="wf-captcha-title" sx={{ fontSize: 16 }}>Quick security check</DialogTitle>
+        <DialogContent sx={{ display: 'flex', justifyContent: 'center', pb: 3 }}>
+          <div id="turnstile-container" aria-label="Security check" />
+        </DialogContent>
+      </Dialog>
     </Box>
   );
 };

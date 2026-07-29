@@ -42,7 +42,7 @@ for (const style of styles) {
       'utf8',
     );
     const requiredMarkup = [
-      '<div id="root" class="google-anno-skip" style="min-height:100vh"></div>',
+      '<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>',
       'href="https://windowsforum.com/chatpage/static/css/main.css?v=2"',
       'type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"',
     ];

@@ -180,57 +180,106 @@ describe('ChatWindow state ownership', () => {
 
 describe('message scrolling', () => {
   /**
-   * The transcript deliberately has no scroll container of its own: it grows
-   * down the page and the document's own scrollbar moves it, so there is one
-   * scrollbar rather than a pane nested inside a scrolling page.
+   * The transcript is the app's one scroll container, and the window is never
+   * scrolled. On the XenForo page node the document is ~770px taller than the
+   * chat — an AdSense reservation and the page title above it, share buttons,
+   * a breadcrumb and the forum footer below — so scrolling the window to
+   * `document.documentElement.scrollHeight` landed in the footer rather than
+   * at the end of the conversation, once per streamed frame.
    */
-  const setPageGeometry = ({ scrollHeight = 1_200, innerHeight = 200, scrollY = 0 } = {}) => {
-    Object.defineProperty(document.documentElement, 'scrollHeight', {
-      configurable: true, value: scrollHeight,
+  const ANCHOR_TOP = 640;
+
+  /** Everything reports a viewport top of 0 except the current turn's anchor. */
+  const stubBoundingRects = () => {
+    Object.defineProperty(Element.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value(this: Element) {
+        const top = this.hasAttribute?.('data-wf-turn-anchor') ? ANCHOR_TOP : 0;
+        return { top, y: top, bottom: top, left: 0, right: 0, x: 0, width: 0, height: 0, toJSON: () => ({}) };
+      },
     });
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: innerHeight });
-    Object.defineProperty(window, 'scrollY', { configurable: true, writable: true, value: scrollY });
   };
 
-  it('the transcript is not its own scroll container', async () => {
-    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    const messagePane = await screen.findByLabelText('Chat messages');
-    // A second scrollbar here is exactly what this guards against.
-    expect(getComputedStyle(messagePane).overflowY).not.toBe('auto');
-    expect(getComputedStyle(messagePane).overflowY).not.toBe('scroll');
-  });
+  const setPaneGeometry = (
+    element: HTMLElement,
+    { scrollHeight = 1_200, clientHeight = 200, scrollTop = 0 } = {},
+  ) => {
+    Object.defineProperties(element, {
+      scrollHeight: { configurable: true, value: scrollHeight },
+      clientHeight: { configurable: true, value: clientHeight },
+      scrollTop: { configurable: true, writable: true, value: scrollTop },
+    });
+  };
 
-  it('follows a new answer using the page scrollbar', async () => {
-    setPageGeometry();
+  const findPane = async () => {
+    const pane = await screen.findByLabelText('Chat messages');
+    setPaneGeometry(pane);
+    return pane;
+  };
+
+  beforeEach(stubBoundingRects);
+
+  it('never scrolls the window, whatever happens in a turn', async () => {
     apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Contained answer', annotations: [] });
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    await screen.findByLabelText('Chat messages');
+    const pane = await findPane();
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Contained question' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
-
     expect(await screen.findByText('Contained answer')).toBeInTheDocument();
-    await waitFor(() => expect(windowScrollToMock).toHaveBeenCalledWith(0, 1_200));
+    fireEvent.scroll(pane);
+
+    // The whole point of the change: the forum page around the embed stays
+    // exactly where the reader left it.
+    expect(windowScrollToMock).not.toHaveBeenCalled();
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
   });
 
-  it('smoothly jumps to the latest message when the user requests it', async () => {
-    setPageGeometry();
+  it('anchors a new turn to the question rather than to the end of the transcript', async () => {
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Anchored answer', annotations: [] });
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    await screen.findByLabelText('Chat messages');
-    fireEvent.scroll(window);
+    await findPane();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Anchored question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    // Chasing the end of the text instead slides every line upward under the
+    // reader while the answer is being written.
+    await waitFor(() => expect(elementScrollToMock)
+      .toHaveBeenCalledWith({ top: ANCHOR_TOP, behavior: 'smooth' }));
+  });
+
+  it('reserves enough room below the newest question for it to reach the top', async () => {
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Short answer', annotations: [] });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const pane = await findPane();
+    // A short exchange: only 60px of content sits below the anchor, so 140px
+    // of the 200px pane has to be reserved or the anchor scroll clamps back.
+    setPaneGeometry(pane, { scrollHeight: ANCHOR_TOP + 60, clientHeight: 200 });
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Short question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    const spacer = document.querySelector<HTMLElement>('[data-wf-tail-spacer]');
+    await waitFor(() => expect(spacer?.style.height).toBe('140px'));
+  });
+
+  it('smoothly jumps to the latest message when the user requests it', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const pane = await findPane();
+    fireEvent.scroll(pane);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
 
-    expect(windowScrollToMock).toHaveBeenCalledWith({ top: 1_200, behavior: 'smooth' });
+    expect(elementScrollToMock).toHaveBeenCalledWith({ top: 1_200, behavior: 'smooth' });
+    expect(windowScrollToMock).not.toHaveBeenCalled();
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
   });
 
   it('does not let a smooth jump cancel its own auto-follow', async () => {
-    setPageGeometry();
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    await screen.findByLabelText('Chat messages');
-    fireEvent.scroll(window);
+    const pane = await findPane();
+    fireEvent.scroll(pane);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
     expect(screen.queryByRole('button', { name: 'Jump to latest' })).not.toBeInTheDocument();
@@ -238,22 +287,23 @@ describe('message scrolling', () => {
     // A smooth scroll emits intermediate events from far above the bottom.
     // Reacting to them turned auto-follow back off mid-animation, which made
     // the button reappear and flicker on every use.
-    fireEvent.scroll(window);
-    fireEvent.scroll(window);
+    fireEvent.scroll(pane);
+    fireEvent.scroll(pane);
 
     expect(screen.queryByRole('button', { name: 'Jump to latest' })).not.toBeInTheDocument();
   });
 
   it('jumps immediately when reduced motion is requested', async () => {
     prefersReducedMotion = true;
-    setPageGeometry();
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
-    await screen.findByLabelText('Chat messages');
-    fireEvent.scroll(window);
+    const pane = await findPane();
+    fireEvent.scroll(pane);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Jump to latest' }));
 
-    expect(windowScrollToMock).toHaveBeenCalledWith(0, 1_200);
+    expect(pane.scrollTop).toBe(1_200);
+    expect(elementScrollToMock).not.toHaveBeenCalled();
+    expect(windowScrollToMock).not.toHaveBeenCalled();
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
   });
 });

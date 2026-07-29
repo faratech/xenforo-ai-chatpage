@@ -693,7 +693,7 @@ assert_chat_page_markup() {
         "$LIVE_ORIGIN/pages/ai/" --output "$download" || true
     fi
 
-    if grep -Fq '<div id="root" class="google-anno-skip" style="min-height:100vh"></div>' "$download" \
+    if grep -Fq '<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>' "$download" \
       && grep -Fq 'href="https://windowsforum.com/chatpage/static/css/main.css?v=2"' "$download" \
       && grep -Fq 'type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"' "$download" \
       && ! grep -Eq 'chatpage/static/(css|js)/main\.(css|js)\?ver=' "$download"; then

@@ -83,6 +83,16 @@ beforeAll(() => {
     configurable: true,
     value: vi.fn(),
   });
+  // jsdom implements neither of these on elements; the transcript is a real
+  // scroll container and the app anchors each turn by calling them.
+  Object.defineProperty(Element.prototype, 'scrollTo', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  Object.defineProperty(window, 'scrollTo', {
+    configurable: true,
+    value: vi.fn(),
+  });
 });
 
 beforeEach(() => {

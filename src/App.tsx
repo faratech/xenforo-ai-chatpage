@@ -172,7 +172,7 @@ const App: React.FC = () => {
 
   if (identityError) {
     return (
-      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center', p: 3 }}>
+      <Box sx={{ minHeight: '100dvh', display: 'grid', placeItems: 'center', p: 3 }}>
         <Alert
           severity="error"
           action={<Button color="inherit" size="small" onClick={retryIdentity}>Retry</Button>}
@@ -185,14 +185,14 @@ const App: React.FC = () => {
 
   if (!identity) {
     return (
-      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }} aria-label="Loading chat identity">
+      <Box sx={{ minHeight: '100dvh', display: 'grid', placeItems: 'center' }} aria-label="Loading chat identity">
         <CircularProgress size={28} />
       </Box>
     );
   }
 
   return (
-    <Box sx={{ position: 'relative', minHeight: '100vh' }} aria-busy={revalidating}>
+    <Box sx={{ position: 'relative', minHeight: '100dvh' }} aria-busy={revalidating}>
       {revalidating && (
         <Box
           aria-label="Rechecking chat identity"

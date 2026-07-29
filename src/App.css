@@ -56,6 +56,36 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ===== The application pane =====
+   The chat is one viewport-tall box that never scrolls itself; the transcript
+   inside it does. On the XenForo page node the document has ~400px of chrome
+   above (a 280px AdSense reservation plus the page title) and ~370px below
+   (share buttons, breadcrumb, footer), so `window` is emphatically not the
+   chat's scrollbar: driving it dragged the reader into the forum footer on
+   every streamed frame. Nothing in this app touches window scroll any more.
+
+   Sized here rather than in `sx` because MUI reads an array as breakpoints,
+   not as a fallback pair — `['100vh','100dvh']` gave phones the `100vh` that
+   `dvh` exists to avoid. Two declarations get a real cascade fallback.
+
+   Deliberately not `position: sticky`: below 900px XenForo sets
+   `overflow: hidden` on `.p-body-main`/`.p-body-content`, which become the
+   sticky scrollport and quietly make any sticky descendant inert. A plain
+   fixed-height block behaves identically at every width. */
+#react-chat-container .wf-chat-window {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* The one scroll container in the app. `overscroll-behavior: contain` is the
+   load-bearing part on the embed: without it, reaching either end of the
+   transcript chains the wheel straight into the forum page. */
+#react-chat-container .chat-messages-container {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 /* ===== Rich message content (rendered via dangerouslySetInnerHTML) ===== */
 #react-chat-container .message-content {
   line-height: 1.6;
@@ -256,5 +286,14 @@
   }
 }
 
-/* Turnstile container */
-#react-chat-container #turnstile-container { display: inline-block; margin: 8px auto; }
+/* Turnstile container. It lives in a dialog, so it needs no flow margin of its
+   own — and must not have one, or the reserved slot no longer matches the
+   iframe that lands in it. */
+#react-chat-container #turnstile-container {
+  display: block;
+  margin: 0;
+  /* Turnstile's normal widget size, reserved before the iframe arrives so its
+     async injection resizes nothing. */
+  min-width: 300px;
+  min-height: 65px;
+}
