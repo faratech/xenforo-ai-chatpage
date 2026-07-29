@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 
 /**
@@ -34,7 +34,8 @@ const UNFILLED_GRACE_MS = 4_000;
 export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
   const pushedRef = useRef(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const show = isGuest && adsEnabledOnHost();
+  const [abandoned, setAbandoned] = useState(false);
+  const show = isGuest && adsEnabledOnHost() && !abandoned;
 
   useEffect(() => {
     if (!show || pushedRef.current) return;
@@ -60,31 +61,31 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
   }, [show]);
 
   /**
-   * Give the band back to the conversation when nothing fills it.
+   * Give the band back to the conversation when nothing fills it — once, and
+   * for good.
    *
-   * collapse.js does this site-wide, but only where it is loaded, and this slot
-   * reserves space inside a viewport that no longer scrolls — an empty 90px
-   * strip above the composer is a permanent cost, and the live unit already
-   * reports `unfill-optimized` often enough to matter. Sets the same
-   * `data-wf-ad-empty` attribute collapse.js uses, so the two cannot disagree.
+   * The band reserves space inside a viewport that no longer scrolls, so an
+   * empty 90px strip above the composer is a permanent cost and the live unit
+   * reports `unfill-optimized` often enough to matter. But a band that
+   * collapses and then comes back is worse than either: measured on
+   * production, the slot collapsed as unfilled and filled ~20s later, resizing
+   * the transcript by 90px mid-conversation. That is the same class of
+   * layout shift this whole change exists to remove.
+   *
+   * So the decision is final. Unfilled unmounts the slot outright rather than
+   * hiding it, which also puts it beyond the reach of the site-wide
+   * collapse.js — an attribute either script can toggle is not a decision.
    */
   useEffect(() => {
     if (!show) return;
-    const wrapper = wrapperRef.current;
-    const ins = wrapper?.querySelector('ins.adsbygoogle');
-    if (!wrapper || !ins) return;
+    const ins = wrapperRef.current?.querySelector('ins.adsbygoogle');
+    if (!ins) return;
 
     const settle = () => {
       const status = ins.getAttribute('data-ad-status');
-      if (status === 'filled') {
-        wrapper.removeAttribute('data-wf-ad-empty');
-        return true;
-      }
-      if (status && status !== 'filled') {
-        wrapper.setAttribute('data-wf-ad-empty', '1');
-        return true;
-      }
-      return false;
+      if (!status) return false;
+      if (status !== 'filled') setAbandoned(true);
+      return true;
     };
 
     if (settle()) return;
@@ -93,7 +94,7 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
     // AdSense does not always set a status — a blocked or failed request simply
     // leaves the slot untouched, so the band needs a deadline of its own.
     const timer = window.setTimeout(() => {
-      if (!settle()) wrapper.setAttribute('data-wf-ad-empty', '1');
+      if (!settle()) setAbandoned(true);
       observer.disconnect();
     }, UNFILLED_GRACE_MS);
 
