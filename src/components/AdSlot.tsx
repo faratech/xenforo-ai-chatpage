@@ -42,6 +42,15 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
     // "All ins elements in the DOM with class=adsbygoogle already have ads in
     // them" on a second push into the same <ins>.
     pushedRef.current = true;
+
+    // Take the forum's copy out of the document rather than leaving it hidden.
+    // PAGE_CONTAINER emits it above the chat and it is outside this repo's
+    // deployable template surface, so it cannot be suppressed at source from
+    // here; removing it keeps exactly one unit on the page and avoids leaving
+    // an ad rendering inside a display:none box, which is the thing AdSense
+    // asks you not to do.
+    document.getElementById('wf-ad-breadcrumb')?.remove();
+
     try {
       (window.adsbygoogle = window.adsbygoogle || []).push({});
     } catch (error) {
