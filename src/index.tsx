@@ -5,6 +5,7 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import './index.css';
 import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { trackHostShellOffset } from './utils/hostShell';
 
 type ColorMode = 'light' | 'dark';
 
@@ -99,6 +100,10 @@ const ThemedApp = () => {
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('Root element not found');
+
+// Before render: the shell is pinned below the forum header and needs its
+// height, and doing it here avoids a frame of the chat sitting under it.
+trackHostShellOffset();
 
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
