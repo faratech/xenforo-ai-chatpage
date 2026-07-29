@@ -559,37 +559,57 @@ NODE
   log "Purged the chat assets and /pages/ai Cloudflare prefixes."
 }
 
+# `tag=public` does not evict /pages/ai/. pagecache.php only emits
+# X-LiteSpeed-Tag on the PREBHIT path, so the page node's entry is stored
+# untagged and a tag purge matches nothing — measured 2026-07-29: three
+# consecutive tag=public purges returned 204 while `age` kept climbing, and
+# only `*` produced a miss. httpjet's purge endpoint has exactly two forms
+# (peer_purge.rs: Purge::All and Purge::Tags); there is no URL-targeted purge,
+# so a full page-cache purge is the only one that reaches this page.
+#
+# Without it the origin kept serving a stale shell for the whole
+# --xf-capsule-stale-secs window (3600s in the live ExecStart), which meant the
+# chat-template contract probe below had never actually verified a *changed*
+# template — it passed only because the markup string had never changed. The
+# first deploy that altered it (100vh -> 100dvh) failed verification and rolled
+# itself back, correctly, against a 50-minute-old cached page.
+#
+# Site-wide is the right blast radius here: the Redis FLUSHDB on the next line
+# already drops every XenForo page-cache entry on the node, so the httpjet
+# store is simply being kept consistent with it.
+readonly PURGE_ALL_DIRECTIVE='x-litespeed-purge: *'
+
 purge_origin_chat_page() {
   redis-cli -n 1 FLUSHDB >/dev/null \
     || { fail "Cannot flush the local Redis page cache"; return 1; }
 
   curl --fail --silent --show-error \
     --request POST \
-    --header 'x-litespeed-purge: tag=public' \
+    --header "$PURGE_ALL_DIRECTIVE" \
     'http://127.0.0.1/__hj_cache_purge' \
     --output /dev/null \
-    || { fail "Cannot purge the local httpjet public page cache"; return 1; }
+    || { fail "Cannot purge the local httpjet page cache"; return 1; }
 
   if ! peer_enabled; then
     skip_peer "the peer Redis and httpjet page-cache purge"
-    log "Purged Redis DB1 and the httpjet public page cache."
+    log "Purged Redis DB1 and the httpjet page cache."
     return 0
   fi
 
   peer_ssh redis-cli -n 1 FLUSHDB >/dev/null \
     || { fail "Cannot flush the peer Redis page cache"; return 1; }
   peer_ssh bash -s <<'REMOTE' \
-    || { fail "Cannot purge the peer httpjet public page cache"; return 1; }
-# wf-peer-purge-public-page-cache
+    || { fail "Cannot purge the peer httpjet page cache"; return 1; }
+# wf-peer-purge-page-cache
 set -Eeuo pipefail
 curl --fail --silent --show-error \
   --request POST \
-  --header 'x-litespeed-purge: tag=public' \
+  --header 'x-litespeed-purge: *' \
   'http://127.0.0.1/__hj_cache_purge' \
   --output /dev/null
 REMOTE
 
-  log "Purged Redis DB1 and httpjet public page caches on both nodes."
+  log "Purged Redis DB1 and httpjet page caches on both nodes."
 }
 
 assert_header() {
