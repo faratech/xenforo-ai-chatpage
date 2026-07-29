@@ -41,21 +41,36 @@ export const trackHostShellOffset = (): (() => void) => {
   window.addEventListener('resize', publish);
   cleanups.push(() => window.removeEventListener('resize', publish));
 
+  const wrapper = header.parentElement;
+
   if (typeof ResizeObserver !== 'undefined') {
     const resize = new ResizeObserver(publish);
-    // The header for its own growth, and the page wrapper because anything
-    // inserted *above* the header moves it down without resizing it.
-    resize.observe(header);
-    const wrapper = header.parentElement;
-    if (wrapper) resize.observe(wrapper);
     cleanups.push(() => resize.disconnect());
-  }
 
-  if (typeof MutationObserver !== 'undefined' && header.parentElement) {
-    // A notice added above the header changes nothing's size — only position.
-    const mutation = new MutationObserver(publish);
-    mutation.observe(header.parentElement, { childList: true });
-    cleanups.push(() => mutation.disconnect());
+    // Everything that can move the header's bottom edge: the header itself,
+    // the wrapper, and each of the wrapper's children. The children matter on
+    // their own — a notice above the header growing (a late image, say) resizes
+    // neither the header nor necessarily the wrapper, so observing only those
+    // two left the shell stale and 52px of the header covered. Measured.
+    const bind = () => {
+      resize.disconnect();
+      resize.observe(header);
+      if (wrapper) {
+        resize.observe(wrapper);
+        for (const child of wrapper.children) resize.observe(child);
+      }
+      publish();
+    };
+    bind();
+
+    if (typeof MutationObserver !== 'undefined' && wrapper) {
+      // Insertion changes no element's size at all, only the header's
+      // position, so no resize observer would ever fire for it. Re-bind so
+      // newly added siblings are watched too.
+      const mutation = new MutationObserver(bind);
+      mutation.observe(wrapper, { childList: true });
+      cleanups.push(() => mutation.disconnect());
+    }
   }
 
   return () => cleanups.forEach(fn => fn());
