@@ -12,6 +12,52 @@ Entries record *why* a change was needed where that is not recoverable from the
 diff. Several of the causes below were expensive to find and are invisible in
 the markup.
 
+## 2026-08-01 (follow-up) — the last capture tool, and a tripwire
+
+`windows_screenshot` was kept on the chat page earlier today on the theory that
+one capture fits inside a turn. Measured on the same question it does not earn
+its place — **19s with it against 9s without**, for a picture the answer did not
+need — and it was the last thing on the interactive path depending on a single
+physical Windows box being free. Denied. Replayed after: **11–12s**.
+
+Two supporting changes, both scoped to this surface:
+
+- `ai/botstatus.py` gains `check_chat_tool_health()` on the existing 5-minute
+  cron, alerting on sustained stale-conversation 400s, capture-gate waits over
+  45s, and tool-call volume spikes. Run against the real journal it fires on
+  waits of **61.8s** and **82.7s** — every fault today was found by a human, not
+  by an alert.
+- The pure predicates moved out of `chat.php` into
+  `public_html/wf_chat_predicates.php` with 28 tests in
+  `/web/tests/test_chat_predicates.php`. `chat.php` boots XenForo and serves a
+  request on include, so nothing in it could be tested; this morning's recovery
+  fix was verified with a throwaway script that proved it worked once and
+  guarded nothing.
+
+> The test file first landed at `public_html/tests/` and answered **HTTP 200**,
+> running the whole suite for anyone who asked and printing internal error
+> strings and a real call id. Moved outside the docroot, plus a CLI-only guard
+> and an `.htaccess` deny for the include. Anything under `public_html/` is
+> served.
+
+### Known gaps, deliberately not closed
+
+Scoped out on purpose — recorded so they are a decision, not an oversight. None
+affect the chat page; all three protect *other* surfaces:
+
+- **The capture gate is unbounded.** No `fizz_gate()` call site passes
+  `max_wait`, so all seven inherit the 180s default. Chat no longer touches the
+  box, but the forum answerbot, Discord and Google Chat still queue behind it.
+- **The fan-out cap is chat-only.** `parallel_tool_calls` is set by exactly one
+  caller. The other three surfaces can still fire a 15-way fan-out.
+- **Stale-conversation recovery is chat-only.** `answerbot.py`,
+  `discordbot_router.py`, `google_chat_router.py` and `webhooks_router.py` all
+  persist conversation/response ids with no recovery, so one interrupted tool
+  chain kills that thread or channel permanently.
+- **Citation-token stripping is client-side.** It protects chat only. The forum
+  answerbot writes model output into `xf_post`, where a token would be
+  permanent. Currently unrealized: 0 occurrences across 60 days of posts.
+
 ## 2026-08-01 (later still) — "cite" in the middle of a sentence
 
 **Fixed.** Answers were reaching readers with the bare word `cite` followed by a
