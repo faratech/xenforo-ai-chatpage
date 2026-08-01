@@ -12,6 +12,45 @@ Entries record *why* a change was needed where that is not recoverable from the
 diff. Several of the causes below were expensive to find and are invisible in
 the markup.
 
+## 2026-08-01 (later) — a question that bricked the conversation
+
+**Fixed.** "How can I secure my Windows computer?" — one of the page's own
+example prompts — returned *The AI service is temporarily unavailable* and
+stayed broken on every retry. The INFO tool-call audit added earlier the same
+day is what made it findable:
+
+```
+14:05:09  local tool call: windows_walkthrough
+14:05:09  local tool call: windows_screenshot     ← ×11 more, 15 calls in 50ms
+14:05:46  w365 fizz-gate acquired source=walkthrough waited=36.8s depth=3
+14:06:12  w365 fizz-gate acquired source=walkthrough waited=61.8s depth=2
+```
+
+Three separate defects, compounding:
+
+- **`windows_walkthrough` and `windows_console_demo` cannot fit this surface.**
+  They drive live Windows VM captures behind a global semaphore with 300s and
+  120s upstream timeouts, against chat's 120s streaming deadline. Denied on the
+  chat page. `windows_screenshot` stays — one capture, and with the fan-out gone
+  the queue it waits on is short. It still costs ~10s on a turn that takes ~9s
+  without it.
+- **Nothing capped concurrent tool calls.** `max_tool_calls` governs built-in
+  tools only, so 15 function calls went out at once, each another slot in that
+  queue. `parallel_tool_calls: false` on the chat page bounds the worst case.
+- **The failure was permanent, not transient.** An abandoned tool chain leaves
+  the stored OpenAI conversation holding a `function_call` with no output, and
+  every later message against it 400s identically.
+  `conversationErrorRequiresReset()` never matched it — the message names the
+  call id, never the conversation, and the function returned early unless the
+  text said "conversation" or "conv_". So the conversation was kept and the
+  "retry" the error invites could never clear it. Now recognised, so one failure
+  drops the dead conversation and the next message starts clean.
+
+The already-poisoned row for the affected guest was deleted by hand; the fix
+only covers conversations that fail *after* it shipped.
+
+Replayed after the fix: 1 tool call instead of 15, full answer in 19s.
+
 ## 2026-08-01 — off-scope tools, and a wait that stops looking finished
 
 ### The assistant kept calling the weather tool
