@@ -12,6 +12,37 @@ Entries record *why* a change was needed where that is not recoverable from the
 diff. Several of the causes below were expensive to find and are invisible in
 the markup.
 
+## 2026-08-01 (later still) — "cite" in the middle of a sentence
+
+**Fixed.** Answers were reaching readers with the bare word `cite` followed by a
+raw URL mid-sentence. Recovered from the chat answer cache, the stored text is:
+
+```
+…around for **about 20 years**. U+E200 cite U+E202 https://windowsforum.com/… U+E201
+```
+
+Inline citations do not always arrive as markdown. They also arrive as a token
+delimited by private-use-area codepoints — `U+E200 <kind> U+E202 <payload>
+U+E201` — and a browser renders `U+E2xx` as nothing at all. Strip the invisible
+delimiters and what survives on screen is the word `cite` and the URL.
+
+`normalizeAssistantMarkup()` now converts these into the markdown the renderer
+already understands, so a token collapses into the same numbered superscript and
+Sources entry as a citation the model wrote as a link. Kinds other than `cite`
+are internal markup that was never meant to be displayed and are dropped rather
+than guessed at, and any delimiter that survives the rules is removed.
+
+It runs on both render paths. The streaming path matters as much as the
+committed one: the unfinished tail of an answer renders as escaped plain text,
+so a token still arriving would reach the reader verbatim. Mid-stream an
+unterminated token is held back until its closing delimiter lands, rather than
+letting `cite` flash on screen before the URL catches up.
+
+The delimiters are written as `\uE200`-style escapes in both the source and the
+tests. Pasted literally they are indistinguishable from nothing at all — the
+first cut of this fix silently lost every one of them in an editor round-trip,
+and the tests still passed.
+
 ## 2026-08-01 (later) — a question that bricked the conversation
 
 **Fixed.** "How can I secure my Windows computer?" — one of the page's own

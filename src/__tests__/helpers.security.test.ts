@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeAndParse } from '../utils/helpers';
+import { sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
 
 describe('sanitizeAndParse security boundary', () => {
   it('renders hostile raw HTML as inert text and blocks attacker-controlled image requests', () => {
@@ -356,5 +356,90 @@ describe('raw HTML the assistant emits', () => {
     const markdown = render('[![shot](https://windowsforum.com/images/ai/answers/a.webp)](https://example.com/x)');
     expect(markdown.querySelector('sup')).toBeNull();
     expect(markdown.textContent).not.toContain('Sources:');
+  });
+});
+
+describe('private-use citation tokens', () => {
+  // U+E200 <kind> U+E202 <payload> U+E201. Written as escapes because the
+  // delimiters are invisible: pasted literally they are indistinguishable from
+  // nothing at all, and a stripped one would silently void the test.
+  const cite = (payload: string, kind = 'cite') => `\uE200${kind}\uE202${payload}\uE201`;
+
+  /**
+   * The exact answer that shipped this bug, recovered from the chat answer
+   * cache on 2026-08-01. The delimiters render as nothing in a browser, so the
+   * reader saw the bare word "cite" and a raw URL mid-sentence.
+   */
+  it('never leaks the word cite or a raw token URL into the output', () => {
+    const url = 'https://windowsforum.com/staff-forum.23/nostalgic-look-back.57181/post-196886';
+    const output = sanitizeAndParse(
+      `The community has been around for **about 20 years**. ${cite(url)}\n\nThe Windows 7 Forums site was acquired later.`
+    );
+
+    expect(output).not.toContain('cite');
+    expect(output).not.toMatch(/[\uE200-\uE20F]/);
+    // Converted, not merely deleted: it becomes the same numbered citation the
+    // renderer produces for a citation the model wrote as markdown.
+    expect(output).toContain('<sup>[1]</sup>');
+    expect(output).toContain('Sources:');
+    expect(output).toContain(url);
+    // The surrounding prose survives intact.
+    expect(output).toContain('The Windows 7 Forums site was acquired later.');
+  });
+
+  it('numbers repeated and multiple targets like any other citation', () => {
+    const output = sanitizeAndParse(
+      `One ${cite('https://learn.microsoft.com/a')} two `
+      + `${cite('https://learn.microsoft.com/a https://windowsforum.com/b')}`
+    );
+
+    expect(output).toContain('<sup>[1]</sup>');
+    expect(output).toContain('<sup>[2]</sup>');
+    expect(output).not.toContain('<sup>[3]</sup>');
+  });
+
+  it('drops token kinds that are not citations rather than guessing', () => {
+    const output = sanitizeAndParse(`Answer ${cite('turn0search1', 'navlist')} continues`);
+
+    expect(output).not.toContain('navlist');
+    expect(output).not.toContain('turn0search1');
+    expect(output).toContain('Answer');
+    expect(output).toContain('continues');
+  });
+
+  it('drops a cite token carrying no usable URL', () => {
+    const output = sanitizeAndParse(`Answer ${cite('turn0search1')} continues`);
+
+    expect(output).not.toContain('cite');
+    expect(output).not.toContain('turn0search1');
+  });
+
+  it('leaves ordinary content untouched', () => {
+    const plain = 'Just a **normal** answer with [a link](https://example.com/x).';
+    expect(sanitizeAndParse(plain)).toBe(sanitizeAndParse(plain));
+    expect(sanitizeAndParse(plain)).not.toMatch(/[\uE200-\uE20F]/);
+  });
+});
+
+describe('citation tokens mid-stream', () => {
+  const partial = (text: string) => splitStreamingMarkdown(text);
+
+  it('holds back a token that has not finished arriving', () => {
+    // Every prefix of a token must be invisible; otherwise "cite" flashes on
+    // screen for a frame or two before the URL catches up.
+    const prose = 'The forum has been around for about 20 years. ';
+    for (const tail of ['\uE200', '\uE200cite', '\uE200cite\uE202', '\uE200cite\uE202https://windowsforum.com/a']) {
+      const { closed, trailing } = partial(prose + tail);
+      expect(closed + trailing).toBe(prose);
+    }
+  });
+
+  it('renders the citation once the closing delimiter lands', () => {
+    const { closed, trailing } = partial(
+      'Twenty years. \uE200cite\uE202https://windowsforum.com/a\uE201'
+    );
+    const combined = closed + trailing;
+    expect(combined).not.toContain('cite');
+    expect(combined).toContain('windowsforum.com');
   });
 });

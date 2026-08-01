@@ -61,6 +61,64 @@ const AI_IMAGE_PATH_PATTERN = /^\/images\/ai\/(?:answers|walkthroughs|screenshot
 // windowsforum.com.attacker.example.
 const AI_IMAGE_HOST = 'windowsforum.com';
 
+/**
+ * Inline citations arrive as a private-use-area token rather than as markdown:
+ * U+E200 `cite` U+E202 <payload> U+E201. Browsers render U+E2xx as nothing (or
+ * as tofu), so an untouched token reaches the reader as the bare word "cite"
+ * followed by a raw URL in the middle of a sentence.
+ *
+ * The payload is one or more URLs. Anything else the model wraps this way
+ * (`navlist`, and whatever gets added next) is internal markup that was never
+ * meant to be displayed, so it is dropped rather than guessed at.
+ */
+const CITATION_TOKEN = /\uE200([a-z]*)\uE202([\s\S]*?)\uE201/g;
+/** The same token still arriving — no closing delimiter yet. */
+const OPEN_CITATION_TOKEN = /\uE200([a-z]*)(?:\uE202([\s\S]*))?$/;
+/** Any delimiter that outlived the rules above must not reach the reader. */
+const RESIDUAL_MARKER = /[\uE200-\uE20F]/g;
+
+const citationTokenToMarkdown = (kind: string, payload: string): string => {
+  if (kind.toLowerCase() !== 'cite' || !payload) return '';
+  const links = payload
+    .split(/[\uE200-\uE20F\s]+/)
+    .map(parseHttpUrl)
+    .filter((url): url is URL => url !== null)
+    // The hostname is the label the existing citation renderer looks for, so a
+    // converted token collapses to the same numbered superscript and Sources
+    // entry as a citation the model wrote as markdown.
+    .map(url => `[${url.hostname.replace(/^www\./, '')}](${url.href})`);
+  return links.length ? ` ${links.join(' ')}` : '';
+};
+
+/**
+ * Turns the citation tokens above into markdown the renderer already
+ * understands, and removes everything else in that private-use range.
+ *
+ * `streaming` decides what to do with a token that is still arriving: mid
+ * stream it is held back until its closing delimiter lands, so the reader never
+ * sees "cite" flash before the URL catches up. On a finished message there is
+ * nothing more coming, so whatever arrived is converted as-is.
+ */
+export const normalizeAssistantMarkup = (content: string, streaming = false): string => {
+  // Costs one indexOf on the overwhelming majority of messages, which matters
+  // because the streaming path re-runs this every animation frame.
+  if (!content || !content.includes('\uE200')) return content;
+
+  let normalized = content.replace(
+    CITATION_TOKEN,
+    (_full, kind: string, payload: string) => citationTokenToMarkdown(kind, payload)
+  );
+
+  normalized = normalized.replace(
+    OPEN_CITATION_TOKEN,
+    (_full, kind: string, payload: string) => (
+      streaming ? '' : citationTokenToMarkdown(kind, payload ?? '')
+    )
+  );
+
+  return normalized.replace(RESIDUAL_MARKER, '');
+};
+
 const isApprovedImageOrigin = (url: URL): boolean =>
   url.protocol === 'https:'
   && (url.hostname === AI_IMAGE_HOST || url.hostname.endsWith(`.${AI_IMAGE_HOST}`));
@@ -193,6 +251,7 @@ const linkAttributes = (href: string, title?: string | null): string => {
  */
 export const sanitizeAndParse = (content: string): string => {
   if (!content) return content;
+  content = normalizeAssistantMarkup(content);
 
   const citations: Citation[] = [];
   const citationIndexes = new Map<string, number>();
@@ -462,6 +521,10 @@ const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
  */
 export const splitStreamingMarkdown = (content: string): { closed: string; trailing: string } => {
   if (!content) return { closed: '', trailing: '' };
+  // Streaming: an unterminated token is held back rather than shown half-built.
+  // The trailing half of the split renders as escaped plain text, so a token
+  // left in it would reach the reader verbatim.
+  content = normalizeAssistantMarkup(content, true);
 
   const lines = content.split('\n');
   let openFence: string | null = null;
