@@ -12,6 +12,64 @@ Entries record *why* a change was needed where that is not recoverable from the
 diff. Several of the causes below were expensive to find and are invisible in
 the markup.
 
+## 2026-08-01 — off-scope tools, and a wait that stops looking finished
+
+### The assistant kept calling the weather tool
+
+**Fixed.** `chat.php` sends no tool configuration, so the backend handed the chat
+page the entire shared `/responses` catalog — the one Discord, Google Chat and
+the moderation pipeline also read. After `build_tools()` dropped the functions
+the WindowsForum MCP server duplicates, what was left included
+`assistant_get_weather`, the `generateImage` function **and** the hosted
+`image_generation` tool (`IMAGE_GENERATION_ENABLED_DEFAULT=1`): three
+capabilities flatly outside the Windows/IT scope the page's own instructions
+declare. At this surface's model tier — `gpt-5.6-luna` at `reasoning_effort:
+low` — an off-scope tool sitting in the list gets picked on ordinary questions,
+and each spurious call costs a whole extra round trip to OpenAI before the
+member sees a word.
+
+- `web:` `responses_router.py` gains `exclude_tools`, a per-caller deny-list
+  matching a function `name`, a hosted tool `type`, or an MCP `server_label`.
+  It is applied **last** in `build_tools()`, so it also covers `tools_override`
+  and `extra_tools` — a surface that says it does not want a tool must not get
+  it back through another door.
+- `web:` `chat.php` denies all three. Denied there rather than in `get_tools()`
+  so no other consumer is affected.
+- `web:` executed local tool names now log at INFO. The equivalent lines were
+  DEBUG while the service runs at INFO, which is why the journal held no
+  evidence of the weather calls at all. This is what verifies the fix.
+
+`$staticInstructions` also gained a line on tool scope. It is hashed into
+`chatAnswerCacheKey()` and is the explicit prompt-cache prefix, so editing it
+deliberately invalidates both — answers cached from weather-tainted turns are
+dropped, at the cost of one cold-cache turn per member.
+
+### The wait looked finished while it was still working
+
+**Fixed.** Every step in the progress strip flipped to a green check on
+`response.output_item.done`, and the strip only rendered before the first text
+delta. So between steps — reasoning closed but the message item not yet open,
+or a local tool running between the two upstream calls — the panel was a
+motionless list of ticks with no spinner anywhere, which reads as
+finished-but-broken. Then the whole strip vanished on the first delta, taking
+the record of what was searched with it.
+
+- A turn in flight now always has exactly one live row: when no step is active,
+  a spinner plus `Preparing the answer…` closes the gap.
+- Past ~8s the live row shows its own clock, so a long turn looks measured
+  rather than hung. The interval exists only while a turn runs.
+- Once the answer starts streaming the steps collapse to one line above it
+  (`Worked for 6s · 3 steps`), expandable to the full list, and stay with the
+  answer for the session. Held in memory only: `Message` is validated
+  field-by-field by the storage sanitizer inside a versioned envelope, and a
+  schema migration is not worth it for a display aid. The trail is lost on
+  reload.
+
+No reasoning narration was enabled — `reasoning_summary` stays unset and no
+model reasoning text is shown to users. The client has parsed those events since
+the progress strip landed, so turning it on later remains a one-field change in
+`chat.php`.
+
 ## 2026-07-29 — the chat stops moving the page
 
 `https://windowsforum.com/pages/ai/` behaved like a document with a chat in it

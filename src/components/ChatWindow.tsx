@@ -13,6 +13,7 @@ import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import AddIcon from '@mui/icons-material/Add';
 import CheckIcon from '@mui/icons-material/Check';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
 import MenuIcon from '@mui/icons-material/Menu';
 
@@ -65,6 +66,13 @@ const RETRY_JITTER_MS = 400;
 const SMOOTH_SCROLL_SETTLE_MS = 700;
 /** How close to the end of the transcript still counts as "following the tail". */
 const TAIL_FOLLOW_SLACK_PX = 80;
+/**
+ * How long a turn has to run before the wait starts showing its own clock. Short
+ * turns stay clean; a long one has to look measured rather than hung.
+ */
+const ELAPSED_HINT_AFTER_MS = 8_000;
+/** How often the elapsed hint re-renders while a turn is in flight. */
+const ELAPSED_TICK_MS = 1_000;
 
 /**
  * Read-aloud preference, scoped per account like every other stored key. It
@@ -123,6 +131,116 @@ const noopEdit = (_id: string, _content: string) => {};
 const noopRetry = (_id: string) => {};
 const noopRegenerate = () => {};
 
+const formatDuration = (ms: number): string => `${Math.max(1, Math.round(ms / 1000))}s`;
+
+/**
+ * The steps of the turn that just landed, kept in memory so the trail does not
+ * blink out at the instant the answer commits. Only ever the most recent turn:
+ * this is a display aid, not transcript data, and is deliberately not persisted
+ * — `Message` is validated field-by-field by the storage sanitizer inside a
+ * versioned envelope, and a schema migration is not worth it here.
+ */
+interface CompletedTrail {
+  messageId: string;
+  activities: StreamActivity[];
+  durationMs: number;
+}
+
+/**
+ * One step row. Shared by the pre-answer panel and the expanded trail so the two
+ * cannot drift apart.
+ */
+const ActivityRow: React.FC<{ label: string; detail?: string; done: boolean }> = ({
+  label,
+  detail,
+  done,
+}) => (
+  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 0.4 }}>
+    {done ? (
+      <CheckIcon fontSize="small" sx={{ fontSize: 16, color: 'success.main', flexShrink: 0 }} />
+    ) : (
+      <CircularProgress size={14} sx={{ flexShrink: 0 }} />
+    )}
+    <Box sx={{ minWidth: 0 }}>
+      <Typography sx={{ fontSize: 14, color: done ? 'text.secondary' : 'text.primary' }}>
+        {label}
+      </Typography>
+      {detail && (
+        <Typography sx={{ fontSize: 13, color: 'text.secondary', fontStyle: 'italic', mt: 0.25 }}>
+          {detail}
+        </Typography>
+      )}
+    </Box>
+  </Box>
+);
+
+const ActivitySteps: React.FC<{ activities: StreamActivity[] }> = ({ activities }) => (
+  <>
+    {activities.map(activity => (
+      <ActivityRow
+        key={activity.id}
+        label={activity.label}
+        detail={activity.detail}
+        done={activity.state === 'done'}
+      />
+    ))}
+  </>
+);
+
+/**
+ * What the assistant did, once it has started answering. Collapsed by default:
+ * the steps mattered while the user was waiting on them, and are context
+ * afterwards. Before this existed the whole strip vanished on the first text
+ * delta, taking the record of what was searched with it.
+ */
+const ActivityTrail: React.FC<{ activities: StreamActivity[]; durationMs: number }> = ({
+  activities,
+  durationMs,
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!activities.length) return null;
+
+  return (
+    <Box sx={{ px: 3, pt: 1 }}>
+      <Box sx={{ width: '100%', maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
+        <Box
+          component="button"
+          type="button"
+          onClick={() => setExpanded(open => !open)}
+          aria-expanded={expanded}
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 0.5,
+            p: 0,
+            border: 0,
+            bgcolor: 'transparent',
+            cursor: 'pointer',
+            font: 'inherit',
+            fontSize: 13,
+            color: 'text.secondary',
+            '&:hover, &:focus-visible': { color: 'text.primary' },
+          }}
+        >
+          <ExpandMoreIcon
+            sx={{
+              fontSize: 16,
+              transition: 'transform 0.12s',
+              transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+            }}
+          />
+          {`Worked for ${formatDuration(durationMs)} · ${activities.length} ${activities.length === 1 ? 'step' : 'steps'}`}
+        </Box>
+        {expanded && (
+          <Box sx={{ pl: 2.5, pt: 0.5 }}>
+            <ActivitySteps activities={activities} />
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+};
+
 type ConversationUpdate = Partial<Conversation> | ((conversation: Conversation) => Partial<Conversation>);
 
 type TurnKind = 'send' | 'edit' | 'regenerate' | 'retry';
@@ -150,6 +268,8 @@ interface ActiveTurn {
   annotations: Annotation[];
   /** What the assistant is doing before/while it answers, for the wait UI. */
   activities: StreamActivity[];
+  /** Drives the elapsed-time hint, and the duration shown on the finished trail. */
+  startedAt: number;
   /**
    * For branch operations (edit/regenerate/retry), the pre-turn messages
    * and title, so an abort before any output restores the original branch
@@ -308,6 +428,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   });
   // What the assistant is doing while the user waits; replaces a bare spinner.
   const [activities, setActivities] = useState<StreamActivity[]>([]);
+  // Re-rendered once a second while a turn is in flight, so a long wait visibly
+  // counts up instead of sitting on a motionless spinner.
+  const [turnElapsedMs, setTurnElapsedMs] = useState(0);
+  const [completedTrail, setCompletedTrail] = useState<CompletedTrail | null>(null);
   const [showCaptcha, setShowCaptcha] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [showExamples, setShowExamples] = useState(true);
@@ -361,6 +485,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     mutedRef.current = isMuted;
     AudioService.setMuted(isMuted || !ENV.ENABLE_VOICE);
   }, [isMuted]);
+
+  // The interval exists only while a turn is running, so an idle page never
+  // re-renders on a timer.
+  useEffect(() => {
+    if (!isLoading) return;
+    const tick = () => {
+      const startedAt = activeTurnRef.current?.startedAt;
+      setTurnElapsedMs(startedAt ? Date.now() - startedAt : 0);
+    };
+    tick();
+    const timer = window.setInterval(tick, ELAPSED_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [isLoading]);
 
   const defaultConversation = useMemo<Conversation>(() => ({
     id: currentConversationId,
@@ -443,6 +580,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     setActiveRequestId(null);
     setStreamingState(null);
     setActivities([]);
+    setTurnElapsedMs(0);
     return true;
   }, [cancelStreamingFrame]);
 
@@ -847,11 +985,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       partialText: '',
       annotations: [],
       activities: [],
+      startedAt: Date.now(),
       rollbackMessages: params.rollbackMessages,
       rollbackTitle: params.rollbackTitle,
     };
     activeTurnRef.current = turn;
     setActiveRequestId(requestId);
+    // The previous turn's trail belongs to the previous answer.
+    setCompletedTrail(null);
+    setTurnElapsedMs(0);
 
     const scheduleStreamingUpdate = () => {
       if (streamingFrameRef.current !== null) return;
@@ -935,9 +1077,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           result.diagnostics
         );
       }
+      const answerId = messageId('_ai');
       updateConversationById(conversationId, conversation => ({
         messages: [...conversation.messages, {
-          id: messageId('_ai'),
+          id: answerId,
           role: 'ai' as const,
           rawContent: result.text,
           timestamp: Date.now(),
@@ -946,6 +1089,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         }],
         needsServerResync: false,
       }));
+      // Hand the steps to the answer before clearActiveTurn drops them, so the
+      // trail does not blink out at the moment the answer lands.
+      const steps = activeTurnRef.current?.activities ?? [];
+      setCompletedTrail(steps.length
+        ? { messageId: answerId, activities: steps, durationMs: Date.now() - turn.startedAt }
+        : null);
       clearActiveTurn(requestId);
       setUsageRefresh(value => value + 1);
       if (ENV.ENABLE_VOICE && !mutedRef.current) {
@@ -1470,6 +1619,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const visibleStreamingMessage = streamingState?.conversationId === currentConversationId
     ? streamingState.message
     : null;
+  const hasActiveStep = activities.some(activity => activity.state === 'active');
+  const showElapsed = turnElapsedMs >= ELAPSED_HINT_AFTER_MS;
 
   const usageVisible = !isGuest && !!usage?.logged_in && !usage.unavailable;
   const usageTierLabel = usage?.tier === 'premium'
@@ -1552,6 +1703,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                     {/* Where a new turn is scrolled to. Zero-height, so it costs
                         the transcript nothing when no turn is in flight. */}
                     {isLastUser && <Box ref={turnAnchorRef} aria-hidden data-wf-turn-anchor sx={{ height: 0 }} />}
+                    {completedTrail?.messageId === message.id && (
+                      <ActivityTrail
+                        activities={completedTrail.activities}
+                        durationMs={completedTrail.durationMs}
+                      />
+                    )}
                     <MessageComponent
                       msg={message}
                       userAvatar={userAvatar}
@@ -1573,6 +1730,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
             {visibleStreamingMessage && (
               <Box aria-live="off">
+                <ActivityTrail activities={activities} durationMs={turnElapsedMs} />
                 <MessageComponent
                   msg={visibleStreamingMessage}
                   userAvatar={userAvatar}
@@ -1594,44 +1752,28 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                 sx={{ px: 3, py: 2.5, display: 'flex', justifyContent: 'center' }}
               >
                 <Box sx={{ width: '100%', maxWidth: CHAT_CONTENT_MAX_WIDTH }}>
-                  {activities.length === 0 ? (
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
-                      <CircularProgress size={16} />
-                      <Typography sx={{ fontSize: 14, color: 'text.secondary' }}>Thinking…</Typography>
+                  <ActivitySteps activities={activities} />
+                  {/* Every step flips to a green check the moment it finishes, so
+                      between steps the panel would be a motionless list of ticks:
+                      after reasoning closes and before the message item opens, and
+                      while a tool runs between the two upstream calls. A turn in
+                      flight always has exactly one live row. */}
+                  {!hasActiveStep ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 0.4 }}>
+                      <CircularProgress size={activities.length ? 14 : 16} sx={{ flexShrink: 0 }} />
+                      <Typography sx={{ fontSize: 14, color: 'text.secondary' }}>
+                        {activities.length ? 'Preparing the answer…' : 'Thinking…'}
+                      </Typography>
+                      {showElapsed && (
+                        <Typography sx={{ fontSize: 13, color: 'text.secondary' }}>
+                          {`· ${formatDuration(turnElapsedMs)}`}
+                        </Typography>
+                      )}
                     </Box>
-                  ) : (
-                    activities.map(activity => (
-                      <Box
-                        key={activity.id}
-                        sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 0.4 }}
-                      >
-                        {activity.state === 'done' ? (
-                          <CheckIcon
-                            fontSize="small"
-                            sx={{ fontSize: 16, color: 'success.main', flexShrink: 0 }}
-                          />
-                        ) : (
-                          <CircularProgress size={14} sx={{ flexShrink: 0 }} />
-                        )}
-                        <Box sx={{ minWidth: 0 }}>
-                          <Typography
-                            sx={{
-                              fontSize: 14,
-                              color: activity.state === 'done' ? 'text.secondary' : 'text.primary',
-                            }}
-                          >
-                            {activity.label}
-                          </Typography>
-                          {activity.detail && (
-                            <Typography
-                              sx={{ fontSize: 13, color: 'text.secondary', fontStyle: 'italic', mt: 0.25 }}
-                            >
-                              {activity.detail}
-                            </Typography>
-                          )}
-                        </Box>
-                      </Box>
-                    ))
+                  ) : showElapsed && (
+                    <Typography sx={{ fontSize: 13, color: 'text.secondary', pl: 3.5, pt: 0.25 }}>
+                      {formatDuration(turnElapsedMs)}
+                    </Typography>
                   )}
                 </Box>
               </Box>

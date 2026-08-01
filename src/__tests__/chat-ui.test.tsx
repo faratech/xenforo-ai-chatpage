@@ -429,6 +429,65 @@ describe('composer and message integrity', () => {
     expect(screen.getByText('Searching WindowsForum')).toBeInTheDocument();
     expect(screen.getByText('Reading a thread')).toBeInTheDocument();
     expect(screen.queryByText('Thinking…')).not.toBeInTheDocument();
+    // A step is running, so it owns the only spinner.
+    expect(screen.queryByText('Preparing the answer…')).not.toBeInTheDocument();
+  });
+
+  /**
+   * Every step flips to a green check on `response.output_item.done`, so the
+   * gaps between them — reasoning closed but the message item not yet open, or a
+   * local tool running between the two upstream calls — used to leave a
+   * motionless list of ticks that read as finished-but-broken.
+   */
+  it('keeps a live row when every step so far has finished', async () => {
+    let emitActivity: ((activities: { id: string; label: string; state: 'active' | 'done' }[]) => void) | undefined;
+    apiMocks.sendMessage.mockImplementation((_message: string, options: {
+      onActivity?: (activities: { id: string; label: string; state: 'active' | 'done' }[]) => void;
+    }) => new Promise(() => {
+      emitActivity = options.onActivity;
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Why is my PC slow?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByText('Thinking…');
+
+    await act(async () => {
+      emitActivity?.([
+        { id: 'a', label: 'Searching WindowsForum', state: 'done' },
+        { id: 'b', label: 'Reading a thread', state: 'done' },
+      ]);
+    });
+
+    expect(screen.getByText('Searching WindowsForum')).toBeInTheDocument();
+    expect(screen.getByText('Preparing the answer…')).toBeInTheDocument();
+  });
+
+  it('collapses the finished steps above the answer once it starts streaming', async () => {
+    apiMocks.sendMessage.mockImplementation((_message: string, options: {
+      onActivity?: (activities: { id: string; label: string; state: 'active' | 'done' }[]) => void;
+      onChunk?: (text: string, annotations: []) => void;
+    }) => new Promise(() => {
+      options.onActivity?.([
+        { id: 'a', label: 'Searching WindowsForum', state: 'done' },
+        { id: 'b', label: 'Reading a thread', state: 'done' },
+      ]);
+      options.onChunk?.('Your disk is nearly full', []);
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Why is my PC slow?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('Your disk is nearly full')).toBeInTheDocument();
+    // The pre-answer panel is gone, but what it did is still on the page.
+    expect(screen.queryByLabelText('Waiting for assistant response')).not.toBeInTheDocument();
+    const summary = screen.getByRole('button', { name: /2 steps/ });
+    expect(screen.queryByText('Reading a thread')).not.toBeInTheDocument();
+
+    fireEvent.click(summary);
+    expect(screen.getByText('Searching WindowsForum')).toBeInTheDocument();
+    expect(screen.getByText('Reading a thread')).toBeInTheDocument();
   });
 
   it('keeps the composer editable and focused while a response streams', () => {
