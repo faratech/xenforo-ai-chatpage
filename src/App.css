@@ -216,7 +216,8 @@
 #react-chat-container .message-content a,
 #react-chat-container .message-file-sources a {
   color: var(--wf-primary);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 0.14em;
   font-weight: 500;
   transition: color 0.1s;
 }
@@ -224,7 +225,14 @@
 #react-chat-container .message-file-sources a:hover { text-decoration: underline; color: var(--wf-accent); }
 
 /* Tables */
-#react-chat-container .message-content table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+#react-chat-container .message-content table {
+  border-collapse: collapse;
+  display: block;
+  margin: 1em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  width: max-content;
+}
 #react-chat-container .message-content table th,
 #react-chat-container .message-content table td {
   border: 1px solid var(--wf-border);
@@ -285,6 +293,9 @@
 
 #react-chat-container .MuiButton-root:focus-visible,
 #react-chat-container .MuiIconButton-root:focus-visible,
+#react-chat-container a:focus-visible,
+#react-chat-container input:focus-visible,
+#react-chat-container textarea:focus-visible,
 #react-chat-container .message-actions button:focus-visible,
 #react-chat-container .delete-btn:focus-visible {
   outline: 3px solid var(--wf-primary);

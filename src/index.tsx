@@ -6,6 +6,7 @@ import './index.css';
 import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { trackHostShellOffset } from './utils/hostShell';
+import type { UserData } from './types';
 
 type ColorMode = 'light' | 'dark';
 
@@ -66,7 +67,7 @@ const makeTheme = (mode: ColorMode) => {
   });
 };
 
-const ThemedApp = () => {
+const ThemedApp = ({ initialIdentityPromise }: { initialIdentityPromise?: Promise<UserData> | null }) => {
   const [mode, setMode] = useState<ColorMode>(resolveMode);
   const theme = useMemo(() => makeTheme(mode), [mode]);
 
@@ -92,23 +93,25 @@ const ThemedApp = () => {
         data-wf-theme={mode}
         sx={{ backgroundColor: 'background.default', color: 'text.primary' }}
       >
-        <App />
+        <App initialIdentityPromise={initialIdentityPromise} />
       </ScopedCssBaseline>
     </ThemeProvider>
   );
 };
 
-const rootElement = document.getElementById('root');
-if (!rootElement) throw new Error('Root element not found');
+export const mountApp = (initialIdentityPromise?: Promise<UserData> | null): void => {
+  const rootElement = document.getElementById('root');
+  if (!rootElement) throw new Error('Root element not found');
 
-// Before render: the shell is pinned below the forum header and needs its
-// height, and doing it here avoids a frame of the chat sitting under it.
-trackHostShellOffset();
+  // Before render: the shell is pinned below the forum header and needs its
+  // height, and doing it here avoids a frame of the chat sitting under it.
+  trackHostShellOffset();
 
-ReactDOM.createRoot(rootElement).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <ThemedApp />
-    </ErrorBoundary>
-  </React.StrictMode>
-);
+  ReactDOM.createRoot(rootElement).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <ThemedApp initialIdentityPromise={initialIdentityPromise} />
+      </ErrorBoundary>
+    </React.StrictMode>
+  );
+};

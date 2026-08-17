@@ -18,6 +18,9 @@ assert_state started failed
 DEPLOY_ALLOW_DIRTY=1 run_deploy || fail_test "DEPLOY_ALLOW_DIRTY=1 deploy failed"
 assert_contains "$RT_LAST_OUTPUT" "DEPLOY_ALLOW_DIRTY=1" "loud dirty override warning"
 assert_state complete complete
-assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$(current_release)")"
+dirty_release="$(current_release)"
+assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$dirty_release")"
+assert_eq "$(json_value "$(release_private_dir "$dirty_release")/RELEASE-METADATA.json" working_tree_dirty)" \
+  true "dirty override metadata"
 assert_no_next_litter
 echo "OK"

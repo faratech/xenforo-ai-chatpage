@@ -18,7 +18,7 @@ run_deploy || rc=$?
 # Both hosts still serve the previous release; templates untouched
 assert_link_target "$PUBLIC_LINK" "$r1"
 assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$r1")"
-assert_templates_match_bundle "$r1/xenforo-templates"
+assert_templates_match_bundle "$(release_bundle "$r1")"
 assert_state staged failed
 assert_no_next_litter
 echo "OK"

@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 
 declare global {
+  const __WF_BUILD_ID__: string;
+  const __WF_SURFACE__: string;
   interface SpeechRecognitionAlternative { readonly transcript: string }
   interface SpeechRecognitionResult { readonly length: number; readonly [index: number]: SpeechRecognitionAlternative }
   interface SpeechRecognitionResultList { readonly length: number; readonly [index: number]: SpeechRecognitionResult }

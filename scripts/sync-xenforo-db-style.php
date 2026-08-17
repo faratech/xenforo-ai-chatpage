@@ -3,15 +3,16 @@
 declare(strict_types=1);
 
 /**
- * Keep a database-managed XenForo style on the stable chat asset contract.
+ * Keep an explicitly selected XenForo style on the stable chat asset contract.
  *
  * Designer-mode styles are imported from src/styles by deploy.sh, but the
- * legacy user-selectable style is database-owned. Without an explicit sync it
- * can retain old ?ver= asset URLs and bootstrap a second chat bundle when a
- * cached guest page is refreshed into the member's selected style.
+ * legacy user-selectable style is database-owned. WF5 is designer-managed, but
+ * deploys must update only its two chat bootstrap templates rather than sweep
+ * unrelated designer files. The optional profile and expected designer mode
+ * make that narrow operation explicit and fail closed.
  *
  * Usage:
- *   php sync-xenforo-db-style.php <xenforo-root> <template-source-dir> <style-id>
+ *   php sync-xenforo-db-style.php <xenforo-root> <template-source-dir> <style-id> [full|bootstrap] [expected-designer-mode]
  */
 
 if (PHP_SAPI !== 'cli')
@@ -23,6 +24,8 @@ if (PHP_SAPI !== 'cli')
 $xenForoRoot = $argv[1] ?? '';
 $sourceDir = $argv[2] ?? '';
 $styleId = isset($argv[3]) ? (int)$argv[3] : 0;
+$profile = $argv[4] ?? 'full';
+$expectedDesignerMode = $argv[5] ?? '';
 
 $xenForoRoot = realpath($xenForoRoot) ?: '';
 $sourceDir = realpath($sourceDir) ?: '';
@@ -33,15 +36,28 @@ if ($xenForoRoot === '' || !is_file($xenForoRoot . '/src/XF.php'))
 }
 if ($sourceDir === '' || !is_dir($sourceDir) || $styleId < 1)
 {
-	fwrite(STDERR, "Usage: php sync-xenforo-db-style.php <xenforo-root> <template-source-dir> <style-id>\n");
+	fwrite(STDERR, "Usage: php sync-xenforo-db-style.php <xenforo-root> <template-source-dir> <style-id> [full|bootstrap] [expected-designer-mode]\n");
 	exit(2);
 }
 
-$templates = [
-	'_page_node.313' => '_page_node.313',
-	'_widget_ai_chat' => '_widget_ai_chat.html',
-	'react_chat_container' => 'react_chat_container.html',
-];
+$templates = match ($profile)
+{
+	'full' => [
+		'_page_node.313' => '_page_node.313',
+		'_widget_ai_chat' => '_widget_ai_chat.html',
+		'react_chat_container' => 'react_chat_container.html',
+	],
+	'bootstrap' => [
+		'_page_node.313' => '_page_node.313',
+		'_widget_ai_chat' => '_widget_ai_chat.html',
+	],
+	default => null,
+};
+if ($templates === null)
+{
+	fwrite(STDERR, "Unknown chat template profile: {$profile}\n");
+	exit(2);
+}
 $sources = [];
 foreach ($templates as $title => $fileName)
 {
@@ -67,7 +83,15 @@ if (!$style)
 	fwrite(STDERR, "XenForo style {$styleId} does not exist\n");
 	exit(1);
 }
-if ($style->designer_mode)
+if ($expectedDesignerMode !== '')
+{
+	if ($style->designer_mode !== $expectedDesignerMode)
+	{
+		fwrite(STDERR, "Refusing scoped sync: style {$styleId} is not designer mode {$expectedDesignerMode}\n");
+		exit(1);
+	}
+}
+elseif ($style->designer_mode)
 {
 	fwrite(STDERR, "Refusing database sync for designer-managed style {$styleId}\n");
 	exit(1);
@@ -114,4 +138,3 @@ fwrite(
 	"Synchronized " . count($templates) . " chat templates for database style {$styleId} "
 		. "({$changed} changed, {$recompiled} recompiled).\n"
 );
-

@@ -28,7 +28,7 @@ for legacy in "$legacy_local" "$legacy_remote"; do
   grep -q 'legacy-main-js' "$legacy/static/js/main.js" || fail_test "$legacy lost the old payload"
   grep -q 'legacy original htaccess' "$legacy/.htaccess.pre-migrate" \
     || fail_test "$legacy did not preserve the original .htaccess"
-  grep -q 'sandbox htaccess' "$legacy/.htaccess" || fail_test "$legacy did not get the release .htaccess"
+  grep -q 'xenforo-templates' "$legacy/.htaccess" || fail_test "$legacy did not get the hardened release .htaccess"
   check_inventory "$legacy" || fail_test "$legacy inventory invalid"
 done
 

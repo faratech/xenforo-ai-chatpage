@@ -17,7 +17,7 @@ run_deploy || rc=$?
 
 assert_link_target "$PUBLIC_LINK" "$r1"
 assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$r1")"
-assert_templates_match_bundle "$r1/xenforo-templates"
+assert_templates_match_bundle "$(release_bundle "$r1")"
 
 # purge attempts: baseline 1 + failed forward 1 + rollback re-purge 1 = 3
 assert_eq "$(stub_calls curl 'purge_cache')" 3 "purge attempts"

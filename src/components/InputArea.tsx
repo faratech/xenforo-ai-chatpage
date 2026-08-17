@@ -45,6 +45,7 @@ export const InputArea = memo<InputAreaProps>(({
 }) => {
   const theme = useTheme();
   const isOverLimit = inputBytes > maxMessageBytes;
+  const isNearLimit = inputBytes >= Math.floor(maxMessageBytes * 0.8);
   const canSend = !!input.trim() && !isLoading && !isOverLimit;
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -126,6 +127,8 @@ export const InputArea = memo<InputAreaProps>(({
               },
               htmlInput: {
                 'aria-label': 'Type your message',
+                'aria-describedby': 'wf-composer-help wf-composer-count',
+                'aria-invalid': isOverLimit || undefined,
               },
             }}
             // Deliberately not disabled while loading. Disabling the focused
@@ -140,6 +143,7 @@ export const InputArea = memo<InputAreaProps>(({
               <IconButton
                 onClick={onToggleMute}
                 aria-label={isMuted ? 'Enable read-aloud' : 'Mute read-aloud'}
+                aria-pressed={!isMuted}
                 size="small"
                 sx={{ color: 'text.secondary' }}
               >
@@ -187,20 +191,25 @@ export const InputArea = memo<InputAreaProps>(({
           direction="row"
           sx={{ justifyContent: 'space-between', mt: 1, px: 0.5, gap: 1, flexWrap: 'wrap' }}
         >
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+          <Typography id="wf-composer-help" variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
             {isListening ? 'Listening… speak now' : 'Press Enter to send · Shift+Enter for new line'}
           </Typography>
           <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
             {ASSISTANT_NAME} can make mistakes
           </Typography>
           <Typography
+            id="wf-composer-count"
             variant="caption"
             // Announce only once the limit is exceeded. A live region here
             // queued an announcement of the byte count on every keystroke.
             aria-live={isOverLimit ? 'polite' : 'off'}
             sx={{ color: isOverLimit ? 'error.main' : 'text.secondary', fontSize: 11 }}
           >
-            {inputBytes} / {maxMessageBytes} bytes
+            {isOverLimit
+              ? `Message is ${inputBytes - maxMessageBytes} bytes too long`
+              : isNearLimit
+                ? `${maxMessageBytes - inputBytes} bytes remaining`
+                : `${inputBytes} / ${maxMessageBytes} bytes`}
           </Typography>
         </Stack>
       </Box>

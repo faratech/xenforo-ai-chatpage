@@ -40,16 +40,25 @@ require $xenForoRoot . '/src/XF.php';
 \XF::start($xenForoRoot);
 \XF::setupApp('XF\\Pub\\App');
 
-$templates = [
+$fullTemplates = [
 	'_page_node.313' => '_page_node.313',
 	'_widget_ai_chat' => '_widget_ai_chat.html',
 	'react_chat_container' => 'react_chat_container.html',
 ];
-$designers = ['wf3', 'wf3_domperf'];
+$bootstrapTemplates = [
+	'_page_node.313' => '_page_node.313',
+	'_widget_ai_chat' => '_widget_ai_chat.html',
+];
+$designers = [
+	'wf3' => $fullTemplates,
+	'wf3_domperf' => $fullTemplates,
+	// WF5 rollback is deliberately limited to the two chat bootstrap templates.
+	'wf5' => $bootstrapTemplates,
+];
 $db = \XF::db();
 $written = 0;
 
-foreach ($designers AS $designer)
+foreach ($designers AS $designer => $templates)
 {
 	$styleRows = $db->fetchAll(
 		'SELECT style_id FROM xf_style WHERE designer_mode = ?',

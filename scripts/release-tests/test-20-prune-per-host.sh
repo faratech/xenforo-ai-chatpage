@@ -14,6 +14,8 @@ r2="$(current_release)"
 # Stale releases that exist on only one host each
 mkdir -p "$RELEASE_ROOT/00000000T000000Z-old-a" "$RELEASE_ROOT/00000000T000000Z-old-b"
 mkdir -p "$PEER_RELEASE_ROOT/00000000T000000Z-old-c"
+mkdir -p "$DEPLOY_PRIVATE_ROOT/00000000T000000Z-old-a" "$DEPLOY_PRIVATE_ROOT/00000000T000000Z-old-b"
+mkdir -p "$PEER_PRIVATE_ROOT/00000000T000000Z-old-c"
 touch -d '2020-01-01 00:00:00' \
   "$RELEASE_ROOT/00000000T000000Z-old-a" \
   "$RELEASE_ROOT/00000000T000000Z-old-b" \
@@ -30,11 +32,14 @@ assert_exists "$r2"
 assert_exists "$r1"
 assert_absent "$RELEASE_ROOT/00000000T000000Z-old-a"
 assert_absent "$RELEASE_ROOT/00000000T000000Z-old-b"
+assert_absent "$DEPLOY_PRIVATE_ROOT/00000000T000000Z-old-a"
+assert_absent "$DEPLOY_PRIVATE_ROOT/00000000T000000Z-old-b"
 
 assert_exists "$(to_peer_path "$r3")"
 assert_exists "$(to_peer_path "$r2")"
 assert_exists "$(to_peer_path "$r1")"
 assert_absent "$PEER_RELEASE_ROOT/00000000T000000Z-old-c"
+assert_absent "$PEER_PRIVATE_ROOT/00000000T000000Z-old-c"
 
 # The recovery area is never pruned as a release
 assert_exists "$RELEASE_ROOT/.recovery"

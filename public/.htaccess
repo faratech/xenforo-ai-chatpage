@@ -1,3 +1,17 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  # WF private release controls: deny legacy releases that still carry these
+  # paths inside the public directory. New releases store them outside the
+  # public symlink as well.
+  RewriteRule ^(?:RELEASE-INVENTORY\.sha256|RELEASE-METADATA\.json|xenforo-templates(?:/.*)?)$ - [F,L,NC]
+</IfModule>
+
+<IfModule mod_authz_core.c>
+  <FilesMatch "^(?:RELEASE-INVENTORY\.sha256|RELEASE-METADATA\.json)$">
+    Require all denied
+  </FilesMatch>
+</IfModule>
+
 <IfModule mod_headers.c>
   <FilesMatch "^(?:index\.html|manifest\.json|bot-avatar\.webp|main\.(?:js|css))$">
     Header always set Cache-Control "no-cache, must-revalidate"

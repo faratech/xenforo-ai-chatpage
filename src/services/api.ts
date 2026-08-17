@@ -16,7 +16,7 @@ import type {
   StreamActivity,
   StreamDiagnostics,
 } from '../types';
-import { generateTurnId } from '../utils/helpers';
+import { generateTurnId } from '../utils/ids';
 
 const apiBase = ENV.getApiBase();
 
@@ -28,9 +28,17 @@ export const CHAT_FIRST_BYTE_TIMEOUT_MS = 130_000;
 export const READ_INACTIVITY_TIMEOUT_MS = 45_000;
 /** TTS is the one call that used to run unbounded; a stalled worker muted every later reply. */
 export const TTS_REQUEST_TIMEOUT_MS = 20_000;
+/** Hard transport ceiling; keeps a malformed/unbounded SSE response out of memory. */
+export const CHAT_STREAM_MAX_BYTES = 2 * 1024 * 1024;
 
 /** SSE frame separator. Kept module-level so the stream loop does not recompile it per frame. */
 const SSE_FRAME_SEPARATOR = /\r?\n\r?\n/;
+
+const notifyIdentityChanged = (): void => {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('wf-chat-identity-changed'));
+  }
+};
 
 /**
  * Human labels for the work the assistant does before answering. The backend
@@ -74,9 +82,11 @@ const activityLabel = (key: string | undefined): string | null => {
 
 interface SendMessagePayload {
   message: string;
+  expected_identity_id?: string;
   captcha_token?: string;
   client_conversation_id?: string;
   reset_conversation?: boolean;
+  has_local_history?: boolean;
   history?: ChatMessageHistoryItem[];
 }
 
@@ -84,6 +94,7 @@ export interface APIErrorOptions {
   status?: number;
   code?: string;
   retryable?: boolean;
+  retryAfterMs?: number;
   partialText?: string;
   annotations?: Annotation[];
   responseId?: string;
@@ -112,6 +123,8 @@ export class APIError extends StreamStateError {
   readonly status?: number;
   readonly code?: string;
   readonly retryable: boolean;
+  /** Server-directed delay before this operation may be tried again. */
+  readonly retryAfterMs?: number;
 
   constructor(message: string, options: APIErrorOptions = {}) {
     super(message, options);
@@ -119,6 +132,7 @@ export class APIError extends StreamStateError {
     this.status = options.status;
     this.code = options.code;
     this.retryable = options.retryable ?? false;
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
@@ -219,6 +233,34 @@ function errorMessage(errorData: ErrorResponse, fallback: string): string {
 function errorCode(errorData: ErrorResponse): string | undefined {
   return typeof errorData.code === 'string' ? errorData.code : undefined;
 }
+
+const RETRY_DELAY_TIMER_MAX_MS = 2_147_483_647;
+
+const retryDelayFromSeconds = (value: unknown): number | undefined => {
+  const seconds = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.min(Math.ceil(seconds * 1_000), RETRY_DELAY_TIMER_MAX_MS);
+};
+
+function retryAfterMs(response: Response, errorData: ErrorResponse): number | undefined {
+  const structured = retryDelayFromSeconds(errorData.retry_after);
+  if (structured !== undefined) return structured;
+
+  const header = response.headers?.get?.('retry-after')?.trim();
+  if (!header) return undefined;
+  const seconds = retryDelayFromSeconds(header);
+  if (seconds !== undefined) return seconds;
+
+  const date = Date.parse(header);
+  if (!Number.isFinite(date)) return undefined;
+  return Math.min(Math.max(0, date - Date.now()), RETRY_DELAY_TIMER_MAX_MS);
+}
+
+const isIdentityLockResponse = (status: number | undefined, code: string | undefined): boolean => (
+  status === 428 || code === 'identity_changed' || code === 'identity_required'
+);
 
 async function readErrorResponse(response: Response): Promise<ErrorResponse> {
   try {
@@ -380,12 +422,15 @@ async function fetchAPI<T>(
 
     if (!response.ok) {
       const errorData = await readErrorResponse(response);
+      const code = errorCode(errorData);
+      if (isIdentityLockResponse(response.status, code)) notifyIdentityChanged();
       throw new APIError(
         errorMessage(errorData, `HTTP ${response.status}: ${response.statusText}`),
         {
           status: response.status,
-          code: errorCode(errorData),
+          code,
           retryable: isRetryableStatus(response.status),
+          retryAfterMs: retryAfterMs(response, errorData),
         }
       );
     }
@@ -409,6 +454,12 @@ async function fetchAPI<T>(
  * Chat API Service.
  */
 export class ChatAPI {
+  private static expectedIdentityId = '';
+
+  static setExpectedIdentityId(identityId: string): void {
+    this.expectedIdentityId = identityId;
+  }
+
   static async getUserData(): Promise<UserData> {
     return fetchAPI<UserData>(ENV.ENDPOINTS.USER_DATA, {
       method: 'POST',
@@ -426,7 +477,7 @@ export class ChatAPI {
   static async verifyCaptcha(token: string): Promise<{ success: boolean }> {
     return fetchAPI<{ success: boolean }>(ENV.ENDPOINTS.TURNSTILE_VERIFY, {
       method: 'POST',
-      body: JSON.stringify({ action: 'verifyCaptcha', token }),
+      body: JSON.stringify({ action: 'verifyCaptcha', token, expected_identity_id: this.expectedIdentityId }),
     });
   }
 
@@ -439,6 +490,7 @@ export class ChatAPI {
       resetConversation?: boolean;
       history?: ChatMessageHistoryItem[];
       turnId?: string;
+      includeHistory?: boolean;
       onChunk?: (partialText: string, annotations: Annotation[]) => void;
       onActivity?: (activities: StreamActivity[]) => void;
     } = {}
@@ -458,10 +510,14 @@ export class ChatAPI {
     const startedAt = Date.now();
 
     const payload: SendMessagePayload = { message };
+    if (this.expectedIdentityId) payload.expected_identity_id = this.expectedIdentityId;
     if (captchaToken) payload.captcha_token = captchaToken;
     if (conversationId) payload.client_conversation_id = conversationId;
     if (resetConversation) payload.reset_conversation = true;
-    if (history?.length) payload.history = history;
+    if (history?.length) {
+      if (resetConversation || options.includeHistory) payload.history = history;
+      else payload.has_local_history = true;
+    }
 
     // One deadline covers connection, headers, and the first body byte.
     const firstByte = withDeadline(CHAT_FIRST_BYTE_TIMEOUT_MS, signal);
@@ -498,13 +554,19 @@ export class ChatAPI {
       const errorData = await readErrorResponse(response);
       firstByte.clear();
       if (errorData.captcha_required) throw new CaptchaRequiredError();
+      const code = errorCode(errorData);
+      if (isIdentityLockResponse(response.status, code)) notifyIdentityChanged();
+      if (code === 'history_required' && history?.length && !options.includeHistory) {
+        return this.sendMessage(message, { ...options, turnId, includeHistory: true });
+      }
 
       throw new APIError(
         errorMessage(errorData, `Server error: ${response.status} ${response.statusText}`),
         {
           status: response.status,
-          code: errorCode(errorData),
+          code,
           retryable: isRetryableStatus(response.status),
+          retryAfterMs: retryAfterMs(response, errorData),
         }
       );
     }
@@ -512,6 +574,11 @@ export class ChatAPI {
     if (!response.body) {
       firstByte.clear();
       throw new StreamProtocolError('ReadableStream not supported');
+    }
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (!contentType.startsWith('text/event-stream')) {
+      firstByte.clear();
+      throw new StreamProtocolError('The chat service returned a non-streaming response');
     }
 
     return this.processStreamingResponse(
@@ -660,10 +727,13 @@ export class ChatAPI {
           ? parsedData.retryable
           : status === undefined || isRetryableStatus(status);
 
+        if (isIdentityLockResponse(status, code)) notifyIdentityChanged();
+
         throw new APIError(detail || 'AI service error', {
           status,
           code,
           retryable,
+          retryAfterMs: retryDelayFromSeconds(parsedData.retry_after),
           ...state(),
         });
       }
@@ -838,8 +908,11 @@ export class ChatAPI {
           firstByte.clear();
         }
 
+        bytesReceived += value.byteLength;
+        if (bytesReceived > CHAT_STREAM_MAX_BYTES) {
+          throw protocolError('The streaming response exceeded the safe size limit');
+        }
         const decoded = decoder.decode(value, { stream: true });
-        bytesReceived += decoded.length;
         buffer += decoded;
         // Consume the separator's real length. It is 2, 3 or 4 bytes
         // (\n\n, \r\n\n, \n\r\n, \r\n\r\n); inferring it from the first
@@ -952,7 +1025,11 @@ export class ChatAPI {
   ): Promise<{ success: boolean }> {
     const result = await fetchAPI<{ success?: boolean }>(ENV.ENDPOINTS.CHAT, {
       method: 'POST',
-      body: JSON.stringify({ action, client_conversation_id: conversationId }),
+      body: JSON.stringify({
+        action,
+        client_conversation_id: conversationId,
+        expected_identity_id: this.expectedIdentityId,
+      }),
     });
     if (result?.success !== true) {
       throw new APIError('The server did not confirm the conversation was cleared', {
@@ -986,7 +1063,7 @@ export class ChatAPI {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, expected_identity_id: this.expectedIdentityId }),
           signal: deadline.signal,
         });
       } catch (error) {
@@ -1004,10 +1081,14 @@ export class ChatAPI {
       }
 
       if (!response.ok) {
-        throw new APIError('TTS request failed', {
+        const errorData = await readErrorResponse(response);
+        const code = errorCode(errorData) ?? 'tts_request_failed';
+        if (isIdentityLockResponse(response.status, code)) notifyIdentityChanged();
+        throw new APIError(errorMessage(errorData, 'TTS request failed'), {
           status: response.status,
-          code: 'tts_request_failed',
+          code,
           retryable: isRetryableStatus(response.status),
+          retryAfterMs: retryAfterMs(response, errorData),
         });
       }
 

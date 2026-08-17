@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily retention for inactive WindowsForum AI chat conversations
+
+[Timer]
+# Installed after 03:00 UTC so the first destructive run has an observation day.
+OnCalendar=*-*-* 03:00:00 UTC
+RandomizedDelaySec=20min
+Persistent=true
+Unit=wf-chat-conversation-prune.service
+
+[Install]
+WantedBy=timers.target

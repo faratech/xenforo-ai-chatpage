@@ -47,15 +47,18 @@ const citationReactKey = (annotation: Annotation, index: number): string => {
   }
 };
 
+const MAX_EDIT_BYTES = 4096;
+const editEncoder = new TextEncoder();
+
 const SourcesList = ({ annotations }: { annotations: Annotation[] }) => (
-  <Box className="message-file-sources" sx={{ mt: 1.25, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
+  <Box component="section" aria-label="Sources" className="message-file-sources" sx={{ mt: 1.25, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
     <Typography component="div" sx={{ fontSize: 12, color: 'text.secondary', mb: 0.5 }}>Sources</Typography>
+    <Box component="ol" sx={{ m: 0, pl: 2.5 }}>
     {annotations.map((annotation, index) => {
       // Only validated http(s) URLs become links; everything else is text.
       const safeUrl = annotation.type === 'url_citation' ? parseHttpUrl(annotation.url) : null;
       return (
-        <Typography key={citationReactKey(annotation, index)} component="div" sx={{ fontSize: 12 }}>
-          [{index + 1}]{' '}
+        <Typography key={citationReactKey(annotation, index)} component="li" sx={{ fontSize: 12 }}>
           {safeUrl ? (
             <a href={safeUrl.href} target="_blank" rel="noopener noreferrer">
               {citationLabel(annotation)}
@@ -66,6 +69,7 @@ const SourcesList = ({ annotations }: { annotations: Annotation[] }) => (
         </Typography>
       );
     })}
+    </Box>
   </Box>
 );
 
@@ -93,6 +97,7 @@ export const Message = memo<MessageProps>(({
   const isUser = msg.role === 'user';
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
+  const [editError, setEditError] = useState('');
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const renderedContent = useMemo(
@@ -137,11 +142,24 @@ export const Message = memo<MessageProps>(({
   }, [msg.rawContent]);
 
   const handleEdit = useCallback(() => {
-    if (isEditing && editText.trim()) {
-      onEdit(msg.id, editText);
+    if (isEditing) {
+      const trimmed = editText.trim();
+      const bytes = editEncoder.encode(trimmed).byteLength;
+      if (!trimmed) {
+        setEditError('Enter a message before saving.');
+        return;
+      }
+      if (bytes > MAX_EDIT_BYTES) {
+        const excess = bytes - MAX_EDIT_BYTES;
+        setEditError(`Message is ${excess} ${excess === 1 ? 'byte' : 'bytes'} too long.`);
+        return;
+      }
+      setEditError('');
+      onEdit(msg.id, trimmed);
       setIsEditing(false);
     } else {
       setEditText(msg.rawContent);
+      setEditError('');
       setIsEditing(true);
     }
   }, [isEditing, editText, msg.id, msg.rawContent, onEdit]);
@@ -232,6 +250,13 @@ export const Message = memo<MessageProps>(({
         autoFocus
         variant="outlined"
         size="small"
+        label="Edit message"
+        error={Boolean(editError)}
+        helperText={editError || `${editEncoder.encode(editText).byteLength} / ${MAX_EDIT_BYTES} bytes`}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') setIsEditing(false);
+          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) handleEdit();
+        }}
       />
       <Stack direction="row" spacing={1}>
         <Button size="small" variant="contained" onClick={handleEdit} startIcon={<CheckIcon />}>
@@ -245,7 +270,7 @@ export const Message = memo<MessageProps>(({
   );
 
   return (
-    <Box sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
+    <Box component="article" aria-label={`${isUser ? userName : ASSISTANT_NAME} message`} sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
       <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
         {isUser ? (
           /* ---- User: right-aligned blue bubble + avatar ---- */
@@ -277,7 +302,7 @@ export const Message = memo<MessageProps>(({
               )}
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 {time && (
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+                  <Typography component="time" dateTime={new Date(msg.timestamp).toISOString()} variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
                     {time}
                   </Typography>
                 )}
@@ -302,7 +327,7 @@ export const Message = memo<MessageProps>(({
             />
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.5 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700, color: 'text.primary' }}>
+                <Typography component="span" variant="subtitle2" sx={{ fontWeight: 700, color: 'text.primary' }}>
                   {ASSISTANT_NAME}
                 </Typography>
                 <Box
@@ -323,7 +348,7 @@ export const Message = memo<MessageProps>(({
                   AI
                 </Box>
                 {time && (
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+                  <Typography component="time" dateTime={new Date(msg.timestamp).toISOString()} variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
                     {time}
                   </Typography>
                 )}

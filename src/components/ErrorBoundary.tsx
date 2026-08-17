@@ -5,6 +5,7 @@ import Button from '@mui/material/Button';
 import Paper from '@mui/material/Paper';
 import WarningIcon from '@mui/icons-material/Warning';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import { reportClientEvent } from '../services/telemetry';
 
 interface Props {
   children: ReactNode;
@@ -43,6 +44,7 @@ export class ErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     // Log error details to console for debugging
     console.error('ErrorBoundary caught an error:', error, errorInfo);
+    reportClientEvent('app_error', { errorCode: error.name || 'react_error' });
 
     // Update state with error info
     this.setState({

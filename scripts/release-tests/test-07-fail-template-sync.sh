@@ -27,7 +27,7 @@ snapshot="$(state_field template_snapshot)"
 [[ -n "$snapshot" && -d "$snapshot" ]] || fail_test "template snapshot missing from state"
 grep -q 'v1' "$snapshot/wf3/react_chat_container.html" \
   || fail_test "rollback snapshot did not capture the pre-import database template"
-assert_fake_db_matches_bundle "$r1/xenforo-templates"
+assert_fake_db_matches_bundle "$(release_bundle "$r1")"
 grep -q 'v2' "$XENFORO_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \
   || fail_test "failure recovery destroyed the pending local designer source"
 grep -q 'v2' "$PEER_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \

@@ -14,9 +14,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `./deploy.sh rollback` - Atomically restore the previous production release
 
 ### Deployment
-The app is served through the `/web/public_html/chatpage` symlink at `https://windowsforum.com/chatpage`. Releases are staged under `/web/releases/xenforo-ai-chatpage/` on both GCP and OCI; `deploy.sh` switches both symlinks only after all checks, peer staging, and release-reference validation pass. It then uses `xf-designer:sync-templates` for `wf3` and `wf3_domperf`; it never edits compiled template caches directly.
+The app is served through the `/web/public_html/chatpage` symlink at `https://windowsforum.com/chatpage`. Public assets are staged under `/web/releases/xenforo-ai-chatpage/<release-id>/`; inventories, backend hashes, and rollback template bundles are stored separately under `/web/releases/xenforo-ai-chatpage/.private/<release-id>/` so they are never reachable through the public symlink. When peer mode is deliberately enabled, both trees are staged and verified before either public symlink switches.
 
-**Use `DEPLOY_SINGLE_NODE=1 npm run deploy` on the current topology.** Production has been a single GCP node since 2026-07-13. The OCI peer still answers SSH and completes a TLS handshake with a valid certificate — so peer *staging* succeeds — but it drops HTTPS requests that do not come from Cloudflare, which makes `verify_live_release`'s peer origin probes fail unconditionally. Without the flag a deploy aborts at final verification (after the symlink switch and template import) and the automatic rollback then fails its own re-verification for the same reason. The flag skips every peer staging, import, purge, prune, and probe step; all local checks, the atomic switch, rollback, the XenForo template import, the Cloudflare purge, and local-origin plus public-edge verification still run.
+Production releases must come from a committed, clean worktree. `npm run deploy` refuses dirty state by default; `DEPLOY_ALLOW_DIRTY=1` is an emergency-only override and records `working_tree_dirty: true` in the private release metadata. The production gate lints the available chat backend PHP files and runs `/web/tests/test_chat_predicates.php` when present. It imports only `wf3` and `wf3_domperf` style-wide; WF5/style 51 is updated through a snapshot-backed, two-template scoped sync so unrelated WF5 designer drift is never swept.
+
+**Single-node mode is the safe default.** Production has been a single GCP node since 2026-07-13, so `npm run deploy` defaults `DEPLOY_SINGLE_NODE=1`. Set `DEPLOY_SINGLE_NODE=0` only after a serving peer is deliberately reintroduced and its origin probes pass. Single-node mode skips every peer staging, import, purge, prune, and probe step; all local checks, the atomic switch, rollback, the XenForo template import, the Cloudflare purge, and local-origin plus public-edge verification still run.
 
 The deploy refuses to run when any template in `wf3`/`wf3_domperf` has drifted from `_metadata.json`, because its final step is a style-wide designer import that would sweep unrelated pending template edits into XenForo's database. Clear the drift deliberately first — `php cmd.php xf-designer:import-templates <style>` then `xf-designer:rebuild-metadata <style>` from `/web/public_html` — rather than bypassing the guard.
 
@@ -252,10 +254,11 @@ Citations rendered in "Sources" section at message end.
 ## Testing Deployment Locally
 
 Before deploying:
-1. Run the full gate: `npm run check`
-2. Confirm `dist/index.html` uses `main.js?v=2` and `main.css?v=2`
-3. Test locally: `npm run preview`
-4. Coordinate the backend-first rollout, then deploy: `npm run deploy`
+1. Commit the complete intended release and confirm `git status --short` is empty.
+2. Run the full gate: `npm run check`
+3. Confirm `dist/index.html` uses `main.js?v=2` and `main.css?v=2`
+4. Test locally: `npm run preview`
+5. Coordinate the backend-first rollout, then deploy from the clean commit: `npm run deploy`
 
 ## Integration with XenForo
 

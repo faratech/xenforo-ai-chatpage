@@ -7,14 +7,16 @@
 # Guarantees:
 #   - Exclusive deploy lock (flock on $DEPLOY_LOCK_FILE); concurrent runs fail fast.
 #   - Clean-worktree enforcement (override with DEPLOY_ALLOW_DIRTY=1, logged loudly).
-#   - SHA-256 release inventories (RELEASE-INVENTORY.sha256) written at staging
-#     time and validated locally and on the peer before anything is switched.
+#   - SHA-256 release inventories and metadata are stored under
+#     $DEPLOY_PRIVATE_ROOT, outside the public release symlink, and validated
+#     locally and on the peer before anything is switched.
 #   - Recovery state ($DEPLOY_STATE_FILE, JSON) rewritten atomically after every
 #     irreversible step so a crashed deploy can be diagnosed and reconciled.
-#   - XenForo chat template payloads are bundled into every release
-#     ($release/xenforo-templates/<style>/<template>); the live templates are
+#   - XenForo chat template payloads are bundled privately under
+#     $DEPLOY_PRIVATE_ROOT/<release>/xenforo-templates. The live templates are
 #     snapshotted before any switch, and both forward activation and rollback
-#     apply the selected release's bundle + designer import on BOTH nodes.
+#     apply the selected release's bundle on BOTH nodes. WF5/style 51 is synced
+#     only for its two owned chat templates; it is never imported style-wide.
 #   - Any failure after activation begins restores the previous assets AND the
 #     snapshotted templates, re-runs designer import, re-purges Cloudflare and
 #     re-verifies the restored state before exiting nonzero.
@@ -35,6 +37,8 @@
 #     "previous_local": "...", "previous_remote": "...",
 #     "legacy_local": "...", "legacy_remote": "...",
 #     "template_snapshot": "<dir under $DEPLOY_RECOVERY_ROOT>",
+#     "release_metadata": "<private RELEASE-METADATA.json path>",
+#     "backend_hashes": {"chat.php":"...", ...},
 #     "migrated_local": bool, "migrated_remote": bool,
 #     "fresh_local": bool, "fresh_remote": bool,
 #     "local_switched": bool, "remote_switched": bool,
@@ -74,6 +78,7 @@ readonly CLOUDFLARE_ENV_FILE="${CLOUDFLARE_ENV_FILE:-/web/.env}"
 readonly DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-$RELEASE_ROOT/.deploy.lock}"
 readonly DEPLOY_STATE_FILE="${DEPLOY_STATE_FILE:-$RELEASE_ROOT/.deploy-state.json}"
 readonly DEPLOY_RECOVERY_ROOT="${DEPLOY_RECOVERY_ROOT:-$RELEASE_ROOT/.recovery}"
+readonly DEPLOY_PRIVATE_ROOT="${DEPLOY_PRIVATE_ROOT:-$RELEASE_ROOT/.private}"
 readonly DEPLOY_ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
 # Single-node topology (see /web/CLAUDE.md, 2026-07-13): the OCI peer no longer
 # serves. It still answers SSH and completes a TLS handshake, but drops HTTPS
@@ -81,16 +86,26 @@ readonly DEPLOY_ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
 # never pass. With this set, every peer staging, import, and probe step is
 # skipped; all local checks, the atomic switch, rollback, the XenForo template
 # import, the Cloudflare purge, and local-origin/public-edge verification stay.
-readonly DEPLOY_SINGLE_NODE="${DEPLOY_SINGLE_NODE:-0}"
+readonly DEPLOY_SINGLE_NODE="${DEPLOY_SINGLE_NODE:-1}"
 readonly DEPLOY_RETRY_DELAY="${DEPLOY_RETRY_DELAY:-2}"
 readonly DEPLOY_PUBLIC_RETRY_DELAY="${DEPLOY_PUBLIC_RETRY_DELAY:-5}"
 readonly DEPLOY_SSH_CONNECT_TIMEOUT="${DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
 readonly DEPLOY_PROBE_ATTEMPTS="${DEPLOY_PROBE_ATTEMPTS:-3}"
 readonly INVENTORY_NAME="RELEASE-INVENTORY.sha256"
+readonly RELEASE_METADATA_NAME="RELEASE-METADATA.json"
 
 readonly -a XF_STYLES=(wf3 wf3_domperf)
 readonly -a XF_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
+readonly WF5_STYLE="wf5"
+readonly WF5_STYLE_ID="${WF5_STYLE_ID:-51}"
+readonly -a WF5_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html)
 readonly LEGACY_CHAT_STYLE_ID="${LEGACY_CHAT_STYLE_ID:-17}"
+readonly BACKEND_TEST_FILE="${BACKEND_TEST_FILE:-$(dirname "$XENFORO_ROOT")/tests/test_chat_predicates.php}"
+readonly -a BACKEND_PHP_FILES=(
+  "$XENFORO_ROOT/chat.php"
+  "$XENFORO_ROOT/tts.php"
+  "$XENFORO_ROOT/wf_chat_predicates.php"
+)
 
 ACTION=""
 STATE_ENABLED=0
@@ -109,11 +124,16 @@ REMOTE_PREVIOUS_TARGET=""
 LEGACY_LOCAL=""
 LEGACY_REMOTE=""
 TEMPLATE_SNAPSHOT_DIR=""
+RELEASE_METADATA_FILE=""
 TARGET_RELEASE=""
 PREPARED_RELEASE=""
 PEER_STATE_NOTE=""
 NEXT_LINK=""
 TEMP_FILES=()
+WORKTREE_DIRTY=0
+BACKEND_CHAT_HASH=""
+BACKEND_TTS_HASH=""
+BACKEND_PREDICATES_HASH=""
 
 log() {
   printf '%s\n' "$*"
@@ -150,6 +170,54 @@ json_bool() {
   if (($1)); then printf 'true'; else printf 'false'; fi
 }
 
+private_release_dir() {
+  local release="$1"
+  printf '%s/%s' "$DEPLOY_PRIVATE_ROOT" "$(basename -- "$release")"
+}
+
+inventory_for_release() {
+  local release="$1" private
+  private="$(private_release_dir "$release")"
+  if [[ -f "$private/$INVENTORY_NAME" ]]; then
+    printf '%s' "$private/$INVENTORY_NAME"
+  elif [[ -f "$release/$INVENTORY_NAME" ]]; then
+    printf '%s' "$release/$INVENTORY_NAME"
+  fi
+}
+
+template_bundle_for_release() {
+  local release="$1" private
+  private="$(private_release_dir "$release")"
+  if [[ -d "$private/xenforo-templates" ]]; then
+    printf '%s' "$private/xenforo-templates"
+  elif [[ -d "$release/xenforo-templates" ]]; then
+    # Compatibility with releases created before private control data.
+    printf '%s' "$release/xenforo-templates"
+  fi
+}
+
+backend_hashes_json() {
+  printf '{"chat.php":%s,"tts.php":%s,"wf_chat_predicates.php":%s}' \
+    "$(json_str "$BACKEND_CHAT_HASH")" \
+    "$(json_str "$BACKEND_TTS_HASH")" \
+    "$(json_str "$BACKEND_PREDICATES_HASH")"
+}
+
+capture_backend_hashes() {
+  local file hash
+  for file in "${BACKEND_PHP_FILES[@]}"; do
+    hash=""
+    if [[ -f "$file" ]]; then
+      hash="$(sha256sum -- "$file" | awk '{print $1}')" || return 1
+    fi
+    case "$(basename -- "$file")" in
+      chat.php) BACKEND_CHAT_HASH="$hash" ;;
+      tts.php) BACKEND_TTS_HASH="$hash" ;;
+      wf_chat_predicates.php) BACKEND_PREDICATES_HASH="$hash" ;;
+    esac
+  done
+}
+
 # record_state <phase> [status] [note]
 record_state() {
   ((STATE_ENABLED)) || return 0
@@ -168,6 +236,8 @@ record_state() {
     printf '  "legacy_local": %s,\n' "$(json_str "$LEGACY_LOCAL")"
     printf '  "legacy_remote": %s,\n' "$(json_str "$LEGACY_REMOTE")"
     printf '  "template_snapshot": %s,\n' "$(json_str "$TEMPLATE_SNAPSHOT_DIR")"
+    printf '  "release_metadata": %s,\n' "$(json_str "$RELEASE_METADATA_FILE")"
+    printf '  "backend_hashes": %s,\n' "$(backend_hashes_json)"
     printf '  "migrated_local": %s,\n' "$(json_bool "$MIGRATED_LOCAL")"
     printf '  "migrated_remote": %s,\n' "$(json_bool "$MIGRATED_REMOTE")"
     printf '  "fresh_local": %s,\n' "$(json_bool "$FRESH_LOCAL")"
@@ -201,6 +271,7 @@ ensure_clean_worktree() {
   dirty="$(git -C "$APP_ROOT" status --porcelain -- .)" \
     || die "git status failed in $APP_ROOT"
   if [[ -n "$dirty" ]]; then
+    WORKTREE_DIRTY=1
     if [[ "$DEPLOY_ALLOW_DIRTY" == 1 ]]; then
       warn "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
       warn "!!! DEPLOY_ALLOW_DIRTY=1: deploying from a DIRTY worktree. !!!"
@@ -259,8 +330,34 @@ peer_rsync() {
     -e "ssh -i $PEER_SSH_KEY -o BatchMode=yes -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT -o StrictHostKeyChecking=no"
 }
 
-# generate_inventory <dir>  — sorted sha256 of every file, relative paths.
+# generate_inventory <public-release-dir> — sorted SHA-256 records for every
+# public artifact and private control file. Virtual public/ and private/
+# prefixes keep the manifest portable between nodes while the manifest itself
+# stays outside the public symlink.
 generate_inventory() {
+  local dir="$1" private tmp
+  private="$(private_release_dir "$dir")"
+  mkdir -p -- "$private" || return 1
+  tmp="$private/.$INVENTORY_NAME.tmp"
+  (
+    cd "$dir" || exit 1
+    while IFS= read -r -d '' file; do
+      printf '%s  public/%s\n' \
+        "$(sha256sum -- "$file" | awk '{print $1}')" "${file#./}"
+    done < <(find . -type f ! -name "$INVENTORY_NAME" -print0 | sort -z)
+    cd "$private" || exit 1
+    while IFS= read -r -d '' file; do
+      printf '%s  private/%s\n' \
+        "$(sha256sum -- "$file" | awk '{print $1}')" "${file#./}"
+    done < <(find . -type f ! -name "$INVENTORY_NAME" ! -name ".$INVENTORY_NAME.tmp" -print0 | sort -z)
+  ) >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$private/$INVENTORY_NAME" || return 1
+}
+
+# A one-time migration of an unmanaged public directory retains the historical
+# flat inventory format so the original directory can be restored byte-for-byte.
+# The release .htaccess installed during migration denies this filename.
+generate_legacy_inventory() {
   local dir="$1" tmp
   tmp="$dir/.$INVENTORY_NAME.tmp"
   (
@@ -268,17 +365,61 @@ generate_inventory() {
     find . -type f ! -name "$INVENTORY_NAME" ! -name ".$INVENTORY_NAME.tmp" -print0 \
       | sort -z | xargs -0 -r sha256sum
   ) >"$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$dir/$INVENTORY_NAME" || return 1
+  mv -f -- "$tmp" "$dir/$INVENTORY_NAME"
 }
 
-# verify_inventory <dir> — strict: every listed file matches, no extras.
+# verify_inventory <public-release-dir> — strict: every public/private file is
+# listed exactly once and matches. Flat, public inventories remain supported
+# for rollback of pre-hardening releases.
 verify_inventory() {
-  local dir="$1" expected actual
-  [[ -f "$dir/$INVENTORY_NAME" ]] || { fail "$dir has no $INVENTORY_NAME"; return 1; }
-  (cd "$dir" && sha256sum --check --quiet "$INVENTORY_NAME") \
-    || { fail "Release inventory mismatch in $dir"; return 1; }
-  expected="$(wc -l <"$dir/$INVENTORY_NAME")" || return 1
-  actual="$(cd "$dir" && find . -type f ! -name "$INVENTORY_NAME" | wc -l)" || return 1
+  local dir="$1" private inventory expected actual hash virtual relative file actual_hash
+  local -A seen=()
+  private="$(private_release_dir "$dir")"
+  inventory="$private/$INVENTORY_NAME"
+
+  if [[ ! -f "$inventory" ]]; then
+    [[ -f "$dir/$INVENTORY_NAME" ]] || { fail "$dir has no private or legacy $INVENTORY_NAME"; return 1; }
+    (cd "$dir" && sha256sum --check --quiet "$INVENTORY_NAME") \
+      || { fail "Release inventory mismatch in $dir"; return 1; }
+    expected="$(wc -l <"$dir/$INVENTORY_NAME")" || return 1
+    actual="$(cd "$dir" && find . -type f ! -name "$INVENTORY_NAME" | wc -l)" || return 1
+    [[ "$expected" == "$actual" ]] \
+      || { fail "Release inventory file count mismatch in $dir ($expected listed, $actual present)"; return 1; }
+    return 0
+  fi
+
+  expected=0
+  while IFS=' ' read -r hash virtual; do
+    [[ "$hash" =~ ^[0-9a-f]{64}$ ]] \
+      || { fail "Malformed hash in $inventory"; return 1; }
+    [[ -z "${seen[$virtual]+present}" ]] \
+      || { fail "Duplicate path in $inventory: $virtual"; return 1; }
+    seen["$virtual"]=1
+    case "$virtual" in
+      public/*)
+        relative="${virtual#public/}"
+        file="$dir/$relative"
+        ;;
+      private/*)
+        relative="${virtual#private/}"
+        file="$private/$relative"
+        ;;
+      *)
+        fail "Malformed path in $inventory: $virtual"
+        return 1
+        ;;
+    esac
+    [[ -n "$relative" && "$relative" != /* && "$relative" != *'..'* ]] \
+      || { fail "Unsafe path in $inventory: $virtual"; return 1; }
+    [[ -f "$file" ]] || { fail "Inventory entry is missing: $virtual"; return 1; }
+    actual_hash="$(sha256sum -- "$file" | awk '{print $1}')" || return 1
+    [[ "$actual_hash" == "$hash" ]] \
+      || { fail "Release inventory mismatch for $virtual"; return 1; }
+    expected=$((expected + 1))
+  done <"$inventory"
+
+  actual="$(find "$dir" -type f ! -name "$INVENTORY_NAME" | wc -l)" || return 1
+  actual=$((actual + $(find "$private" -type f ! -name "$INVENTORY_NAME" ! -name ".$INVENTORY_NAME.tmp" | wc -l)))
   [[ "$expected" == "$actual" ]] \
     || { fail "Release inventory file count mismatch in $dir ($expected listed, $actual present)"; return 1; }
 }
@@ -462,6 +603,27 @@ verify_release() {
   node "$APP_ROOT/scripts/verify-dist.mjs" "$release"
 }
 
+verify_private_release_boundary() {
+  local release="$1" private
+  private="$(private_release_dir "$release")"
+  [[ ! -e "$release/$INVENTORY_NAME" ]] \
+    || { fail "Public release contains $INVENTORY_NAME"; return 1; }
+  [[ ! -e "$release/$RELEASE_METADATA_NAME" ]] \
+    || { fail "Public release contains $RELEASE_METADATA_NAME"; return 1; }
+  [[ ! -e "$release/xenforo-templates" ]] \
+    || { fail "Public release contains xenforo-templates"; return 1; }
+  [[ -f "$private/$INVENTORY_NAME" ]] \
+    || { fail "Private release inventory is missing"; return 1; }
+  [[ -f "$private/$RELEASE_METADATA_NAME" ]] \
+    || { fail "Private release metadata is missing"; return 1; }
+  [[ -d "$private/xenforo-templates" ]] \
+    || { fail "Private XenForo template bundle is missing"; return 1; }
+  grep -Fq 'RELEASE-INVENTORY\.sha256' "$release/.htaccess" \
+    || { fail "Public .htaccess does not deny legacy release inventories"; return 1; }
+  grep -Fq 'xenforo-templates' "$release/.htaccess" \
+    || { fail "Public .htaccess does not deny legacy template bundles"; return 1; }
+}
+
 verify_rollback_release() {
   local release="$1"
   [[ -f "$release/index.html" ]] || { fail "Rollback release is missing index.html"; return 1; }
@@ -498,15 +660,87 @@ verify_peer_template_sources() {
     done
   done
 
+  for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+    source="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/$template"
+    local_hash="$(sha256sum -- "$source" | awk '{print $1}')" \
+      || { fail "Cannot hash $source"; return 1; }
+    matched=0
+    for attempt in 1 2 3 4 5; do
+      if remote_hash="$(peer_ssh sha256sum -- "$source" 2>/dev/null | awk '{print $1}')" \
+        && [[ "$remote_hash" == "$local_hash" ]]; then
+        matched=1
+        break
+      fi
+      if ((attempt < 5)); then
+        sleep "$DEPLOY_RETRY_DELAY"
+      fi
+    done
+    ((matched == 1)) || { fail "Peer template source is stale: $source"; return 1; }
+  done
+
   log "Verified matching XenForo chat template sources on $PEER_HOST."
 }
 
+run_backend_checks() {
+  local file linted=0
+
+  for file in "${BACKEND_PHP_FILES[@]}"; do
+    [[ -f "$file" ]] || continue
+    php -l "$file" >/dev/null \
+      || die "PHP lint failed for $file"
+    linted=$((linted + 1))
+  done
+  if ((linted > 0)); then
+    log "PHP lint passed for $linted chat backend files."
+  else
+    log "No chat backend PHP files were present; skipping PHP lint."
+  fi
+
+  if [[ -f "$BACKEND_TEST_FILE" ]]; then
+    php "$BACKEND_TEST_FILE" \
+      || die "Backend predicate tests failed: $BACKEND_TEST_FILE"
+    log "Backend predicate tests passed: $BACKEND_TEST_FILE"
+  else
+    log "Backend predicate test is unavailable; skipping $BACKEND_TEST_FILE."
+  fi
+}
+
 run_release_checks() {
+  local backend_before backend_after
   cd "$APP_ROOT" || die "Cannot cd to $APP_ROOT"
+  run_backend_checks
+  capture_backend_hashes || die "Cannot hash the chat backend files after validation"
+  backend_before="$(backend_hashes_json)"
   log "Running lint, typecheck, tests, build, and artifact verification..."
   npm run check || die "npm run check failed"
   verify_xenforo_templates || die "XenForo template verification failed"
   verify_peer_template_sources || die "Peer template source verification failed"
+  capture_backend_hashes || die "Cannot re-hash the chat backend files"
+  backend_after="$(backend_hashes_json)"
+  [[ "$backend_after" == "$backend_before" ]] \
+    || die "Chat backend files changed while the release gate was running; retry from a stable checkout"
+}
+
+write_release_metadata() {
+  local release="$1" private commit created_at dirty_json tmp
+  private="$(private_release_dir "$release")"
+  mkdir -p -- "$private" || return 1
+  RELEASE_METADATA_FILE="$private/$RELEASE_METADATA_NAME"
+  commit="$(git -C "$APP_ROOT" rev-parse HEAD)" || return 1
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  dirty_json="$(json_bool "$WORKTREE_DIRTY")"
+  tmp="$(mktemp "$private/.${RELEASE_METADATA_NAME}.XXXXXX")" || return 1
+  {
+    printf '{\n'
+    printf '  "version": 1,\n'
+    printf '  "release_id": %s,\n' "$(json_str "$(basename -- "$release")")"
+    printf '  "frontend_commit": %s,\n' "$(json_str "$commit")"
+    printf '  "working_tree_dirty": %s,\n' "$dirty_json"
+    printf '  "created_at": %s,\n' "$(json_str "$created_at")"
+    printf '  "backend_hashes": %s\n' "$(backend_hashes_json)"
+    printf '}\n'
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$RELEASE_METADATA_FILE"
 }
 
 # ---------------------------------------------------------------------------
@@ -781,15 +1015,24 @@ verify_live_release() {
 # ---------------------------------------------------------------------------
 
 stage_template_bundle() {
-  local release="$1" style template source
+  local release="$1" private bundle style template source
+  private="$(private_release_dir "$release")"
+  bundle="$private/xenforo-templates"
 
   for style in "${XF_STYLES[@]}"; do
-    mkdir -p -- "$release/xenforo-templates/$style" || return 1
+    mkdir -p -- "$bundle/$style" || return 1
     for template in "${XF_CHAT_TEMPLATES[@]}"; do
       source="$XENFORO_STYLES_ROOT/$style/templates/public/$template"
       [[ -f "$source" ]] || { fail "Missing XenForo template source: $source"; return 1; }
-      cp -f -- "$source" "$release/xenforo-templates/$style/$template" || return 1
+      cp -f -- "$source" "$bundle/$style/$template" || return 1
     done
+  done
+
+  mkdir -p -- "$bundle/$WF5_STYLE" || return 1
+  for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+    source="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/$template"
+    [[ -f "$source" ]] || { fail "Missing XenForo template source: $source"; return 1; }
+    cp -f -- "$source" "$bundle/$WF5_STYLE/$template" || return 1
   done
 }
 
@@ -808,6 +1051,13 @@ snapshot_active_templates() {
     done
   done
 
+  mkdir -p -- "$pending_root/$WF5_STYLE" || return 1
+  for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+    source="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/$template"
+    [[ -f "$source" ]] || { fail "Missing designer template source: $source"; return 1; }
+    cp -f -- "$source" "$pending_root/$WF5_STYLE/$template" || return 1
+  done
+
   php "$APP_ROOT/scripts/snapshot-xenforo-template-db.php" \
     "$XENFORO_ROOT" "$TEMPLATE_SNAPSHOT_DIR" \
     || return 1
@@ -817,6 +1067,10 @@ snapshot_active_templates() {
       source="$TEMPLATE_SNAPSHOT_DIR/$style/$template"
       [[ -f "$source" ]] || { fail "Missing database template snapshot: $source"; return 1; }
     done
+  done
+  for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+    source="$TEMPLATE_SNAPSHOT_DIR/$WF5_STYLE/$template"
+    [[ -f "$source" ]] || { fail "Missing database template snapshot: $source"; return 1; }
   done
   log "Snapshotted the authoritative pre-import XenForo templates to $TEMPLATE_SNAPSHOT_DIR"
 }
@@ -843,6 +1097,21 @@ restore_pending_template_sources() {
       "$PEER_HOST:$XENFORO_STYLES_ROOT/$style/templates/public/" \
       || { fail "Cannot restore pending $style sources on $PEER_HOST"; return 1; }
   done
+
+
+  payloads=()
+  for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+    source="$pending_root/$WF5_STYLE/$template"
+    dest="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/$template"
+    [[ -f "$source" ]] || { fail "Missing pending template snapshot: $source"; return 1; }
+    cp -f -- "$source" "$dest" || return 1
+    payloads+=("$dest")
+  done
+  if peer_enabled; then
+    peer_rsync "${payloads[@]}" \
+      "$PEER_HOST:$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/" \
+      || { fail "Cannot restore pending $WF5_STYLE sources on $PEER_HOST"; return 1; }
+  fi
 
   log "Restored the pre-deploy designer sources without re-importing them."
 }
@@ -919,11 +1188,45 @@ REMOTE
   log "Synchronized database-managed chat style $LEGACY_CHAT_STYLE_ID on both nodes."
 }
 
+# Style 51 is designer-managed, but this deploy owns only its page/widget chat
+# bootstraps. Sync those two rows directly and recompile them on each node; do
+# not run a style-wide WF5 designer import that could sweep unrelated drift.
+sync_wf5_chat_style() {
+  local syncer="$APP_ROOT/scripts/sync-xenforo-db-style.php"
+  local source_root="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public"
+  local remote_syncer="$XENFORO_ROOT/internal_data/.wf-chat-wf5-sync.$$.php"
+
+  php "$syncer" "$XENFORO_ROOT" "$source_root" "$WF5_STYLE_ID" bootstrap "$WF5_STYLE" \
+    || { fail "Local scoped WF5 chat template sync failed"; return 1; }
+
+  if ! peer_enabled; then
+    skip_peer "the peer scoped WF5 chat template sync"
+    log "Synchronized two scoped WF5/style $WF5_STYLE_ID chat templates."
+    return 0
+  fi
+
+  peer_rsync "$syncer" "$PEER_HOST:$remote_syncer" \
+    || { fail "Cannot stage the scoped WF5 sync helper on the peer"; return 1; }
+
+  peer_ssh bash -s -- \
+    "$remote_syncer" "$XENFORO_ROOT" "$source_root" "$WF5_STYLE_ID" "$WF5_STYLE" <<'REMOTE' \
+    || { peer_ssh rm -f -- "$remote_syncer" >/dev/null 2>&1 || true; fail "Peer scoped WF5 chat template sync failed"; return 1; }
+# wf-peer-sync-wf5-chat-style
+set -Eeuo pipefail
+syncer="$1"; xenforo_root="$2"; source_root="$3"; style_id="$4"; designer="$5"
+trap 'rm -f -- "$syncer"' EXIT
+php "$syncer" "$xenforo_root" "$source_root" "$style_id" bootstrap "$designer"
+REMOTE
+
+  log "Synchronized two scoped WF5/style $WF5_STYLE_ID chat templates on both nodes."
+}
+
 # apply_template_bundle <bundle_root> — copy payloads into the styles roots on
 # both nodes and run the designer import on both nodes. Written with explicit
 # error chaining so it also works in errexit-suppressed (restore) contexts.
 apply_template_bundle() {
   local bundle_root="$1" verify_chat_contract="${2:-1}" style template source dest
+  local wf5_available=1
   local -a payloads
 
   for style in "${XF_STYLES[@]}"; do
@@ -934,6 +1237,26 @@ apply_template_bundle() {
       cp -f -- "$source" "$dest" || { fail "Cannot install $dest"; return 1; }
     done
   done
+
+  for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+    [[ -f "$bundle_root/$WF5_STYLE/$template" ]] || wf5_available=0
+  done
+  if ((wf5_available)); then
+    payloads=()
+    for template in "${WF5_CHAT_TEMPLATES[@]}"; do
+      source="$bundle_root/$WF5_STYLE/$template"
+      dest="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/$template"
+      cp -f -- "$source" "$dest" || { fail "Cannot install $dest"; return 1; }
+      payloads+=("$dest")
+    done
+    if peer_enabled; then
+      peer_rsync "${payloads[@]}" \
+        "$PEER_HOST:$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/" \
+        || { fail "Cannot push scoped $WF5_STYLE template payloads to $PEER_HOST"; return 1; }
+    fi
+  else
+    warn "Template bundle has no complete $WF5_STYLE payload (legacy release); leaving style $WF5_STYLE_ID unchanged"
+  fi
 
   for style in "${XF_STYLES[@]}"; do
     peer_enabled || break
@@ -973,6 +1296,9 @@ REMOTE
   fi
 
   sync_database_chat_style || return 1
+  if ((wf5_available)); then
+    sync_wf5_chat_style || return 1
+  fi
   verify_compiled_template_runtime "$verify_chat_contract" || return 1
 
   if peer_enabled; then
@@ -987,29 +1313,56 @@ REMOTE
 # ---------------------------------------------------------------------------
 
 stage_peer_release() {
-  local release="$1"
+  local release="$1" private
+  private="$(private_release_dir "$release")"
 
   peer_enabled || { skip_peer "peer release staging"; return 0; }
-  peer_ssh mkdir -p -- "$release" || die "Cannot create $release on $PEER_HOST"
+  peer_ssh mkdir -p -- "$release" "$private" || die "Cannot create release paths on $PEER_HOST"
   peer_rsync --delete "$release/" "$PEER_HOST:$release/" \
     || die "Cannot stage the release on $PEER_HOST"
-  peer_ssh bash -s -- "$release" "$DEPLOY_OWNER" "$INVENTORY_NAME" <<'REMOTE' \
+  peer_rsync --delete "$private/" "$PEER_HOST:$private/" \
+    || die "Cannot stage private release data on $PEER_HOST"
+  peer_ssh bash -s -- "$release" "$private" "$DEPLOY_OWNER" "$INVENTORY_NAME" "$RELEASE_METADATA_NAME" <<'REMOTE' \
     || die "Peer release staging verification failed (divergent or incomplete peer release)"
 # wf-peer-stage-verify
 set -Eeuo pipefail
-release="$1"; owner="$2"; inv="$3"
+release="$1"; private="$2"; owner="$3"; inv="$4"; metadata="$5"
 find "$release" -type d -exec chmod 755 {} +
 find "$release" -type f -exec chmod 644 {} +
+find "$private" -type d -exec chmod 750 {} +
+find "$private" -type f -exec chmod 640 {} +
 chown -R "$owner" "$release"
+chown -R "$owner" "$private"
 test -f "$release/.htaccess"
 test -f "$release/index.html"
 test -f "$release/static/js/main.js"
 test -f "$release/static/css/main.css"
-test -f "$release/$inv"
-cd "$release"
-sha256sum --check --quiet "$inv"
-expected="$(wc -l <"$inv")"
-actual="$(find . -type f ! -name "$inv" | wc -l)"
+test ! -e "$release/$inv"
+test ! -e "$release/$metadata"
+test ! -e "$release/xenforo-templates"
+test -f "$private/$inv"
+test -f "$private/$metadata"
+test -f "$private/xenforo-templates/wf5/_page_node.313"
+grep -Fq 'RELEASE-INVENTORY\.sha256' "$release/.htaccess"
+grep -Fq 'xenforo-templates' "$release/.htaccess"
+expected=0
+declare -A seen=()
+while IFS=' ' read -r hash virtual; do
+  [[ "$hash" =~ ^[0-9a-f]{64}$ ]]
+  [[ -z "${seen[$virtual]+present}" ]]
+  seen["$virtual"]=1
+  case "$virtual" in
+    public/*) relative="${virtual#public/}"; file="$release/$relative" ;;
+    private/*) relative="${virtual#private/}"; file="$private/$relative" ;;
+    *) echo "invalid inventory path: $virtual" >&2; exit 1 ;;
+  esac
+  [[ -n "$relative" && "$relative" != /* && "$relative" != *'..'* ]]
+  [[ -f "$file" ]]
+  [[ "$(sha256sum -- "$file" | awk '{print $1}')" == "$hash" ]]
+  expected=$((expected + 1))
+done <"$private/$inv"
+actual="$(find "$release" -type f ! -name "$inv" | wc -l)"
+actual=$((actual + $(find "$private" -type f ! -name "$inv" -not -name ".$inv.tmp" | wc -l)))
 if [[ "$expected" != "$actual" ]]; then
   echo "peer inventory count mismatch: $expected listed, $actual present" >&2
   exit 1
@@ -1020,21 +1373,27 @@ REMOTE
 }
 
 prepare_release() {
-  local release_id release
+  local release_id release private
 
   run_release_checks
 
   release_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$APP_ROOT" rev-parse --short HEAD)-$$"
   release="$RELEASE_ROOT/$release_id"
+  private="$DEPLOY_PRIVATE_ROOT/$release_id"
   TARGET_RELEASE="$release"
-  mkdir -p -- "$release" || die "Cannot create $release"
+  mkdir -p -- "$release" "$private" || die "Cannot create release staging paths"
   cp -a "$DIST_DIR"/. "$release"/ || die "Cannot copy $DIST_DIR into $release"
   stage_template_bundle "$release" || die "Cannot stage the XenForo template bundle"
+  write_release_metadata "$release" || die "Cannot write private release metadata"
+  generate_inventory "$release" || die "Cannot generate the release inventory"
   find "$release" -type d -exec chmod 755 {} + || die "chmod failed on $release"
   find "$release" -type f -exec chmod 644 {} + || die "chmod failed on $release"
+  find "$private" -type d -exec chmod 750 {} + || die "chmod failed on $private"
+  find "$private" -type f -exec chmod 640 {} + || die "chmod failed on $private"
   chown -R "$DEPLOY_OWNER" "$release" || die "chown failed on $release"
-  generate_inventory "$release" || die "Cannot generate the release inventory"
+  chown -R "$DEPLOY_OWNER" "$private" || die "chown failed on $private"
   verify_release "$release" || die "Staged release failed artifact verification"
+  verify_private_release_boundary "$release" || die "Staged release crossed the private/public boundary"
   verify_inventory "$release" || die "Staged release failed inventory verification"
   record_state staged
   stage_peer_release "$release"
@@ -1061,7 +1420,7 @@ local_prepare_switch() {
         || die "Cannot preserve the legacy .htaccess"
     fi
     cp -f -- "$release/.htaccess" "$legacy/.htaccess" || die "Cannot install .htaccess into $legacy"
-    generate_inventory "$legacy" || die "Cannot generate an inventory for $legacy"
+    generate_legacy_inventory "$legacy" || die "Cannot generate an inventory for $legacy"
     PREVIOUS_TARGET="$legacy"
     LEGACY_LOCAL="$legacy"
     MIGRATED_LOCAL=1
@@ -1302,7 +1661,7 @@ REMOTE
 }
 
 prune_local_releases() {
-  local current previous candidate kept=0
+  local current previous candidate private kept=0
   local releases=()
 
   current="$(readlink -f -- "$PUBLIC_LINK" 2>/dev/null || true)"
@@ -1321,6 +1680,12 @@ prune_local_releases() {
       [[ "$candidate" == "$RELEASE_ROOT"/* ]] \
         || { fail "Refusing to prune a release outside $RELEASE_ROOT"; return 1; }
       rm -rf -- "$candidate" || return 1
+      private="$(private_release_dir "$candidate")"
+      if [[ -d "$private" ]]; then
+        [[ "$private" == "$DEPLOY_PRIVATE_ROOT"/* ]] \
+          || { fail "Refusing to prune private data outside $DEPLOY_PRIVATE_ROOT"; return 1; }
+        rm -rf -- "$private" || return 1
+      fi
       log "Pruned local release $candidate"
     fi
   done
@@ -1328,10 +1693,10 @@ prune_local_releases() {
 
 prune_peer_releases() {
   peer_enabled || { skip_peer "peer release pruning"; return 0; }
-  peer_ssh bash -s -- "$RELEASE_ROOT" "$PUBLIC_LINK" "$RETAIN_RELEASES" <<'REMOTE' || return 1
+  peer_ssh bash -s -- "$RELEASE_ROOT" "$PUBLIC_LINK" "$DEPLOY_PRIVATE_ROOT" "$RETAIN_RELEASES" <<'REMOTE' || return 1
 # wf-peer-prune
 set -Eeuo pipefail
-release_root="$1"; public_link="$2"; retain="$3"
+release_root="$1"; public_link="$2"; private_root="$3"; retain="$4"
 current="$(readlink -f -- "$public_link" 2>/dev/null || true)"
 previous="$(readlink -f -- "$release_root/previous" 2>/dev/null || true)"
 kept=0
@@ -1343,6 +1708,11 @@ while IFS= read -r candidate; do
   if ((kept > retain)); then
     [[ "$candidate" == "$release_root"/* ]]
     rm -rf -- "$candidate"
+    private="$private_root/$(basename -- "$candidate")"
+    if [[ -d "$private" ]]; then
+      [[ "$private" == "$private_root"/* ]]
+      rm -rf -- "$private"
+    fi
     echo "Pruned peer release $candidate"
   fi
 done < <(
@@ -1396,7 +1766,10 @@ activate_release() {
   peer_switch_with_reconcile "$release"
   record_state remote-switched
 
-  apply_template_bundle "$release/xenforo-templates" \
+  local template_bundle
+  template_bundle="$(template_bundle_for_release "$release")"
+  [[ -n "$template_bundle" ]] || die "Release has no private or legacy template bundle"
+  apply_template_bundle "$template_bundle" \
     || die "Applying the release template bundle failed"
   TEMPLATES_APPLIED=1
   record_state templates-synced
@@ -1434,7 +1807,7 @@ rollback_release() {
   [[ -d "$rollback_target" ]] || die "Recorded previous release is missing"
   [[ "$rollback_target" != "$current" ]] || die "Previous release is already active"
 
-  if [[ -f "$rollback_target/$INVENTORY_NAME" ]]; then
+  if [[ -n "$(inventory_for_release "$rollback_target")" ]]; then
     verify_inventory "$rollback_target" \
       || die "Rollback refused: the recorded previous release failed inventory verification"
   else
@@ -1447,17 +1820,38 @@ rollback_release() {
     remote_current=""
     remote_rollback_target=""
   else
-  out="$(peer_ssh bash -s -- "$PUBLIC_LINK" "$RELEASE_ROOT" "$INVENTORY_NAME" <<'REMOTE'
+  out="$(peer_ssh bash -s -- "$PUBLIC_LINK" "$RELEASE_ROOT" "$DEPLOY_PRIVATE_ROOT" "$INVENTORY_NAME" <<'REMOTE'
 # wf-peer-rollback-check
 set -Eeuo pipefail
-link="$1"; release_root="$2"; inv="$3"
+link="$1"; release_root="$2"; private_root="$3"; inv="$4"
 [[ -L "$link" ]]
 current="$(readlink -f -- "$link")"
 [[ -L "$release_root/previous" ]]
 target="$(readlink -f -- "$release_root/previous")"
 [[ -d "$target" ]]
 [[ "$target" != "$current" ]]
-if [[ -f "$target/$inv" ]]; then
+private="$private_root/$(basename -- "$target")"
+if [[ -f "$private/$inv" ]]; then
+  expected=0
+  declare -A seen=()
+  while IFS=' ' read -r hash virtual; do
+    [[ "$hash" =~ ^[0-9a-f]{64}$ ]]
+    [[ -z "${seen[$virtual]+present}" ]]
+    seen["$virtual"]=1
+    case "$virtual" in
+      public/*) relative="${virtual#public/}"; file="$target/$relative" ;;
+      private/*) relative="${virtual#private/}"; file="$private/$relative" ;;
+      *) exit 1 ;;
+    esac
+    [[ -n "$relative" && "$relative" != /* && "$relative" != *'..'* ]]
+    [[ -f "$file" ]]
+    [[ "$(sha256sum -- "$file" | awk '{print $1}')" == "$hash" ]]
+    expected=$((expected + 1))
+  done <"$private/$inv"
+  actual="$(find "$target" -type f ! -name "$inv" | wc -l)"
+  actual=$((actual + $(find "$private" -type f ! -name "$inv" -not -name ".$inv.tmp" | wc -l)))
+  [[ "$expected" == "$actual" ]]
+elif [[ -f "$target/$inv" ]]; then
   cd "$target"
   sha256sum --check --quiet "$inv"
   expected="$(wc -l <"$inv")"
@@ -1476,6 +1870,11 @@ REMOTE
   fi
 
   TARGET_RELEASE="$rollback_target"
+  if [[ -f "$(private_release_dir "$rollback_target")/$RELEASE_METADATA_NAME" ]]; then
+    RELEASE_METADATA_FILE="$(private_release_dir "$rollback_target")/$RELEASE_METADATA_NAME"
+  else
+    RELEASE_METADATA_FILE=""
+  fi
   PREVIOUS_TARGET="$current"
   REMOTE_PREVIOUS_TARGET="$remote_current"
   record_state rollback-started
@@ -1489,8 +1888,10 @@ REMOTE
   peer_switch_with_reconcile "$remote_rollback_target"
   record_state remote-switched
 
-  if [[ -d "$rollback_target/xenforo-templates" ]]; then
-    apply_template_bundle "$rollback_target/xenforo-templates" 0 \
+  local rollback_bundle
+  rollback_bundle="$(template_bundle_for_release "$rollback_target")"
+  if [[ -n "$rollback_bundle" ]]; then
+    apply_template_bundle "$rollback_bundle" 0 \
       || die "Applying the rollback template bundle failed"
     TEMPLATES_APPLIED=1
   else
@@ -1525,7 +1926,9 @@ main() {
     deploy)
       ACTION=deploy
       acquire_lock
-      mkdir -p -- "$DEPLOY_RECOVERY_ROOT" || die "Cannot create $DEPLOY_RECOVERY_ROOT"
+      mkdir -p -- "$DEPLOY_RECOVERY_ROOT" "$DEPLOY_PRIVATE_ROOT" \
+        || die "Cannot create private release roots"
+      capture_backend_hashes || die "Cannot hash the chat backend files"
       STATE_ENABLED=1
       record_state started
       ensure_clean_worktree
@@ -1536,7 +1939,9 @@ main() {
       ACTION=rollback
       [[ -d "$RELEASE_ROOT" ]] || die "No release directory exists at $RELEASE_ROOT"
       acquire_lock
-      mkdir -p -- "$DEPLOY_RECOVERY_ROOT" || die "Cannot create $DEPLOY_RECOVERY_ROOT"
+      mkdir -p -- "$DEPLOY_RECOVERY_ROOT" "$DEPLOY_PRIVATE_ROOT" \
+        || die "Cannot create private release roots"
+      capture_backend_hashes || die "Cannot hash the chat backend files"
       STATE_ENABLED=1
       rollback_release
       ;;

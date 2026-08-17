@@ -24,7 +24,7 @@ assert_contains "$RT_LAST_OUTPUT" "inventory" "refusal mentions the inventory"
 # Nothing switched anywhere; templates untouched
 assert_link_target "$PUBLIC_LINK" "$r2"
 assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$r2")"
-assert_templates_match_bundle "$r2/xenforo-templates"
+assert_templates_match_bundle "$(release_bundle "$r2")"
 assert_eq "$(state_field action)" rollback "state action"
 assert_eq "$(state_field status)" failed "state status"
 assert_no_next_litter

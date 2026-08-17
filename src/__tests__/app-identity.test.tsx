@@ -4,13 +4,17 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 
 const identityMocks = vi.hoisted(() => ({
   getUserData: vi.fn(),
+  setExpectedIdentityId: vi.fn(),
 }));
 
 vi.mock('../services/api', async importOriginal => {
   const actual = await importOriginal<typeof import('../services/api')>();
   return {
     ...actual,
-    ChatAPI: { getUserData: identityMocks.getUserData },
+    ChatAPI: {
+      getUserData: identityMocks.getUserData,
+      setExpectedIdentityId: identityMocks.setExpectedIdentityId,
+    },
   };
 });
 
@@ -24,7 +28,7 @@ vi.mock('../components/ChatWindow', () => ({
 }));
 
 import { APIError } from '../services/api';
-import App from '../App';
+import App, { IDENTITY_FRESHNESS_MS } from '../App';
 
 let now = 10_000;
 
@@ -47,6 +51,7 @@ beforeAll(() => {
 beforeEach(() => {
   now = 10_000;
   identityMocks.getUserData.mockReset();
+  identityMocks.setExpectedIdentityId.mockReset();
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -60,6 +65,7 @@ const user = (id: string | number, name = 'Member') => ({
   user_id: id,
   name,
   avatar: 'https://windowsforum.com/avatar.webp',
+  identity_id: String(id).padStart(64, 'a').slice(-64),
 });
 
 const advanceClock = (milliseconds: number) => {
@@ -73,6 +79,12 @@ const dispatchPageShow = (persisted: boolean) => {
 };
 
 describe('identity lifecycle', () => {
+  it('consumes the early bootstrap promise without issuing a second identity request', async () => {
+    render(<App initialIdentityPromise={Promise.resolve(user(42))} />);
+    expect(await screen.findByText('chat-user-42')).toBeInTheDocument();
+    expect(identityMocks.getUserData).not.toHaveBeenCalled();
+  });
+
   it('resolves the identity and mounts the chat for that user', async () => {
     identityMocks.getUserData.mockResolvedValue(user(42));
     render(<App />);
@@ -85,7 +97,7 @@ describe('identity lifecycle', () => {
     await screen.findByText('chat-user-42');
 
     identityMocks.getUserData.mockResolvedValueOnce(user(99, 'Second'));
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     act(() => {
       window.dispatchEvent(new Event('focus'));
     });
@@ -104,7 +116,7 @@ describe('identity lifecycle', () => {
       () => new Promise(resolve => { resolveFirst = resolve; }),
     );
 
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     act(() => { window.dispatchEvent(new Event('focus')); });
     act(() => { document.dispatchEvent(new Event('visibilitychange')); });
     expect(identityMocks.getUserData).toHaveBeenCalledTimes(2);
@@ -124,7 +136,7 @@ describe('identity lifecycle', () => {
       .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }))
       .mockResolvedValueOnce(user(99));
 
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     act(() => { window.dispatchEvent(new Event('focus')); });
     advanceClock(501);
     act(() => { document.dispatchEvent(new Event('visibilitychange')); });
@@ -149,7 +161,7 @@ describe('identity lifecycle', () => {
     identityMocks.getUserData.mockImplementationOnce(
       () => new Promise(resolve => { resolveSecond = resolve; }),
     );
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     act(() => {
       window.dispatchEvent(new Event('focus'));
     });
@@ -170,7 +182,7 @@ describe('identity lifecycle', () => {
     expect(composer).toHaveFocus();
   });
 
-  it('ignores ordinary pageshow but revalidates a stale BFCache restore', async () => {
+  it('ignores ordinary pageshow but revalidates a fresh BFCache restore', async () => {
     identityMocks.getUserData.mockResolvedValue(user(42));
     render(<App />);
     await screen.findByText('chat-user-42');
@@ -183,13 +195,27 @@ describe('identity lifecycle', () => {
     await waitFor(() => expect(identityMocks.getUserData).toHaveBeenCalledTimes(2));
   });
 
-  it('revalidates a real activation even when the identity was verified recently', async () => {
+  it('skips ordinary activations for 30 seconds after a successful verification', async () => {
     identityMocks.getUserData.mockResolvedValue(user(42));
     render(<App />);
     await screen.findByText('chat-user-42');
 
     advanceClock(100);
     act(() => { window.dispatchEvent(new Event('focus')); });
+    expect(identityMocks.getUserData).toHaveBeenCalledTimes(1);
+
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(identityMocks.getUserData).toHaveBeenCalledTimes(2));
+  });
+
+  it('revalidates identity-change signals immediately inside the freshness window', async () => {
+    identityMocks.getUserData.mockResolvedValue(user(42));
+    render(<App />);
+    await screen.findByText('chat-user-42');
+
+    advanceClock(100);
+    act(() => { window.dispatchEvent(new Event('wf-chat-identity-changed')); });
     await waitFor(() => expect(identityMocks.getUserData).toHaveBeenCalledTimes(2));
   });
 
@@ -209,6 +235,7 @@ describe('identity lifecycle', () => {
     identityMocks.getUserData.mockImplementationOnce(
       () => new Promise(resolve => { resolveSecond = resolve; }),
     );
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     act(() => { window.dispatchEvent(new Event('focus')); });
     xenForoControl.focus();
 
@@ -219,7 +246,7 @@ describe('identity lifecycle', () => {
     xenForoControl.remove();
   });
 
-  it('keeps the established chat mounted when a revalidation fails transiently', async () => {
+  it('keeps the established chat mounted but locked when revalidation fails transiently', async () => {
     identityMocks.getUserData.mockResolvedValueOnce(user(42));
     render(<App />);
     await screen.findByText('chat-user-42');
@@ -227,15 +254,17 @@ describe('identity lifecycle', () => {
     identityMocks.getUserData.mockRejectedValueOnce(
       new APIError('network down', { code: 'network_error', retryable: true }),
     );
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     await act(async () => {
       window.dispatchEvent(new Event('focus'));
     });
 
-    // Transient failure: the chat stays, plus a non-destructive notice.
+    // The transcript stays mounted for layout/state continuity but cannot be
+    // read or mutated until the session is authoritative again.
     expect(screen.getByText('chat-user-42')).toBeInTheDocument();
     expect(screen.queryByText(/could not verify your WindowsForum session/)).not.toBeInTheDocument();
-    expect(await screen.findByText(/still using your last verified session/)).toBeInTheDocument();
+    expect(await screen.findByText(/Chat is locked until your session is verified/)).toBeInTheDocument();
+    expect(screen.getByTestId('chat-window').parentElement).toHaveAttribute('aria-hidden', 'true');
   });
 
   it('tears down the chat when a revalidation fails authoritatively', async () => {
@@ -246,7 +275,7 @@ describe('identity lifecycle', () => {
     identityMocks.getUserData.mockRejectedValueOnce(
       new APIError('forbidden', { status: 403, retryable: false }),
     );
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     await act(async () => {
       window.dispatchEvent(new Event('focus'));
     });
@@ -271,7 +300,7 @@ describe('identity lifecycle', () => {
     await screen.findByText('chat-user-42');
 
     identityMocks.getUserData.mockResolvedValueOnce(user(0));
-    advanceClock(5_000);
+    advanceClock(IDENTITY_FRESHNESS_MS + 1);
     await act(async () => {
       window.dispatchEvent(new Event('focus'));
     });

@@ -1,5 +1,6 @@
 import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 const dist = path.resolve(process.argv[2] || 'dist');
 const CONTAINER_ID = '#react-chat-container';
@@ -41,6 +42,15 @@ for (const pattern of requiredMarkup) {
   }
 }
 
+const stableScriptReferences = html.match(/\/chatpage\/static\/js\/main\.js\?v=2/g) || [];
+const stableStyleReferences = html.match(/\/chatpage\/static\/css\/main\.css\?v=2/g) || [];
+if (stableScriptReferences.length !== 1 || stableStyleReferences.length !== 1) {
+  throw new Error(
+    `Built index.html must reference stable main.js and main.css exactly once `
+    + `(found ${stableScriptReferences.length} script, ${stableStyleReferences.length} style).`,
+  );
+}
+
 const referencedFiles = new Set();
 for (const match of html.matchAll(/(?:src|href)="\/chatpage\/([^"?#]+)(?:[?#][^"]*)?"/g)) {
   referencedFiles.add(match[1]);
@@ -54,6 +64,33 @@ const jsFiles = await readdir(path.join(dist, 'static/js'));
 const chunkFiles = jsFiles.filter(file => file.endsWith('.chunk.js'));
 if (chunkFiles.length === 0) {
   throw new Error('Expected at least one content-hashed JavaScript chunk.');
+}
+const chatWindowChunks = chunkFiles.filter(file => file.startsWith('ChatWindow-'));
+if (chatWindowChunks.length !== 1) {
+  throw new Error(`Expected one lazy content-hashed ChatWindow chunk, found ${chatWindowChunks.length}.`);
+}
+
+const jsGzipSizes = new Map();
+for (const file of jsFiles.filter(name => name.endsWith('.js'))) {
+  const source = await readFile(path.join(dist, 'static/js', file));
+  jsGzipSizes.set(file, gzipSync(source, { level: 9 }).byteLength);
+}
+const totalJsGzipBytes = [...jsGzipSizes.values()].reduce((total, size) => total + size, 0);
+const totalJsGzipBudget = 210 * 1024;
+if (totalJsGzipBytes > totalJsGzipBudget) {
+  throw new Error(
+    `Compressed JavaScript budget exceeded: ${totalJsGzipBytes} bytes gzip > ${totalJsGzipBudget}.`,
+  );
+}
+const mainGzipBytes = jsGzipSizes.get('main.js') ?? Number.POSITIVE_INFINITY;
+if (mainGzipBytes > 4 * 1024) {
+  throw new Error(`Stable bootstrap main.js is too large: ${mainGzipBytes} bytes gzip > 4096.`);
+}
+const chatWindowGzipBytes = jsGzipSizes.get(chatWindowChunks[0]) ?? Number.POSITIVE_INFINITY;
+if (chatWindowGzipBytes > 50 * 1024) {
+  throw new Error(
+    `Lazy ChatWindow/Markdown chunk is too large: ${chatWindowGzipBytes} bytes gzip > ${50 * 1024}.`,
+  );
 }
 
 for (const file of chunkFiles) {
@@ -106,6 +143,9 @@ const jsDir = path.join(dist, 'static/js');
 for (const file of jsFiles.filter(name => name.endsWith('.js'))) {
   const filePath = path.join(jsDir, file);
   const source = await readFile(filePath, 'utf8');
+  if (source.includes('static/css/main.css')) {
+    throw new Error(`static/js/${file} dynamically references stable main.css; HTML must load it exactly once.`);
+  }
   const seen = new Set();
   for (const pattern of importPatterns) {
     for (const match of source.matchAll(pattern)) {
@@ -118,6 +158,9 @@ for (const file of jsFiles.filter(name => name.endsWith('.js'))) {
       continue;
     }
     importSpecifierCount += 1;
+    if (file !== 'main.js' && path.resolve(resolved) === path.join(jsDir, 'main.js')) {
+      throw new Error(`static/js/${file} imports stable main.js; shared application code must remain content hashed.`);
+    }
     try {
       await access(resolved);
     } catch {
@@ -333,5 +376,5 @@ validateCssNodes(parseCssBlock(cssText), '');
 console.log(
   `Verified ${requiredFiles.length} release files, ${referencedFiles.size} HTML references, `
   + `${chunkFiles.length} hashed chunks, ${importSpecifierCount} local import specifiers, `
-  + `and ${cssRuleCount} scoped CSS rules.`,
+  + `${totalJsGzipBytes} gzip JS bytes, and ${cssRuleCount} scoped CSS rules.`,
 );

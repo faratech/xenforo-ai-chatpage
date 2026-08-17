@@ -49,9 +49,12 @@ setup_sandbox() {
 
   mkdir -p \
     "$SB/local/releases" \
+    "$SB/local/releases/.private" \
     "$SB/local/public_html" \
+    "$SB/local/tests" \
     "$SB/local/db-templates" \
     "$SB/peer/releases" \
+    "$SB/peer/releases/.private" \
     "$SB/peer/public_html" \
     "$SB/bin" "$SB/control" "$SB/app/scripts" "$SB/dist" "$SB/env"
 
@@ -61,6 +64,7 @@ setup_sandbox() {
 
   export RELEASE_ROOT="$SB/local/releases"
   export PUBLIC_LINK="$SB/local/public_html/chatpage"
+  export DEPLOY_PRIVATE_ROOT="$SB/local/releases/.private"
   export XENFORO_ROOT="$SB/local/public_html"
   export XENFORO_STYLES_ROOT="$SB/local/public_html/src/styles"
   export DIST_DIR="$SB/dist"
@@ -81,6 +85,7 @@ setup_sandbox() {
 
   # shellcheck disable=SC2034  # consumed by the sourcing test scripts
   PEER_RELEASE_ROOT="$SB/peer/releases"
+  PEER_PRIVATE_ROOT="$SB/peer/releases/.private"
   PEER_PUBLIC_LINK="$SB/peer/public_html/chatpage"
   PEER_STYLES_ROOT="$SB/peer/public_html/src/styles"
   STATE_FILE="$RELEASE_ROOT/.deploy-state.json"
@@ -89,6 +94,12 @@ setup_sandbox() {
     >"$CLOUDFLARE_ENV_FILE"
   : >"$PEER_SSH_KEY"
   : >"$CONTROL/rules"
+
+  printf '<?php // sandbox chat endpoint\n' >"$XENFORO_ROOT/chat.php"
+  printf '<?php // sandbox tts endpoint\n' >"$XENFORO_ROOT/tts.php"
+  printf '<?php // sandbox predicates\n' >"$XENFORO_ROOT/wf_chat_predicates.php"
+  printf '<?php echo "sandbox predicate tests passed\\n";\n' \
+    >"$SANDBOX_LOCAL/tests/test_chat_predicates.php"
 
   make_fake_styles "$XENFORO_STYLES_ROOT" "v1"
   make_fake_styles "$PEER_STYLES_ROOT" "v1"
@@ -122,10 +133,20 @@ snapshot_fake_db_from_styles() {
       cp -f -- "$XENFORO_STYLES_ROOT/$style/templates/public/$template" \
         "$target/$template"
       sed -i \
-        -e 's/<div id="root" class="google-anno-skip" style="min-height:100vh"><\/div>/<div id="root"><\/div>/' \
+        -e 's/<div id="root" class="google-anno-skip" style="min-height:100dvh"><\/div>/<div id="root"><\/div>/' \
         -e 's/?v=2/?ver=legacy-db/g' \
         "$target/$template"
     done
+  done
+  target="$SANDBOX_LOCAL/db-templates/wf5"
+  mkdir -p "$target"
+  for template in _page_node.313 _widget_ai_chat.html; do
+    cp -f -- "$XENFORO_STYLES_ROOT/wf5/templates/public/$template" \
+      "$target/$template"
+    sed -i \
+      -e 's/<div id="root" class="google-anno-skip" style="min-height:100dvh"><\/div>/<div id="root" style="min-height:100vh"><\/div>/' \
+      -e 's/?v=2/?ver=legacy-db/g' \
+      "$target/$template"
   done
 }
 
@@ -137,7 +158,7 @@ make_fake_styles() {
     mkdir -p "$dir"
     for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
       cat >"$dir/$template" <<TEMPLATE
-<div id="root" class="google-anno-skip" style="min-height:100vh"></div>
+<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>
 <link rel="stylesheet" href="https://windowsforum.com/chatpage/static/css/main.css?v=2">
 <script type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"></script>
 <!-- $style/$template $tag -->
@@ -145,6 +166,18 @@ TEMPLATE
     done
     write_style_metadata "$root/$style/templates"
   done
+
+  dir="$root/wf5/templates/public"
+  mkdir -p "$dir"
+  for template in _page_node.313 _widget_ai_chat.html; do
+    cat >"$dir/$template" <<TEMPLATE
+<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>
+<link rel="stylesheet" href="https://windowsforum.com/chatpage/static/css/main.css?v=2">
+<script type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"></script>
+<!-- wf5/$template $tag -->
+TEMPLATE
+  done
+  write_style_metadata "$root/wf5/templates"
 }
 
 # Rebuild _metadata.json so verify-xenforo-templates.mjs sees a clean baseline.
@@ -183,12 +216,20 @@ mutate_styles() {
     for style in wf3 wf3_domperf; do
       for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
         cat >"$root/$style/templates/public/$template" <<TEMPLATE
-<div id="root" class="google-anno-skip" style="min-height:100vh"></div>
+<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>
 <link rel="stylesheet" href="https://windowsforum.com/chatpage/static/css/main.css?v=2">
 <script type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"></script>
 <!-- $style/$template $tag -->
 TEMPLATE
       done
+    done
+    for template in _page_node.313 _widget_ai_chat.html; do
+      cat >"$root/wf5/templates/public/$template" <<TEMPLATE
+<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>
+<link rel="stylesheet" href="https://windowsforum.com/chatpage/static/css/main.css?v=2">
+<script type="module" src="https://windowsforum.com/chatpage/static/js/main.js?v=2"></script>
+<!-- wf5/$template $tag -->
+TEMPLATE
     done
   done
 }
@@ -200,10 +241,7 @@ make_fake_dist() {
   rm -rf -- "$dir"
   mkdir -p "$dir/static/js" "$dir/static/css"
 
-  cat >"$dir/.htaccess" <<'HTACCESS'
-# sandbox htaccess (fake)
-Header set Cache-Control "no-cache, must-revalidate"
-HTACCESS
+  cp -f -- "$RT_APP_SRC/public/.htaccess" "$dir/.htaccess"
 
   printf 'FAKEWEBP-%s' "$tag" >"$dir/bot-avatar.webp"
   printf 'User-agent: *\nDisallow:\n' >"$dir/robots.txt"
@@ -228,15 +266,16 @@ MANIFEST
     <link rel="stylesheet" crossorigin href="/chatpage/static/css/main.css?v=2">
   </head>
   <body>
-    <div id="root" class="google-anno-skip" style="min-height:100vh"></div>
+    <div id="root" class="google-anno-skip" style="min-height:100dvh"></div>
   </body>
 </html>
 HTML
 
   cat >"$dir/static/js/main.js" <<JS
-import"./vendor-sandbox1.chunk.js";document.getElementById("root");/* ${tag} */
+import"./vendor-sandbox1.chunk.js";import("./ChatWindow-sandbox1.chunk.js");document.getElementById("root");/* ${tag} */
 JS
   printf 'export const v = "%s";\n' "$tag" >"$dir/static/js/vendor-sandbox1.chunk.js"
+  printf 'export const chatWindow = "%s";\n' "$tag" >"$dir/static/js/ChatWindow-sandbox1.chunk.js"
 
   cat >"$dir/static/css/main.css" <<CSS
 @charset "UTF-8";
@@ -558,15 +597,28 @@ if [[ "${1:-}" == *snapshot-xenforo-template-db.php ]]; then
   exit 0
 fi
 
-if [[ "${1:-}" == *sync-xenforo-db-style.php || "${1:-}" == *.wf-chat-db-style-sync.*.php ]]; then
+if [[ "${1:-}" == *sync-xenforo-db-style.php \
+  || "${1:-}" == *.wf-chat-db-style-sync.*.php \
+  || "${1:-}" == *.wf-chat-wf5-sync.*.php ]]; then
   xenforo_root="${2:-}"
   source_root="${3:-}"
   style_id="${4:-}"
-  [[ -n "$xenforo_root" && -d "$source_root" && "$style_id" == 17 ]] || exit 2
+  profile="${5:-full}"
+  expected_designer="${6:-}"
+  [[ -n "$xenforo_root" && -d "$source_root" ]] || exit 2
+  if [[ "$style_id" == 17 ]]; then
+    [[ "$profile" == full && -z "$expected_designer" ]] || exit 2
+    templates=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
+  elif [[ "$style_id" == 51 ]]; then
+    [[ "$profile" == bootstrap && "$expected_designer" == wf5 ]] || exit 2
+    templates=(_page_node.313 _widget_ai_chat.html)
+  else
+    exit 2
+  fi
 
   db_style="$xenforo_root/db-style-$style_id"
   mkdir -p "$db_style"
-  for template in _page_node.313 _widget_ai_chat.html react_chat_container.html; do
+  for template in "${templates[@]}"; do
     source="$source_root/$template"
     hash="$(md5sum "$source" | awk '{print $1}')"
     compiled_name="${template%.html}"
@@ -580,13 +632,18 @@ if [[ "${1:-}" == *sync-xenforo-db-style.php || "${1:-}" == *.wf-chat-db-style-s
       } >"$compiled_dir/$compiled_name.php"
     done
   done
+  if [[ "$style_id" == 51 ]]; then
+    mkdir -p "$SANDBOX_LOCAL/db-templates/wf5"
+    cp -f -- "$source_root/_page_node.313" "$source_root/_widget_ai_chat.html" \
+      "$SANDBOX_LOCAL/db-templates/wf5/"
+  fi
   exit 0
 fi
 
 if [[ "$*" == *"xf-designer:import-templates"* ]]; then
   designer="${@: -1}"
   case "$designer" in
-    wf3) style_ids=(40 50) ;;
+    wf3) style_ids=(40 46 50) ;;
     wf3_domperf) style_ids=(47) ;;
     *) echo "php stub: unexpected designer mode $designer" >&2; exit 1 ;;
   esac
@@ -694,7 +751,10 @@ RT_LAST_OUTPUT=""
 # $RT_LAST_OUTPUT and echoed to the test log.
 run_deploy() {
   local rc=0
-  RT_LAST_OUTPUT="$(bash "$SB/app/deploy.sh" "$@" 2>&1)" || rc=$?
+  # These scenarios exercise the historical peer topology. Do not inherit the
+  # production deploy command's DEPLOY_SINGLE_NODE=1 into their sandboxes; the
+  # dedicated test-21 invokes deploy.sh directly to cover that default.
+  RT_LAST_OUTPUT="$(DEPLOY_SINGLE_NODE=0 bash "$SB/app/deploy.sh" "$@" 2>&1)" || rc=$?
   printf -- '--- deploy.sh %s (rc=%s) ---\n%s\n---\n' "${*:-deploy}" "$rc" "$RT_LAST_OUTPUT"
   return "$rc"
 }
@@ -746,6 +806,28 @@ state_field() {
   ' "$STATE_FILE" "$1"
 }
 
+json_value() {
+  local file="$1" dotted="$2"
+  node -e '
+    const fs = require("node:fs");
+    const value = process.argv[2].split(".").reduce(
+      (current, key) => current == null ? undefined : current[key],
+      JSON.parse(fs.readFileSync(process.argv[1], "utf8")),
+    );
+    process.stdout.write(value === undefined || value === null ? "" : String(value));
+  ' "$file" "$dotted"
+}
+
+json_object_value() {
+  local file="$1" object="$2" key="$3"
+  node -e '
+    const fs = require("node:fs");
+    const document = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const value = document[process.argv[2]]?.[process.argv[3]];
+    process.stdout.write(value === undefined || value === null ? "" : String(value));
+  ' "$file" "$object" "$key"
+}
+
 assert_state() {
   local expected_phase="$1" expected_status="$2"
   [[ -f "$STATE_FILE" ]] || fail_test "state file $STATE_FILE is missing"
@@ -767,6 +849,14 @@ assert_templates_match_bundle() {
         || fail_test "peer $style/$template does not match bundle $bundle_root"
     done
   done
+  for template in _page_node.313 _widget_ai_chat.html; do
+    cmp -s "$bundle_root/wf5/$template" \
+      "$XENFORO_STYLES_ROOT/wf5/templates/public/$template" \
+      || fail_test "local wf5/$template does not match bundle $bundle_root"
+    cmp -s "$bundle_root/wf5/$template" \
+      "$PEER_STYLES_ROOT/wf5/templates/public/$template" \
+      || fail_test "peer wf5/$template does not match bundle $bundle_root"
+  done
 }
 
 assert_fake_db_matches_bundle() {
@@ -778,6 +868,24 @@ assert_fake_db_matches_bundle() {
         || fail_test "database $style/$template does not match bundle $bundle_root"
     done
   done
+  for template in _page_node.313 _widget_ai_chat.html; do
+    cmp -s "$bundle_root/wf5/$template" \
+      "$SANDBOX_LOCAL/db-templates/wf5/$template" \
+      || fail_test "database wf5/$template does not match bundle $bundle_root"
+  done
+}
+
+release_private_dir() {
+  local release="$1"
+  if [[ "$release" == "$SANDBOX_PEER"/* ]]; then
+    printf '%s/%s' "$PEER_PRIVATE_ROOT" "$(basename -- "$release")"
+  else
+    printf '%s/%s' "$DEPLOY_PRIVATE_ROOT" "$(basename -- "$release")"
+  fi
+}
+
+release_bundle() {
+  printf '%s/xenforo-templates' "$(release_private_dir "$1")"
 }
 
 current_release() {
@@ -804,6 +912,23 @@ stub_calls() {
 
 # Verify a release inventory in-place (same semantics as deploy.sh).
 check_inventory() {
-  local dir="$1"
-  (cd "$dir" && sha256sum --check --quiet RELEASE-INVENTORY.sha256)
+  local dir="$1" private inventory hash virtual relative file expected=0 actual
+  private="$(release_private_dir "$dir")"
+  inventory="$private/RELEASE-INVENTORY.sha256"
+  if [[ ! -f "$inventory" ]]; then
+    (cd "$dir" && sha256sum --check --quiet RELEASE-INVENTORY.sha256)
+    return
+  fi
+  while IFS=' ' read -r hash virtual; do
+    case "$virtual" in
+      public/*) relative="${virtual#public/}"; file="$dir/$relative" ;;
+      private/*) relative="${virtual#private/}"; file="$private/$relative" ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$file" && "$(sha256sum -- "$file" | awk '{print $1}')" == "$hash" ]] || return 1
+    expected=$((expected + 1))
+  done <"$inventory"
+  actual="$(find "$dir" -type f ! -name RELEASE-INVENTORY.sha256 | wc -l)"
+  actual=$((actual + $(find "$private" -type f ! -name RELEASE-INVENTORY.sha256 | wc -l)))
+  [[ "$expected" == "$actual" ]]
 }

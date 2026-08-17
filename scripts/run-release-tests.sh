@@ -9,6 +9,11 @@
 
 set -u
 
+# The real deploy command may carry topology/dirty-tree overrides. Sandbox
+# scenarios set their own overrides deliberately and must never inherit the
+# caller's production values.
+unset DEPLOY_SINGLE_NODE DEPLOY_ALLOW_DIRTY
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTS_DIR="$HERE/release-tests"
 

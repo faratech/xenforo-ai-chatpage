@@ -1,5 +1,6 @@
 import { Marked } from 'marked';
 import DOMPurify from 'dompurify';
+export { generateConversationId, generateTurnId } from './ids';
 
 interface Citation {
   text: string;
@@ -551,21 +552,6 @@ export const splitStreamingMarkdown = (content: string): { closed: string; trail
     closed: lines.slice(0, boundary).join('\n'),
     trailing: lines.slice(boundary + 1).join('\n'),
   };
-};
-
-/**
- * Generates a unique conversation ID
- */
-export const generateConversationId = (): string => {
-  return `conv_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-};
-
-/**
- * Short id correlating one chat turn across the browser, chat.php, and the
- * backend log. Short enough to read back from a user's screenshot.
- */
-export const generateTurnId = (): string => {
-  return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
 };
 
 /**

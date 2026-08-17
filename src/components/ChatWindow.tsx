@@ -22,6 +22,7 @@ import type {
   ChatMessageHistoryItem,
   ChatWindowProps,
   Conversation,
+  ConversationMap,
   Message,
   StreamActivity,
   StreamingResponse,
@@ -31,7 +32,8 @@ import { Message as MessageComponent } from './Message';
 import { AdSlot } from './AdSlot';
 import { ConversationSidebar } from './ConversationSidebar';
 import { InputArea } from './InputArea';
-import { EXAMPLE_PROMPTS, generateConversationId, generateTurnId } from '../utils/helpers';
+import { EXAMPLE_PROMPTS } from '../utils/helpers';
+import { generateConversationId, generateTurnId } from '../utils/ids';
 import {
   APIError,
   CaptchaRequiredError,
@@ -53,7 +55,7 @@ import { ENV } from '../config/env';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
 
-const MAX_MESSAGE_BYTES = 500;
+const MAX_MESSAGE_BYTES = 4096;
 /** Local history items sent with every request as server recovery context. */
 const HISTORY_CONTEXT_ITEMS = 20;
 const HISTORY_CONTEXT_ITEM_BYTES = 4_000;
@@ -99,6 +101,19 @@ const isSafelyRetryable = (error: unknown): boolean => {
     return !error.partialText;
   }
   return false;
+};
+
+/**
+ * Rate limits and lease contention must use the server's retry window. Without
+ * one, leave the turn failed for an explicit user retry rather than hammering
+ * it again after the generic 400–800 ms transport backoff.
+ */
+const automaticRetryDelayMs = (error: unknown): number | null => {
+  if (!isSafelyRetryable(error)) return null;
+  if (error instanceof APIError && (error.status === 429 || error.code === 'conversation_busy')) {
+    return error.retryAfterMs ?? null;
+  }
+  return RETRY_BACKOFF_MS + Math.random() * RETRY_JITTER_MS;
 };
 
 const messageId = (suffix = ''): string => {
@@ -439,6 +454,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [usageRefresh, setUsageRefresh] = useState(0);
   const [autoFollow, setAutoFollow] = useState(true);
   const [reduceMotion, setReduceMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const [announcement, setAnnouncement] = useState('');
+  const isStandalone = window.top === window.self;
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const transcriptContentRef = useRef<HTMLDivElement>(null);
@@ -457,6 +474,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const currentConversationIdRef = useRef(currentConversationId);
   const tombstonesRef = useRef(initialChatState.tombstones);
   const pendingDeletionsRef = useRef(initialChatState.pendingServerDeletions);
+  const pendingDeletionRetryAtRef = useRef<Record<string, number>>({});
   const storageUnavailableRef = useRef(initialChatState.unavailable);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const pendingCaptchaRef = useRef<PendingCaptchaTurn | null>(null);
@@ -519,6 +537,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }, currentConversationIdRef.current);
 
     if (result.evictedIds.length) {
+      const evictedAt = Date.now();
+      tombstonesRef.current = { ...tombstonesRef.current };
+      pendingDeletionsRef.current = { ...pendingDeletionsRef.current };
+      for (const id of result.evictedIds) {
+        tombstonesRef.current[id] = evictedAt;
+        pendingDeletionsRef.current[id] = evictedAt;
+      }
       queueMicrotask(() => {
         setConversations(previous => {
           const next = { ...previous };
@@ -542,17 +567,35 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   }, [conversations, persistStore]);
   useEffect(() => { persistStore(); }, [currentConversationId, persistStore]);
 
+  const enforceCapAndQueueDeletion = useCallback((next: ConversationMap, keepId: string): ConversationMap => {
+    const capped = enforceConversationCap(next, keepId);
+    const evicted = Object.keys(next).filter(id => !capped[id]);
+    if (evicted.length) {
+      const evictedAt = Date.now();
+      tombstonesRef.current = { ...tombstonesRef.current };
+      pendingDeletionsRef.current = { ...pendingDeletionsRef.current };
+      for (const id of evicted) {
+        tombstonesRef.current[id] = evictedAt;
+        pendingDeletionsRef.current[id] = evictedAt;
+      }
+      queueMicrotask(() => setErrorMessage(
+        'Your oldest conversation was removed from this browser and queued for secure server cleanup.'
+      ));
+    }
+    return capped;
+  }, []);
+
   const updateConversationById = useCallback((conversationId: string, update: ConversationUpdate) => {
     setConversations(previous => {
       const existing = previous[conversationId];
       if (!existing) return previous;
       const changes = typeof update === 'function' ? update(existing) : update;
-      return enforceConversationCap({
+      return enforceCapAndQueueDeletion({
         ...previous,
         [conversationId]: { ...existing, ...changes, updatedAt: Date.now() },
       }, conversationId);
     });
-  }, []);
+  }, [enforceCapAndQueueDeletion]);
 
   const addMessage = useCallback((conversationId: string, message: Message) => {
     updateConversationById(conversationId, conversation => ({
@@ -656,13 +699,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const createAndSelectConversation = useCallback(() => {
     const id = generateConversationId();
     const conversation = createNewConversation(id, welcomeMessage);
-    setConversations(previous => enforceConversationCap({ ...previous, [id]: conversation }, id));
+    setConversations(previous => enforceCapAndQueueDeletion({ ...previous, [id]: conversation }, id));
     setCurrentConversationId(id);
     setInput('');
     setErrorMessage('');
     setShowExamples(true);
     setAutoFollow(true);
-  }, [welcomeMessage]);
+  }, [enforceCapAndQueueDeletion, welcomeMessage]);
 
   const handleNewConversation = useCallback(() => {
     stopListening();
@@ -681,6 +724,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     cancelPendingCaptcha(true);
     AudioService.stop();
     setCurrentConversationId(conversationId);
+    const selected = conversationsRef.current[conversationId];
+    setAnnouncement(`${selected?.title ?? 'Conversation'} selected. ${selected?.messages.length ?? 0} messages.`);
     setInput('');
     setErrorMessage('');
     setDrawerOpen(false);
@@ -690,12 +735,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   const retryPendingDeletions = useCallback(() => {
     for (const conversationId of Object.keys(pendingDeletionsRef.current)) {
+      if ((pendingDeletionRetryAtRef.current[conversationId] ?? 0) > Date.now()) continue;
       void ChatAPI.deleteConversation(conversationId).then(() => {
         const next = { ...pendingDeletionsRef.current };
         delete next[conversationId];
         pendingDeletionsRef.current = next;
+        delete pendingDeletionRetryAtRef.current[conversationId];
         persistStore();
-      }).catch(() => {
+      }).catch((error: unknown) => {
+        if (error instanceof APIError && error.retryAfterMs !== undefined) {
+          pendingDeletionRetryAtRef.current[conversationId] = Date.now() + error.retryAfterMs;
+        }
         // Still pending; the next retry pass picks it up.
       });
     }
@@ -724,8 +774,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       const next = { ...pendingDeletionsRef.current };
       delete next[conversationId];
       pendingDeletionsRef.current = next;
+      delete pendingDeletionRetryAtRef.current[conversationId];
       persistStore();
     }).catch(error => {
+      if (error instanceof APIError && error.retryAfterMs !== undefined) {
+        pendingDeletionRetryAtRef.current[conversationId] = Date.now() + error.retryAfterMs;
+      }
       console.error('Failed to delete server conversation; will retry:', error);
     });
     if (conversationId === currentConversationIdRef.current) createAndSelectConversation();
@@ -755,7 +809,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         }, remote);
         tombstonesRef.current = merged.tombstones;
         pendingDeletionsRef.current = merged.pendingServerDeletions;
-        return enforceConversationCap(merged.conversations, currentConversationIdRef.current);
+        return enforceCapAndQueueDeletion(merged.conversations, currentConversationIdRef.current);
       });
       if (currentTombstoned) {
         if (activeTurnRef.current?.conversationId === currentConversationIdRef.current) {
@@ -766,7 +820,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
-  }, [abortActiveTurn, createAndSelectConversation, userId]);
+  }, [abortActiveTurn, createAndSelectConversation, enforceCapAndQueueDeletion, userId]);
 
   useEffect(() => {
     if (isGuest) return;
@@ -799,6 +853,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }
     if (error instanceof StreamProtocolError) return 'The server returned an invalid streaming response. Please retry.';
     if (error instanceof APIError) {
+      if (error.code === 'identity_required' || error.code === 'identity_changed' || error.status === 428) {
+        return 'Your session is being rechecked. Retry after verification completes.';
+      }
+      if (error.code === 'conversation_busy') {
+        const wait = error.retryAfterMs === undefined ? '' : ` Try again in ${Math.max(1, Math.ceil(error.retryAfterMs / 1_000))} seconds.`;
+        return `This conversation is still finishing another operation.${wait}`;
+      }
       if (error.status === 429 || error.status === 400 || error.status === 413) {
         // Upstream detail can be long and internal; show a readable prefix only.
         return error.message.length > 200 ? `${error.message.slice(0, 200)}…` : error.message;
@@ -933,7 +994,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     // `resetConversation` alone is NOT safe: when the server has silently lost
     // its record, that is exactly the turn that must re-seed, and the client
     // cannot tell. Skipping it needs a server-side `history_required` signal.
-    const history = serializeConversationHistory(baseMessages).slice(-HISTORY_CONTEXT_ITEMS);
+    const history = baseMessages.some(message => message.role === 'user')
+      ? serializeConversationHistory(baseMessages).slice(-HISTORY_CONTEXT_ITEMS)
+      : [];
 
     stopListening();
     AudioService.stop();
@@ -961,7 +1024,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     const isFirstQuestion = !baseMessages.some(message => message.role === 'user');
     setConversations(previous => {
       const conversation = previous[conversationId] || existingConversation;
-      return enforceConversationCap({
+      return enforceCapAndQueueDeletion({
         ...previous,
         [conversationId]: {
           ...conversation,
@@ -1049,18 +1112,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       });
 
       let result: StreamingResponse;
+      const turnId = generateTurnId();
       try {
-        result = await send(generateTurnId());
+        result = await send(turnId);
       } catch (error) {
         // Retry once, but only when the failure is transient AND nothing was
         // consumed: with no output delivered the server has not committed a
         // turn, so a second attempt cannot duplicate or interleave an answer.
-        if (!isSafelyRetryable(error) || controller.signal.aborted) throw error;
+        const retryDelayMs = automaticRetryDelayMs(error);
+        if (retryDelayMs === null || controller.signal.aborted) throw error;
         const active = activeTurnRef.current;
         if (!active || active.requestId !== requestId) throw error;
-        await sleep(RETRY_BACKOFF_MS + Math.random() * RETRY_JITTER_MS);
+        await sleep(retryDelayMs);
         if (activeTurnRef.current?.requestId !== requestId || controller.signal.aborted) throw error;
-        result = await send(generateTurnId());
+        result = await send(turnId);
       }
 
       if (activeTurnRef.current?.requestId !== requestId) return;
@@ -1089,6 +1154,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         }],
         needsServerResync: false,
       }));
+      setAnnouncement('Assistant response complete.');
       // Hand the steps to the answer before clearActiveTurn drops them, so the
       // trail does not blink out at the moment the answer lands.
       const steps = activeTurnRef.current?.activities ?? [];
@@ -1178,6 +1244,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     }
   }, [
     clearActiveTurn,
+    enforceCapAndQueueDeletion,
     getErrorText,
     handleClearCommand,
     handleUsageCommand,
@@ -1419,11 +1486,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     if (!element) return;
     if (reduceMotion) {
       element.scrollTop = element.scrollHeight;
+      element.focus({ preventScroll: true });
       return;
     }
     skipNextAutoFollowRef.current = true;
     armProgrammaticScrollGuard(element);
     element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+    window.setTimeout(() => element.focus({ preventScroll: true }), SMOOTH_SCROLL_SETTLE_MS);
   }, [armProgrammaticScrollGuard, reduceMotion]);
 
   /**
@@ -1633,6 +1702,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   return (
     <Box
+      component={isStandalone ? 'main' : 'div'}
       id="wf-chat-window"
       className="wf-chat-window"
       // Height and overflow live in App.css: MUI reads an sx array as
@@ -1657,12 +1727,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
           <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
-            <Typography variant="h6" sx={{ lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <Typography component={isStandalone ? 'h1' : 'h2'} variant="h6" sx={{ lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {currentConversation.title}
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-              <Box sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: 'success.main' }} />
-              <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>{ASSISTANT_NAME} · online</Typography>
+              <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>{ASSISTANT_NAME} · Windows and IT assistant</Typography>
             </Box>
           </Box>
           {usageVisible && (
@@ -1679,21 +1748,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           ref={messagesContainerRef}
           className="chat-messages-container"
           aria-label="Chat messages"
+          role="region"
+          tabIndex={0}
           onScroll={handleScroll}
           // The app's only scroll container. `overscroll-behavior: contain`
           // and `scrollbar-gutter` are in App.css alongside the pane sizing.
           sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
         >
           <Box ref={transcriptContentRef}>
-            {/* KNOWN LIMITATION: because this container is the live region, its
-                children being replaced on a conversation switch reads to
-                assistive tech as "all of these were just added", so the whole
-                transcript is announced. Fixing it properly needs a dedicated
-                announcer, which duplicates every answer's text in the DOM, or
-                suppression around the swap — neither is safe to ship without
-                testing against a real screen reader. `aria-relevant="additions"`
-                was dropped: it is already the default for role="log". */}
-            <Box role="log" aria-live="polite">
+            <Box role="log" aria-live="off">
               {currentConversation.messages.map((message, index) => {
                 const isLast = index === currentConversation.messages.length - 1
                   && Boolean(lastUserMessageId);
@@ -1796,7 +1859,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                       <Box
                         key={prompt}
                         component="button"
-                        onClick={() => { void handleSendMessage(prompt); }}
+                        onClick={() => {
+                          setInput(prompt);
+                          requestAnimationFrame(() => textFieldRef.current?.querySelector('textarea')?.focus());
+                        }}
                         sx={{ textAlign: 'left', cursor: 'pointer', font: 'inherit', display: 'flex', alignItems: 'center', gap: 1.25, p: 1.5, border: t => `1px solid ${t.palette.divider}`, borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary', transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s', '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' } }}
                       >
                         <Box sx={{ width: 32, height: 32, borderRadius: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'rgba(15,108,189,0.1)', color: 'primary.main' }}>
@@ -1819,6 +1885,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               Jump to latest
             </Button>
           )}
+        </Box>
+
+        <Box
+          role="status"
+          aria-live="polite"
+          sx={{ position: 'absolute', width: 1, height: 1, p: 0, m: -1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0 }}
+        >
+          {announcement}
         </Box>
 
         <InputArea

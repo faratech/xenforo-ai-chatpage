@@ -27,7 +27,7 @@ assert_link_target "$PUBLIC_LINK" "$r1"
 assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$r1")"
 
 # r1's template bundle (v1) was applied on both nodes and re-imported
-assert_templates_match_bundle "$r1/xenforo-templates"
+assert_templates_match_bundle "$(release_bundle "$r1")"
 grep -q 'v1' "$XENFORO_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \
   || fail_test "rollback did not restore the v1 templates"
 grep -q 'v1' "$PEER_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \

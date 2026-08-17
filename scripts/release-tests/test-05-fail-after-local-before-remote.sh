@@ -19,7 +19,7 @@ run_deploy || rc=$?
 
 assert_link_target "$PUBLIC_LINK" "$r1"
 assert_link_target "$PEER_PUBLIC_LINK" "$(to_peer_path "$r1")"
-assert_templates_match_bundle "$r1/xenforo-templates"
+assert_templates_match_bundle "$(release_bundle "$r1")"
 assert_state local-switched rolled-back
 
 # The failure path re-purged and re-verified the restored release

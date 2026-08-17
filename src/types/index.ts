@@ -160,6 +160,7 @@ export interface UserData {
   avatar?: string;
   name?: string;
   user_id?: string | number;
+  identity_id?: string;
 }
 
 export interface UsageData {

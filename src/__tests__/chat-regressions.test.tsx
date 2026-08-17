@@ -158,12 +158,12 @@ describe('transactional branch operations', () => {
       element => (element as HTMLTextAreaElement).value === 'First question',
     );
     expect(editor).toBeDefined();
-    fireEvent.change(editor as Element, { target: { value: 'x'.repeat(501) } });
+    fireEvent.change(editor as Element, { target: { value: 'x'.repeat(4097) } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByText(/Messages are limited to 500 UTF-8 bytes/)).toBeInTheDocument();
+    expect(await screen.findByText('Message is 1 byte too long.')).toBeInTheDocument();
     expect(messageParagraphs('First answer')).toHaveLength(1);
-    expect(messageParagraphs('First question')).toHaveLength(1);
+    expect(editor).toHaveValue('x'.repeat(4097));
     expect(apiMocks.sendMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -249,6 +249,18 @@ describe('transactional branch operations', () => {
     expect(await screen.findByText('Recovered answer', undefined, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByText(/Network error/)).not.toBeInTheDocument();
     expect(apiMocks.sendMessage.mock.calls.length).toBe(callsBefore + 2);
+  });
+
+  it('does not retry a 429 after the generic short transport backoff', async () => {
+    await bootWithExchange();
+    const callsBefore = apiMocks.sendMessage.mock.calls.length;
+    apiMocks.sendMessage.mockRejectedValueOnce(
+      new APIError('Please wait before trying again.', { status: 429, retryable: true }),
+    );
+    fireEvent.click(screen.getByLabelText('Regenerate response'));
+
+    expect(await screen.findByText('Please wait before trying again.')).toBeInTheDocument();
+    expect(apiMocks.sendMessage.mock.calls.length).toBe(callsBefore + 1);
   });
 
   it('never retries a turn that already delivered part of an answer', async () => {
@@ -414,7 +426,7 @@ describe('server deletion retries', () => {
 
     fireEvent.click(screen.getByLabelText('Open chat history'));
     expect(document.getElementById('wf-chat-window')).toContainElement(await screen.findByText('Recent chats'));
-    fireEvent.click(await screen.findByLabelText('Delete conversation'));
+    fireEvent.click(await screen.findByLabelText(/Delete conversation:/));
 
     await waitFor(() => {
       const stored = readStore('42');

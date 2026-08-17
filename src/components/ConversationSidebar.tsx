@@ -97,34 +97,44 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
           {conversations.map((conv) => {
             const selected = conv.id === currentConversationId;
             return (
-              <ListItemButton
+              <Box
+                component="li"
                 key={conv.id}
-                selected={selected}
-                onClick={() => onSelectConversation(conv.id)}
                 sx={{
+                  display: 'flex',
+                  alignItems: 'center',
                   borderRadius: 1.5,
                   mb: 0.25,
-                  gap: 1.25,
-                  '&.Mui-selected': {
-                    backgroundColor: 'secondary.main',
-                    color: '#fff',
-                    '&:hover': { backgroundColor: 'secondary.main' },
-                  },
                   '&:hover .delete-btn': { opacity: 1 },
                   '&:focus-within .delete-btn': { opacity: 1 },
                 }}
               >
-                <ChatBubbleOutlineIcon sx={{ fontSize: 16, opacity: 0.85, flexShrink: 0 }} />
-                <ListItemText
-                  primary={conv.title}
-                  slotProps={{ primary: { noWrap: true, sx: { fontSize: 13, fontWeight: 500 } } }}
-                />
+                <ListItemButton
+                  selected={selected}
+                  aria-current={selected ? 'page' : undefined}
+                  onClick={() => onSelectConversation(conv.id)}
+                  sx={{
+                    minWidth: 0,
+                    borderRadius: 1.5,
+                    gap: 1.25,
+                    '&.Mui-selected': {
+                      backgroundColor: 'secondary.main',
+                      color: '#fff',
+                      '&:hover': { backgroundColor: 'secondary.main' },
+                    },
+                  }}
+                >
+                  <ChatBubbleOutlineIcon sx={{ fontSize: 16, opacity: 0.85, flexShrink: 0 }} />
+                  <ListItemText
+                    primary={conv.title}
+                    slotProps={{ primary: { noWrap: true, sx: { fontSize: 13, fontWeight: 500 } } }}
+                  />
+                </ListItemButton>
                 <IconButton
                   className="delete-btn"
-                  aria-label="Delete conversation"
+                  aria-label={`Delete conversation: ${conv.title}`}
                   size="small"
-                  onClick={(e) => {
-                    e.stopPropagation();
+                  onClick={() => {
                     onDeleteConversation(conv.id);
                   }}
                   sx={{
@@ -137,7 +147,7 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                 >
                   <DeleteIcon fontSize="small" />
                 </IconButton>
-              </ListItemButton>
+              </Box>
             );
           })}
         </List>

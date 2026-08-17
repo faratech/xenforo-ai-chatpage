@@ -12,7 +12,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - `./deploy.sh rollback` - Atomically restore the previous production release
 
 ### Deployment
-The app is served through `/web/public_html/chatpage`, which points to matching releases under `/web/releases/xenforo-ai-chatpage/` on both production nodes and serves `https://windowsforum.com/chatpage`.
+The app is served through `/web/public_html/chatpage`, which points to a release under `/web/releases/xenforo-ai-chatpage/` and serves `https://windowsforum.com/chatpage`. Production currently defaults to the single GCP node; dual-node staging is retained as an explicit compatibility mode.
+
+Production releases must come from a committed, clean worktree; `npm run deploy` refuses dirty state by default. `DEPLOY_ALLOW_DIRTY=1` is an emergency-only override and is recorded in private release metadata. Release inventories, backend hashes, and XenForo template bundles live under `/web/releases/xenforo-ai-chatpage/.private/<release-id>/`, outside the public symlink. The deploy gate also lints the available chat backend PHP files and runs `/web/tests/test_chat_predicates.php` when present.
 
 ### Project Configuration
 - **Framework**: Vite 8 + React 19 + TypeScript
@@ -246,10 +248,11 @@ Citations rendered in "Sources" section at message end.
 ## Testing Deployment Locally
 
 Before deploying:
-1. Run the full gate: `npm run check`
-2. Verify `dist/index.html` references `main.js?v=2` and `main.css?v=2`
-3. Test locally: `npm run preview`
-4. Coordinate the backend-first rollout, then deploy: `npm run deploy`
+1. Commit the intended frontend, release-tooling, template, and backend changes; confirm `git status --short` is empty.
+2. Run the full gate: `npm run check`
+3. Verify `dist/index.html` references `main.js?v=2` and `main.css?v=2`
+4. Test locally: `npm run preview`
+5. Coordinate the backend-first rollout, then deploy from the clean commit: `npm run deploy`
 
 ## Integration with XenForo
 

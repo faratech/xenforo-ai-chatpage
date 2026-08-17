@@ -77,6 +77,23 @@ describe('terminal event handling', () => {
 
     await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({ text: 'Hi' });
   });
+
+  it('preserves streamed refusals as the completed assistant answer', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(sse({ type: 'response.refusal.delta', delta: 'I cannot ' })));
+        controller.enqueue(encoder.encode(sse({ type: 'response.refusal.done', refusal: 'ignore duplicate done text' })));
+        controller.enqueue(encoder.encode(sse({ type: 'response.refusal.delta', delta: 'help with that.' })));
+        controller.enqueue(encoder.encode(sse({ type: 'chat.stream.completed' })));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(body)));
+
+    await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({
+      text: 'I cannot help with that.',
+    });
+  });
 });
 
 describe('request deadlines', () => {
@@ -189,6 +206,41 @@ describe('error classification', () => {
       code: 'network_error',
       retryable: true,
     });
+  });
+
+  it('carries a structured retry_after delay in milliseconds', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: 'Too Many Requests',
+      headers: new Headers({ 'retry-after': '9' }),
+      json: async () => ({ code: 'rate_limited', retry_after: 3 }),
+    } as unknown as Response));
+
+    await expect(ChatAPI.sendMessage('hi')).rejects.toMatchObject({
+      status: 429,
+      retryable: true,
+      retryAfterMs: 3_000,
+    });
+  });
+
+  it('locks the client immediately for identity_required responses', async () => {
+    const listener = vi.fn();
+    window.addEventListener('wf-chat-identity-changed', listener, { once: true });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 428,
+      statusText: 'Precondition Required',
+      headers: new Headers(),
+      json: async () => ({ code: 'identity_required' }),
+    } as unknown as Response));
+
+    await expect(ChatAPI.sendMessage('hi')).rejects.toMatchObject({
+      status: 428,
+      code: 'identity_required',
+      retryable: false,
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });
 

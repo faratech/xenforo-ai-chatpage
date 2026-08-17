@@ -1,0 +1,16 @@
+[Unit]
+Description=Prune inactive WindowsForum AI chat conversations
+After=network-online.target mariadb.service aiapi.service
+Wants=network-online.target
+ConditionPathExists=/web/xenforo-ai-chatpage/scripts/prune-conversations.php
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/web/xenforo-ai-chatpage
+ExecStart=/usr/bin/php /web/xenforo-ai-chatpage/scripts/prune-conversations.php --days=30 --limit=25 --apply
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true

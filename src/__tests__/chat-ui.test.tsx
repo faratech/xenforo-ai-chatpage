@@ -400,7 +400,7 @@ describe('composer and message integrity', () => {
       </ThemeProvider>
     );
     expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled();
-    expect(screen.getByText('502 / 500 bytes')).toBeInTheDocument();
+    expect(screen.getByText('Message is 2 bytes too long')).toBeInTheDocument();
   });
 
   it('shows what the assistant is doing instead of a bare spinner', async () => {
