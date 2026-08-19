@@ -58,6 +58,21 @@ describe('unified message sources', () => {
     expect(screen.getByText('guide.pdf')).toBeInTheDocument();
   });
 
+  it('folds a provider-authored trailing Sources section into the unified panel', () => {
+    renderMessage([
+      'Use the supported recovery steps above.',
+      '',
+      '### Sources',
+      '- [example.com](https://example.com/docs)',
+      '- [Microsoft Learn](https://learn.microsoft.com/en-us/windows/)',
+    ].join('\n'));
+
+    expect(screen.getAllByText('Sources')).toHaveLength(1);
+    expect(screen.queryByRole('heading', { name: 'Sources' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'example.com' })).toHaveLength(1);
+    expect(screen.getAllByRole('link', { name: 'Microsoft Learn' })).toHaveLength(1);
+  });
+
   it('reports a source index and turn correlation without sending its URL', () => {
     renderMessage('See [example.com](https://example.com/docs) for details.');
 

@@ -122,24 +122,13 @@ interface RenderedAnswerContent {
   citations: Annotation[];
 }
 
-/**
- * `sanitizeAndParse` keeps its portable string contract, including its Sources
- * footer. Inside the React message surface we lift that generated footer back
- * into data so model links and streamed annotations share one accessible
- * provenance panel.
- */
-const prepareAnswerContent = (html: string): RenderedAnswerContent => {
-  if (!html || typeof document === 'undefined') return { html, citations: [] };
-  const template = document.createElement('template');
-  template.innerHTML = html;
-  const footer = template.content.lastElementChild;
-  const label = footer?.querySelector(':scope > small:first-child')?.textContent?.trim().toLowerCase();
-  if (!(footer instanceof HTMLParagraphElement) || label !== 'sources:') {
-    return { html, citations: [] };
-  }
+const isAuthoredSourcesLabel = (element: Element): boolean => {
+  if (!/^(?:H[1-6]|P)$/.test(element.tagName)) return false;
+  return element.textContent?.trim().replace(/:$/, '').toLowerCase() === 'sources';
+};
 
-  const citations: Annotation[] = [];
-  footer.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(anchor => {
+const appendSafeLinkCitations = (root: ParentNode, citations: Annotation[]): void => {
+  root.querySelectorAll<HTMLAnchorElement>('a[href]').forEach(anchor => {
     const url = parseHttpUrl(anchor.href);
     if (!url) return;
     citations.push({
@@ -148,9 +137,54 @@ const prepareAnswerContent = (html: string): RenderedAnswerContent => {
       title: anchor.textContent?.trim() || url.hostname,
     });
   });
-  const separator = footer.previousElementSibling;
-  footer.remove();
-  if (separator?.tagName === 'HR') separator.remove();
+};
+
+/**
+ * `sanitizeAndParse` keeps its portable string contract, including its Sources
+ * footer. Inside the React message surface we lift that generated footer back
+ * into data so model links and streamed annotations share one accessible
+ * provenance panel. Some providers also append their own Markdown `Sources`
+ * section. When structured citations exist, fold that trailing section into
+ * the same panel instead of displaying two source lists.
+ */
+const prepareAnswerContent = (
+  html: string,
+  structuredAnnotations: readonly Annotation[] = [],
+): RenderedAnswerContent => {
+  if (!html || typeof document === 'undefined') return { html, citations: [] };
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const footer = template.content.lastElementChild;
+  const label = footer?.querySelector(':scope > small:first-child')?.textContent?.trim().toLowerCase();
+  const citations: Annotation[] = [];
+
+  if (footer instanceof HTMLParagraphElement && label === 'sources:') {
+    appendSafeLinkCitations(footer, citations);
+    const separator = footer.previousElementSibling;
+    footer.remove();
+    if (separator?.tagName === 'HR') separator.remove();
+  }
+
+  const topLevelElements = [...template.content.children];
+  const authoredSources = [...topLevelElements].reverse().find(isAuthoredSourcesLabel);
+  if (authoredSources) {
+    const authoredTail = topLevelElements.slice(topLevelElements.indexOf(authoredSources));
+    const authoredBody = authoredTail.slice(1);
+    const isTrailingSourceList = authoredBody.every(element => (
+      /^(?:OL|P|UL)$/.test(element.tagName)
+      && (element.querySelector('a[href], sup') !== null
+        || /(?:https?:\/\/|\[\d+\])/.test(element.textContent ?? ''))
+    ));
+    if (isTrailingSourceList) {
+      authoredTail.forEach(element => appendSafeLinkCitations(element, citations));
+    }
+    if (isTrailingSourceList && (citations.length > 0 || structuredAnnotations.length > 0)) {
+      const precedingSeparator = authoredSources.previousElementSibling;
+      authoredTail.forEach(element => element.remove());
+      if (precedingSeparator?.tagName === 'HR') precedingSeparator.remove();
+    }
+  }
+
   return { html: template.innerHTML, citations };
 };
 
@@ -256,8 +290,11 @@ export const Message = memo<MessageProps>(({
   const renderedAnswer = useMemo(
     () => (isStreaming
       ? { html: '', citations: [] }
-      : prepareAnswerContent(enhanceRichContent(sanitizeAndParse(msg.rawContent)))),
-    [msg.rawContent, isStreaming]
+      : prepareAnswerContent(
+        enhanceRichContent(sanitizeAndParse(msg.rawContent)),
+        msg.annotations,
+      )),
+    [msg.rawContent, msg.annotations, isStreaming]
   );
   const renderedContent = renderedAnswer.html;
 
