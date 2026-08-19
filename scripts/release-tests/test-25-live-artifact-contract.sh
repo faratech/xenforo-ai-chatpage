@@ -10,6 +10,26 @@ setup_sandbox
 run_deploy || fail_test "baseline deploy failed"
 r1="$(current_release)"
 
+# Cloudflare can append a managed challenge bootstrap to HTML for the deploy
+# probe while leaving the shipped application contract intact. This must not
+# weaken byte-for-byte verification for non-HTML assets.
+clear_rules
+add_rule curl 1+ edge-html-challenge \
+  '--resolve windowsforum\.com:443:203\.0\.113\.10 .*\/(index|offline)\.html.*--output'
+run_deploy || fail_test "deploy should accept Cloudflare-injected HTML with an intact release contract"
+r1="$(current_release)"
+
+# The HTML exception remains fail-closed when a required app-shell marker is
+# actually absent at the public edge.
+clear_rules
+add_rule curl 1+ invalid-html-contract \
+  '--resolve windowsforum\.com:443:203\.0\.113\.10 .*\/index\.html.*--output'
+rc=0
+run_deploy || rc=$?
+[[ "$rc" -ne 0 ]] || fail_test "deploy should reject a broken public index contract"
+assert_contains "$RT_LAST_OUTPUT" "did not satisfy the activated release HTML contract" "public index contract failure"
+assert_link_target "$PUBLIC_LINK" "$r1"
+
 assert_probe() {
   local relative="$1" query="$2" origin_ip="$3" head="$4"
   local expected="url=$LIVE_ORIGIN/chatpage/$relative$query resolve=windowsforum.com:443:$origin_ip head=$head"

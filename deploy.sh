@@ -966,6 +966,43 @@ assert_public_hash() {
   fail "Public $relative did not converge to the activated release"
 }
 
+# Cloudflare may append its managed challenge bootstrap to HTML responses for
+# non-browser deploy probes. Byte hashes therefore remain strict for scripts,
+# styles, workers, manifests, icons, and media, while the two public HTML files
+# are checked against their release contract after the exact origin hash has
+# already passed.
+assert_public_html_contract() {
+  local relative="$1" download attempt
+
+  [[ -n "$PUBLIC_EDGE_IP" ]] || { fail "Cannot resolve the public Cloudflare edge"; return 1; }
+  download="$(mktemp)" || return 1
+  TEMP_FILES+=("$download")
+
+  for attempt in 1 2 3 4 5 6; do
+    if curl --fail --silent --show-error \
+      --resolve "windowsforum.com:443:$PUBLIC_EDGE_IP" \
+      "$LIVE_ORIGIN/chatpage/$relative?v=2" --output "$download"; then
+      if [[ "$relative" == index.html ]] \
+        && grep -Fq '<div id="root" class="google-anno-skip" style="min-height:100dvh"></div>' "$download" \
+        && grep -Fq 'src="/chatpage/static/js/main.js?v=2"' "$download" \
+        && grep -Fq 'href="/chatpage/static/css/main.css?v=2"' "$download"; then
+        return 0
+      fi
+      if [[ "$relative" == offline.html ]] \
+        && grep -Fq '<title>WindowsForum AI is offline</title>' "$download" \
+        && grep -Fq 'Private conversations are not stored in the offline cache.' "$download" \
+        && grep -Fq 'onclick="location.reload()"' "$download"; then
+        return 0
+      fi
+    fi
+    if ((attempt < 6)); then
+      sleep "$DEPLOY_PUBLIC_RETRY_DELAY"
+    fi
+  done
+
+  fail "Public $relative did not satisfy the activated release HTML contract"
+}
+
 assert_chat_page_markup() {
   local mode="$1" download attempt max_attempts=1
 
@@ -1051,7 +1088,11 @@ verify_live_release() {
       || { fail "Release is missing required live artifact: $relative"; return 1; }
     assert_origin_hash "$relative" "$file" "$ORIGIN_IP" || return 1
     assert_origin_hash "$relative" "$file" "$PEER_ORIGIN_IP" || return 1
-    assert_public_hash "$relative" "$file" || return 1
+    if [[ "$relative" == index.html || "$relative" == offline.html ]]; then
+      assert_public_html_contract "$relative" || return 1
+    else
+      assert_public_hash "$relative" "$file" || return 1
+    fi
   done
 
   if [[ "$require_chat_contract" == 1 ]]; then

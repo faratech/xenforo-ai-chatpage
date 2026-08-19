@@ -275,6 +275,7 @@ MANIFEST
   <head>
     <meta charset="utf-8" />
     <title>AI Chat - WindowsForum</title>
+    <link rel="manifest" href="/chatpage/manifest.json">
     <script type="module" crossorigin src="/chatpage/static/js/main.js?v=2"></script>
     <link rel="modulepreload" crossorigin href="/chatpage/static/js/vendor-sandbox1.chunk.js">
     <link rel="stylesheet" crossorigin href="/chatpage/static/css/main.css?v=2">
@@ -603,6 +604,12 @@ else
     if [[ "$mode" == corrupt-body ]]; then
       printf 'CORRUPTED-BY-SANDBOX' >>"$out"
       stub_log "INJECTED corrupt-body"
+    elif [[ "$mode" == edge-html-challenge ]]; then
+      printf '<script>window.__CF$cv$params={};</script>' >>"$out"
+      stub_log "INJECTED edge-html-challenge"
+    elif [[ "$mode" == invalid-html-contract ]]; then
+      sed -i 's/id="root"/id="missing-root"/' "$out"
+      stub_log "INJECTED invalid-html-contract"
     fi
   else
     cat -- "$file"
