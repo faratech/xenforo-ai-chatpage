@@ -35,5 +35,17 @@ done
 # The legacy snapshot is the recorded previous release on each host
 assert_link_target "$RELEASE_ROOT/previous" "$legacy_local"
 assert_link_target "$PEER_RELEASE_ROOT/previous" "$legacy_remote"
+
+# A manual rollback to this pre-PWA release remains supported. The strict
+# forward live verifier must not require manifest/worker/offline/icon assets
+# that did not exist in the legacy snapshot.
+run_deploy rollback || fail_test "rollback to the pre-PWA legacy release failed"
+assert_link_target "$PUBLIC_LINK" "$legacy_local"
+assert_link_target "$PEER_PUBLIC_LINK" "$legacy_remote"
+grep -q 'legacy-main-js' "$PUBLIC_LINK/static/js/main.js" \
+  || fail_test "legacy rollback did not restore the pre-PWA payload"
+assert_contains "$RT_LAST_OUTPUT" \
+  "Rollback scope is frontend release assets and bundled chat templates only" \
+  "rollback boundary warning"
 assert_no_next_litter
 echo "OK"

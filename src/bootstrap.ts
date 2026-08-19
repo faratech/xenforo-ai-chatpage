@@ -1,6 +1,12 @@
 import { startIdentityBootstrap } from './services/identityBootstrap';
+import { pwaInstallPrompt, registerPWA } from './services/pwa';
 
 const initialIdentityPromise = startIdentityBootstrap();
+
+// The manifest points installed launches at the canonical XenForo /pages/ai/
+// shell; registerPWA selects a separate narrow scope for legacy /chatpage/.
+pwaInstallPrompt.start();
+void registerPWA().catch(() => undefined);
 
 // Avoid an unhandled-rejection report while the hashed application graph is
 // loading. App still awaits this exact promise and renders its retry state.

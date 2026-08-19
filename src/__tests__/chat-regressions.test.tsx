@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import type { ChatStoreV3 } from '../types';
+import type { ChatStoreV4 } from '../types';
 
 const apiMocks = vi.hoisted(() => ({
   sendMessage: vi.fn(),
@@ -12,6 +12,25 @@ const apiMocks = vi.hoisted(() => ({
   playTTS: vi.fn(),
   stopAudio: vi.fn(),
   setMuted: vi.fn(),
+  getTTSPreferences: vi.fn(() => ({ voice: 'alloy', speed: 1 })),
+  configureTTS: vi.fn(),
+  listSavedConversations: vi.fn(),
+  getSavedConversation: vi.fn(),
+  upsertSavedConversation: vi.fn(),
+  deleteSavedConversation: vi.fn(),
+  submitChatFeedback: vi.fn(),
+  createConversationShare: vi.fn(),
+  getConversationShare: vi.fn(),
+  listConversationShares: vi.fn(),
+  revokeConversationShare: vi.fn(),
+  uploadChatAttachment: vi.fn(),
+  deleteChatAttachment: vi.fn(),
+  listSupportCases: vi.fn(),
+  getSupportCase: vi.fn(),
+  upsertSupportCase: vi.fn(),
+  deleteSupportCase: vi.fn(),
+  exportSavedChatData: vi.fn(),
+  deleteAllSavedChatData: vi.fn(),
 }));
 
 vi.mock('../services/api', async importOriginal => {
@@ -24,6 +43,23 @@ vi.mock('../services/api', async importOriginal => {
       getUsage: apiMocks.getUsage,
       clearConversation: apiMocks.clearConversation,
       deleteConversation: apiMocks.deleteConversation,
+      listSavedConversations: apiMocks.listSavedConversations,
+      getSavedConversation: apiMocks.getSavedConversation,
+      upsertSavedConversation: apiMocks.upsertSavedConversation,
+      deleteSavedConversation: apiMocks.deleteSavedConversation,
+      submitChatFeedback: apiMocks.submitChatFeedback,
+      createConversationShare: apiMocks.createConversationShare,
+      getConversationShare: apiMocks.getConversationShare,
+      listConversationShares: apiMocks.listConversationShares,
+      revokeConversationShare: apiMocks.revokeConversationShare,
+      uploadChatAttachment: apiMocks.uploadChatAttachment,
+      deleteChatAttachment: apiMocks.deleteChatAttachment,
+      listSupportCases: apiMocks.listSupportCases,
+      getSupportCase: apiMocks.getSupportCase,
+      upsertSupportCase: apiMocks.upsertSupportCase,
+      deleteSupportCase: apiMocks.deleteSupportCase,
+      exportSavedChatData: apiMocks.exportSavedChatData,
+      deleteAllSavedChatData: apiMocks.deleteAllSavedChatData,
     },
   };
 });
@@ -33,7 +69,11 @@ vi.mock('../services/speech', () => ({
     playTTS: apiMocks.playTTS,
     stop: apiMocks.stopAudio,
     setMuted: apiMocks.setMuted,
+    getPreferences: apiMocks.getTTSPreferences,
+    configure: apiMocks.configureTTS,
   },
+  TTS_VOICES: ['alloy', 'cedar'],
+  saveStoredTTSPreferences: (preferences: { voice: string; speed: number }) => preferences,
 }));
 
 import {
@@ -48,10 +88,10 @@ import { Message } from '../components/Message';
 const theme = createTheme();
 const renderThemed = (node: React.ReactNode) => render(<ThemeProvider theme={theme}>{node}</ThemeProvider>);
 
-const readStore = (userId: string): ChatStoreV3 => {
-  const raw = window.localStorage.getItem(`chat_store:v3:${userId}`);
-  if (!raw) throw new Error(`no v3 store for user ${userId}`);
-  return JSON.parse(raw) as ChatStoreV3;
+const readStore = (userId: string): ChatStoreV4 => {
+  const raw = window.localStorage.getItem(`chat_store:v4:${userId}`);
+  if (!raw) throw new Error(`no v4 store for user ${userId}`);
+  return JSON.parse(raw) as ChatStoreV4;
 };
 
 beforeAll(() => {
@@ -96,6 +136,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  window.history.replaceState(null, '', '/');
   window.localStorage.clear();
   apiMocks.sendMessage.mockReset();
   apiMocks.getUsage.mockReset().mockResolvedValue({ logged_in: true, used: 1, limit: 10 });
@@ -104,6 +145,31 @@ beforeEach(() => {
   apiMocks.playTTS.mockReset().mockResolvedValue(undefined);
   apiMocks.stopAudio.mockReset();
   apiMocks.setMuted.mockReset();
+  apiMocks.listSavedConversations.mockReset().mockResolvedValue({ success: true, conversations: [], next_cursor: null });
+  apiMocks.getSavedConversation.mockReset();
+  apiMocks.upsertSavedConversation.mockReset().mockImplementation(async (conversation, revision) => ({
+    success: true,
+    conversation: {
+      ...conversation,
+      revision: revision + 1,
+      created_at: conversation.created_at ?? Date.now(),
+      updated_at: Date.now(),
+    },
+  }));
+  apiMocks.deleteSavedConversation.mockReset().mockResolvedValue({ success: true });
+  apiMocks.submitChatFeedback.mockReset().mockResolvedValue({ success: true, feedback: {} });
+  apiMocks.createConversationShare.mockReset();
+  apiMocks.getConversationShare.mockReset();
+  apiMocks.listConversationShares.mockReset().mockResolvedValue({ success: true, shares: [], next_cursor: null });
+  apiMocks.revokeConversationShare.mockReset().mockResolvedValue({ success: true });
+  apiMocks.uploadChatAttachment.mockReset();
+  apiMocks.deleteChatAttachment.mockReset().mockResolvedValue({ success: true, deferred_cleanup: false });
+  apiMocks.listSupportCases.mockReset().mockResolvedValue({ success: true, cases: [], next_cursor: null });
+  apiMocks.getSupportCase.mockReset();
+  apiMocks.upsertSupportCase.mockReset();
+  apiMocks.deleteSupportCase.mockReset();
+  apiMocks.exportSavedChatData.mockReset();
+  apiMocks.deleteAllSavedChatData.mockReset();
   delete window.turnstile;
 });
 
@@ -136,7 +202,7 @@ const bootWithExchange = async (userId = '42') => {
 describe('account switching', () => {
   it('never shows one account\'s history to another account', async () => {
     const { unmount } = await bootWithExchange('42');
-    await waitFor(() => expect(window.localStorage.getItem('chat_store:v3:42')).not.toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem('chat_store:v4:42')).not.toBeNull());
     unmount();
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Other" userId="99" />);
@@ -397,15 +463,15 @@ describe('cross-tab deletion propagation', () => {
     const conversationId = apiMocks.sendMessage.mock.calls[0][1].conversationId as string;
     await waitFor(() => expect(readStore('42').conversations[conversationId]).toBeDefined());
 
-    const remote: ChatStoreV3 = {
-      version: 3,
+    const remote: ChatStoreV4 = {
+      version: 4,
       conversations: {},
       tombstones: { [conversationId]: Date.now() },
       pendingServerDeletions: {},
     };
     act(() => {
       window.dispatchEvent(new StorageEvent('storage', {
-        key: 'chat_store:v3:42',
+        key: 'chat_store:v4:42',
         newValue: JSON.stringify(remote),
       }));
     });
@@ -426,7 +492,9 @@ describe('server deletion retries', () => {
 
     fireEvent.click(screen.getByLabelText('Open chat history'));
     expect(document.getElementById('wf-chat-window')).toContainElement(await screen.findByText('Recent chats'));
-    fireEvent.click(await screen.findByLabelText(/Delete conversation:/));
+    fireEvent.click((await screen.findAllByLabelText(/Actions for /))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
       const stored = readStore('42');

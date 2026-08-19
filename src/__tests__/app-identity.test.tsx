@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 const identityMocks = vi.hoisted(() => ({
   getUserData: vi.fn(),
   setExpectedIdentityId: vi.fn(),
+  setCsrfToken: vi.fn(),
 }));
 
 vi.mock('../services/api', async importOriginal => {
@@ -14,6 +15,7 @@ vi.mock('../services/api', async importOriginal => {
     ChatAPI: {
       getUserData: identityMocks.getUserData,
       setExpectedIdentityId: identityMocks.setExpectedIdentityId,
+      setCsrfToken: identityMocks.setCsrfToken,
     },
   };
 });
@@ -52,6 +54,7 @@ beforeEach(() => {
   now = 10_000;
   identityMocks.getUserData.mockReset();
   identityMocks.setExpectedIdentityId.mockReset();
+  identityMocks.setCsrfToken.mockReset();
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -82,6 +85,17 @@ describe('identity lifecycle', () => {
   it('consumes the early bootstrap promise without issuing a second identity request', async () => {
     render(<App initialIdentityPromise={Promise.resolve(user(42))} />);
     expect(await screen.findByText('chat-user-42')).toBeInTheDocument();
+    expect(identityMocks.getUserData).not.toHaveBeenCalled();
+  });
+
+  it('installs an ephemeral CSRF token returned by the early identity bootstrap', async () => {
+    render(<App initialIdentityPromise={Promise.resolve({
+      ...user(42),
+      csrf_token: 'csrf_from_uncached_identity',
+    })} />);
+
+    expect(await screen.findByText('chat-user-42')).toBeInTheDocument();
+    expect(identityMocks.setCsrfToken).toHaveBeenCalledWith('csrf_from_uncached_identity');
     expect(identityMocks.getUserData).not.toHaveBeenCalled();
   });
 

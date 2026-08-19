@@ -1,21 +1,41 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Avatar from '@mui/material/Avatar';
+import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import CircularProgress from '@mui/material/CircularProgress';
 import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
+import Divider from '@mui/material/Divider';
 import Fade from '@mui/material/Fade';
 import IconButton from '@mui/material/IconButton';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
+import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import AddIcon from '@mui/icons-material/Add';
 import CheckIcon from '@mui/icons-material/Check';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlineOutlined';
+import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
 import MenuIcon from '@mui/icons-material/Menu';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
+import PrintOutlinedIcon from '@mui/icons-material/PrintOutlined';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import DataUsageOutlinedIcon from '@mui/icons-material/DataUsageOutlined';
+import CloudDoneOutlinedIcon from '@mui/icons-material/CloudDoneOutlined';
+import CloudOffOutlinedIcon from '@mui/icons-material/CloudOffOutlined';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
+import SupportAgentIcon from '@mui/icons-material/SupportAgent';
+import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
+import ManageAccountsOutlinedIcon from '@mui/icons-material/ManageAccountsOutlined';
 
 import type {
   Annotation,
@@ -24,13 +44,12 @@ import type {
   Conversation,
   ConversationMap,
   Message,
+  MessageAttachment,
   StreamActivity,
   StreamingResponse,
   UsageData,
 } from '../types';
 import { Message as MessageComponent } from './Message';
-import { AdSlot } from './AdSlot';
-import { ConversationSidebar } from './ConversationSidebar';
 import { InputArea } from './InputArea';
 import { EXAMPLE_PROMPTS } from '../utils/helpers';
 import { generateConversationId, generateTurnId } from '../utils/ids';
@@ -41,8 +60,11 @@ import {
   IncompleteStreamError,
   StreamCancelledError,
   StreamProtocolError,
+  type FeedbackRating,
+  type ChatAttachment,
+  type SavedConversation,
 } from '../services/api';
-import { AudioService } from '../services/speech';
+import { AudioService, configureSpeechRecognition } from '../services/speech';
 import {
   enforceConversationCap,
   loadStore,
@@ -54,6 +76,44 @@ import {
 import { ENV } from '../config/env';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
+import {
+  reportChatLifecycle,
+  reportClientEvent,
+  reportConversationExport,
+} from '../services/telemetry';
+import { loadLazyModule } from '../services/lazyImport';
+
+// Management surfaces are not part of the core chat path. Load each only
+// after its menu action so new product capabilities do not tax every session's
+// initial ChatWindow chunk.
+const SupportCasesDialog = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./SupportCasesDialog');
+  return { default: module.SupportCasesDialog };
+}));
+const ShareLinksDialog = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./ShareLinksDialog');
+  return { default: module.ShareLinksDialog };
+}));
+const AccountDataDialog = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./AccountDataDialog');
+  return { default: module.AccountDataDialog };
+}));
+const PreferencesDialog = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./PreferencesDialog');
+  return { default: module.PreferencesDialog };
+}));
+const AttachmentTray = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./AttachmentTray');
+  return { default: module.AttachmentTray };
+}));
+const AdSlot = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./AdSlot');
+  return { default: module.AdSlot };
+}));
+const ConversationSidebar = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./ConversationSidebar');
+  return { default: module.ConversationSidebar };
+}));
 
 const MAX_MESSAGE_BYTES = 4096;
 /** Local history items sent with every request as server recovery context. */
@@ -75,6 +135,9 @@ const TAIL_FOLLOW_SLACK_PX = 80;
 const ELAPSED_HINT_AFTER_MS = 8_000;
 /** How often the elapsed hint re-renders while a turn is in flight. */
 const ELAPSED_TICK_MS = 1_000;
+const CLOUD_SYNC_DEBOUNCE_MS = 1_200;
+const MAX_CLOUD_CONVERSATIONS = 50;
+const CLOUD_FETCH_CONCURRENCY = 5;
 
 /**
  * Read-aloud preference, scoped per account like every other stored key. It
@@ -82,8 +145,63 @@ const ELAPSED_TICK_MS = 1_000;
  * carried over to the next.
  */
 const muteStorageKey = (userId: string): string => `chat_mute:v1:${encodeURIComponent(userId)}`;
+const railStorageKey = (userId: string): string => `chat_rail_collapsed:v1:${encodeURIComponent(userId)}`;
+const cloudBootstrapStorageKey = (userId: string): string => `chat_cloud_bootstrap:v1:${encodeURIComponent(userId)}`;
 const utf8Encoder = new TextEncoder();
 const byteLength = (value: string): number => utf8Encoder.encode(value).length;
+
+const safeConversationQuery = (): string | null => {
+  const value = new URL(window.location.href).searchParams.get('conversation');
+  return value && /^conv_[A-Za-z0-9_-]{1,123}$/.test(value) ? value : null;
+};
+
+const safeShareQuery = (): string | null => {
+  const value = new URL(window.location.href).searchParams.get('share');
+  return value && /^[A-Za-z0-9_-]{20,128}$/.test(value) ? value : null;
+};
+
+const writeConversationUrl = (conversationId: string, mode: 'push' | 'replace'): void => {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('share');
+  url.searchParams.set('conversation', conversationId);
+  const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), conversationId };
+  if (mode === 'push') history.pushState(state, '', url);
+  else history.replaceState(state, '', url);
+};
+
+const cloudSyncable = (conversation: Conversation): boolean => (
+  conversation.messages.some(message => message.role === 'user')
+);
+
+const savedConversationToLocal = (
+  saved: SavedConversation,
+  local?: Conversation,
+): Conversation => ({
+  id: saved.id,
+  title: saved.title,
+  messages: saved.messages,
+  createdAt: saved.created_at,
+  updatedAt: saved.updated_at,
+  ...(local?.draft !== undefined ? { draft: local.draft } : {}),
+  ...(local?.draftUpdatedAt !== undefined ? { draftUpdatedAt: local.draftUpdatedAt } : {}),
+  cloudRevision: saved.revision,
+  cloudUpdatedAt: saved.updated_at,
+  cloudSyncedLocalUpdatedAt: saved.updated_at,
+  needsServerResync: true,
+});
+
+const settleInBatches = async <T,>(
+  tasks: Array<() => Promise<T>>,
+  batchSize = CLOUD_FETCH_CONCURRENCY,
+): Promise<PromiseSettledResult<T>[]> => {
+  const results: PromiseSettledResult<T>[] = [];
+  for (let index = 0; index < tasks.length; index += batchSize) {
+    results.push(...await Promise.allSettled(
+      tasks.slice(index, index + batchSize).map(task => task())
+    ));
+  }
+  return results;
+};
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -139,7 +257,22 @@ const createNewConversation = (id: string, welcomeMessage: string): Conversation
     messages: [createWelcomeMessage(welcomeMessage)],
     createdAt: now,
     updatedAt: now,
+    draft: '',
   };
+};
+
+const assistantCompletionAnnouncement = (content: string): string => {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  const bounded = normalized.length > 600 ? `${normalized.slice(0, 599).trimEnd()}…` : normalized;
+  return bounded ? `Assistant response: ${bounded}` : 'Assistant response complete.';
+};
+
+const telemetryErrorCode = (error: unknown): string => {
+  if (error instanceof APIError) return error.code ?? (error.status ? `http_${error.status}` : 'api_error');
+  if (error instanceof IncompleteStreamError) return error.code ?? 'incomplete_stream';
+  if (error instanceof StreamProtocolError) return 'stream_protocol';
+  if (error instanceof StreamCancelledError) return 'stream_cancelled';
+  return error instanceof Error ? error.name : 'unknown_error';
 };
 
 const noopEdit = (_id: string, _content: string) => {};
@@ -151,9 +284,8 @@ const formatDuration = (ms: number): string => `${Math.max(1, Math.round(ms / 10
 /**
  * The steps of the turn that just landed, kept in memory so the trail does not
  * blink out at the instant the answer commits. Only ever the most recent turn:
- * this is a display aid, not transcript data, and is deliberately not persisted
- * — `Message` is validated field-by-field by the storage sanitizer inside a
- * versioned envelope, and a schema migration is not worth it here.
+ * this is a display aid in addition to the durable activity metadata attached
+ * to the committed assistant message.
  */
 interface CompletedTrail {
   messageId: string;
@@ -208,7 +340,7 @@ const ActivitySteps: React.FC<{ activities: StreamActivity[] }> = ({ activities 
  * afterwards. Before this existed the whole strip vanished on the first text
  * delta, taking the record of what was searched with it.
  */
-const ActivityTrail: React.FC<{ activities: StreamActivity[]; durationMs: number }> = ({
+const ActivityTrail: React.FC<{ activities: StreamActivity[]; durationMs?: number }> = ({
   activities,
   durationMs,
 }) => {
@@ -244,7 +376,7 @@ const ActivityTrail: React.FC<{ activities: StreamActivity[]; durationMs: number
               transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
             }}
           />
-          {`Worked for ${formatDuration(durationMs)} · ${activities.length} ${activities.length === 1 ? 'step' : 'steps'}`}
+          {`${durationMs ? `Worked for ${formatDuration(durationMs)}` : 'Work details'} · ${activities.length} ${activities.length === 1 ? 'step' : 'steps'}`}
         </Box>
         {expanded && (
           <Box sx={{ pl: 2.5, pt: 0.5 }}>
@@ -272,10 +404,13 @@ interface TurnParams {
   captchaToken?: string;
   /** Branch operations rewrite server history unconditionally. */
   forceReset?: boolean;
+  /** Server-issued handles and display metadata bound to this user turn. */
+  attachments?: MessageAttachment[];
 }
 
 interface ActiveTurn {
   requestId: string;
+  turnId: string;
   conversationId: string;
   controller: AbortController;
   userMessageId: string;
@@ -285,6 +420,8 @@ interface ActiveTurn {
   activities: StreamActivity[];
   /** Drives the elapsed-time hint, and the duration shown on the finished trail. */
   startedAt: number;
+  /** Lifecycle telemetry records the first non-empty text chunk exactly once. */
+  firstTokenReported: boolean;
   /**
    * For branch operations (edit/regenerate/retry), the pre-turn messages
    * and title, so an abort before any output restores the original branch
@@ -396,7 +533,122 @@ const loadTurnstile = (): Promise<TurnstileApi> => {
   return loader;
 };
 
-export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
+const SharedChatView: React.FC<{ token: string }> = ({ token }) => {
+  const theme = useTheme();
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let robots = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]');
+    const created = !robots;
+    const previousContent = robots?.getAttribute('content') ?? null;
+    if (!robots) {
+      robots = document.createElement('meta');
+      robots.name = 'robots';
+      document.head.appendChild(robots);
+    }
+    robots.content = 'noindex,nofollow,noarchive';
+
+    return () => {
+      if (created) {
+        robots.remove();
+      } else if (previousContent === null) {
+        robots.removeAttribute('content');
+      } else {
+        robots.content = previousContent;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void ChatAPI.getConversationShare(token, { signal: controller.signal })
+      .then(({ share }) => {
+        setConversation({
+          id: share.id,
+          title: share.title || 'Shared AI chat',
+          messages: share.messages.map((message, messageIndex) => ({
+            id: `shared_message_${messageIndex}`,
+            role: message.role === 'user' ? 'user' : 'ai',
+            rawContent: message.content,
+            timestamp: message.createdAt,
+            status: 'complete',
+            ...(message.annotations?.length ? {
+              annotations: message.annotations.map(annotation => ({ ...annotation })),
+            } : {}),
+            ...(message.attachments?.length ? {
+              attachments: message.attachments.map((attachment, attachmentIndex) => ({
+                id: `shared_attachment_${messageIndex}_${attachmentIndex}`,
+                name: attachment.name,
+                mime: attachment.mime,
+                size: attachment.size,
+              })),
+            } : {}),
+          })),
+          createdAt: share.created_at,
+          updatedAt: share.created_at,
+        });
+        setExpiresAt(share.expires_at);
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name === 'AbortError') return;
+        setError(reason instanceof APIError && reason.code === 'not_found'
+          ? 'This shared chat is unavailable or has expired.'
+          : 'The shared chat could not be loaded. Check your connection and try again.');
+      });
+    return () => controller.abort();
+  }, [token]);
+
+  return (
+    <Box
+      component="main"
+      id="wf-chat-window"
+      className="wf-chat-window"
+      sx={{ display: 'flex', flexDirection: 'column', bgcolor: theme.palette.background.paper }}
+    >
+      <Box className="wf-chat-header" sx={{ minHeight: 62, px: { xs: 1.5, sm: 3 }, py: 1, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', gap: 1.25 }}>
+        <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography component="h1" variant="h6" noWrap>{conversation?.title ?? 'Shared AI chat'}</Typography>
+          <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
+            Read-only snapshot{expiresAt ? ` · expires ${new Date(expiresAt).toLocaleDateString()}` : ''}
+          </Typography>
+        </Box>
+        <Button component="a" href="/pages/ai/" size="small" variant="outlined">Open AI chat</Button>
+      </Box>
+      <Box className="chat-messages-container" role="region" aria-label="Shared chat messages" sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {!conversation && !error && (
+          <Box role="status" sx={{ minHeight: 220, display: 'grid', placeItems: 'center' }}>
+            <Box sx={{ textAlign: 'center' }}><CircularProgress size={24} /><Typography sx={{ mt: 1, color: 'text.secondary' }}>Loading shared chat…</Typography></Box>
+          </Box>
+        )}
+        {error && (
+          <Alert severity="warning" sx={{ m: 2 }} action={<Button color="inherit" size="small" onClick={() => window.location.reload()}>Retry</Button>}>
+            {error}
+          </Alert>
+        )}
+        {conversation?.messages.map(message => (
+          <React.Fragment key={message.id}>
+            <MessageComponent
+              msg={message}
+              userAvatar=""
+              userName="Shared participant"
+              onEdit={noopEdit}
+              onRegenerate={noopRegenerate}
+              onRetry={noopRetry}
+              isLastMessage={false}
+              isStreaming={false}
+              isBusy
+            />
+          </React.Fragment>
+        ))}
+      </Box>
+    </Box>
+  );
+};
+
+const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
   const theme = useTheme();
   const isGuest = userId.startsWith('guest_');
   const welcomeMessage = useMemo(() => isGuest
@@ -406,8 +658,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   const initialChatState = useMemo(() => {
     const loaded = loadStore(userId);
-    const id = loaded.currentId && loaded.store.conversations[loaded.currentId]
-      ? loaded.currentId
+    const requestedId = safeConversationQuery();
+    const id = requestedId && loaded.store.conversations[requestedId]
+      ? requestedId
+      : loaded.currentId && loaded.store.conversations[loaded.currentId]
+        ? loaded.currentId
       : generateConversationId();
     const conversations = loaded.store.conversations[id]
       ? loaded.store.conversations
@@ -415,9 +670,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     return {
       conversations,
       currentId: id,
+      createdFallback: !loaded.store.conversations[id],
       tombstones: loaded.store.tombstones,
       pendingServerDeletions: loaded.store.pendingServerDeletions,
       unavailable: loaded.unavailable,
+      requestedId,
     };
   }, [userId, welcomeMessage]);
 
@@ -426,7 +683,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [streamingState, setStreamingState] = useState<{ conversationId: string; message: Message } | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [isClearing, setIsClearing] = useState(false);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(
+    () => initialChatState.conversations[initialChatState.currentId]?.draft ?? ''
+  );
   const [isListening, setIsListening] = useState(false);
   const [isSpeechRecognitionSupported] = useState(
     () => ENV.ENABLE_VOICE && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
@@ -449,6 +708,30 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const [completedTrail, setCompletedTrail] = useState<CompletedTrail | null>(null);
   const [showCaptcha, setShowCaptcha] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [desktopRailCollapsed, setDesktopRailCollapsed] = useState(() => {
+    try { return localStorage.getItem(railStorageKey(userId)) === 'true'; } catch { return false; }
+  });
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [chatMenuAnchor, setChatMenuAnchor] = useState<HTMLElement | null>(null);
+  const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+  const [deleteConversationId, setDeleteConversationId] = useState<string | null>(null);
+  const [cloudReady, setCloudReady] = useState(isGuest);
+  const [cloudStatus, setCloudStatus] = useState<'device' | 'loading' | 'saving' | 'synced' | 'offline' | 'error'>(
+    isGuest ? 'device' : 'loading'
+  );
+  const [cloudError, setCloudError] = useState('');
+  const [cloudSyncGeneration, setCloudSyncGeneration] = useState(0);
+  const [cloudSyncPaused, setCloudSyncPaused] = useState(false);
+  const [composerAttachments, setComposerAttachments] = useState<Record<string, ChatAttachment[]>>({});
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [supportCasesOpen, setSupportCasesOpen] = useState(false);
+  const [shareLinksOpen, setShareLinksOpen] = useState(false);
+  const [accountDataOpen, setAccountDataOpen] = useState(false);
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [feedbackByMessage, setFeedbackByMessage] = useState<Record<string, FeedbackRating>>({});
+  const [feedbackPending, setFeedbackPending] = useState<Record<string, boolean>>({});
   const [showExamples, setShowExamples] = useState(true);
   const [usage, setUsage] = useState<UsageData | null>(null);
   const [usageRefresh, setUsageRefresh] = useState(0);
@@ -483,10 +766,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const inputRef = useRef(input);
   const mutedRef = useRef(isMuted);
   const isClearingRef = useRef(false);
-  // Set before applying a remote (cross-tab) change so the resulting persist
-  // effect does not write it straight back — that write-back is what made two
-  // tabs on different conversations ping-pong storage events forever.
-  const skipNextPersistRef = useRef(false);
+  const isOnlineRef = useRef(isOnline);
+  const requestedConversationIdRef = useRef(initialChatState.requestedId);
+  const cloudBootstrapAbortRef = useRef<AbortController | null>(null);
+  const cloudSyncAbortRef = useRef<AbortController | null>(null);
+  const cloudSyncTimerRef = useRef<number | null>(null);
+  const cloudSyncLoopRef = useRef(false);
+  const cloudSyncPausedRef = useRef(false);
+  const composerAttachmentsRef = useRef(composerAttachments);
+  const attachmentBusyRef = useRef(attachmentBusy);
   const keepListeningRef = useRef(false);
   const dictationPrefixRef = useRef('');
   const runTurnRef = useRef<(params: TurnParams) => Promise<void>>(async () => {});
@@ -499,10 +787,27 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   useEffect(() => { currentConversationIdRef.current = currentConversationId; }, [currentConversationId]);
   useEffect(() => { inputRef.current = input; }, [input]);
   useEffect(() => { isClearingRef.current = isClearing; }, [isClearing]);
+  useEffect(() => { isOnlineRef.current = isOnline; }, [isOnline]);
+  useEffect(() => { composerAttachmentsRef.current = composerAttachments; }, [composerAttachments]);
+  useEffect(() => { attachmentBusyRef.current = attachmentBusy; }, [attachmentBusy]);
   useEffect(() => {
     mutedRef.current = isMuted;
     AudioService.setMuted(isMuted || !ENV.ENABLE_VOICE);
   }, [isMuted]);
+
+  useEffect(() => {
+    const goOnline = () => {
+      setIsOnline(true);
+      setErrorMessage(previous => previous.startsWith('You are offline.') ? '' : previous);
+    };
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
 
   // The interval exists only while a turn is running, so an idle page never
   // re-renders on a timer.
@@ -526,11 +831,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   }), [currentConversationId]);
   const currentConversation = conversations[currentConversationId] || defaultConversation;
 
-  /** Persists the composed v3 store and reflects quota evictions in memory. */
+  /** Persists the composed v4 store and reflects quota evictions in memory. */
   const persistStore = useCallback(() => {
     if (storageUnavailableRef.current) return;
     const result = saveStore(userId, {
-      version: 3,
+      version: 4,
       conversations: conversationsRef.current,
       tombstones: tombstonesRef.current,
       pendingServerDeletions: pendingDeletionsRef.current,
@@ -559,10 +864,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   useEffect(() => {
     conversationsRef.current = conversations;
-    if (skipNextPersistRef.current) {
-      skipNextPersistRef.current = false;
-      return;
-    }
     persistStore();
   }, [conversations, persistStore]);
   useEffect(() => { persistStore(); }, [currentConversationId, persistStore]);
@@ -597,6 +898,256 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     });
   }, [enforceCapAndQueueDeletion]);
 
+  /** Draft edits persist without changing updatedAt, so typing does not reorder history. */
+  const setConversationDraft = useCallback((conversationId: string, value: string) => {
+    setConversations(previous => {
+      const conversation = previous[conversationId];
+      if (!conversation || conversation.draft === value) return previous;
+      const next = {
+        ...previous,
+        [conversationId]: {
+          ...conversation,
+          draft: value,
+          draftUpdatedAt: Date.now(),
+        },
+      };
+      conversationsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const setCurrentDraft = useCallback((value: string) => {
+    inputRef.current = value;
+    setInput(value);
+    setConversationDraft(currentConversationIdRef.current, value);
+  }, [setConversationDraft]);
+
+  const setComposerAttachmentsForConversation = useCallback((
+    conversationId: string,
+    attachments: ChatAttachment[],
+  ) => {
+    setComposerAttachments(previous => {
+      const next = { ...previous };
+      if (attachments.length) next[conversationId] = attachments;
+      else delete next[conversationId];
+      composerAttachmentsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  /** Removes only the handles sent by this turn; later additions must survive. */
+  const clearSentAttachments = useCallback((conversationId: string, sent: readonly MessageAttachment[]) => {
+    if (!sent.length) return;
+    const sentIds = new Set(sent.map(attachment => attachment.id));
+    setComposerAttachments(previous => {
+      const remaining = (previous[conversationId] ?? []).filter(attachment => !sentIds.has(attachment.id));
+      const next = { ...previous };
+      if (remaining.length) next[conversationId] = remaining;
+      else delete next[conversationId];
+      composerAttachmentsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const deleteComposerAttachment = useCallback(async (
+    conversationId: string,
+    attachment: ChatAttachment,
+  ) => {
+    try {
+      await ChatAPI.deleteChatAttachment(attachment.id);
+    } catch (error) {
+      // A second tab may have removed the same unlinked upload already.
+      if (!(error instanceof APIError) || error.code !== 'not_found') throw error;
+    }
+    // A cancelled CAPTCHA or failed send may already have written the pending
+    // user row. Remove the now-invalid handle so its Retry action cannot send a
+    // file the server has deliberately deleted. Avoid touching updatedAt when
+    // there is no failed row to repair; removing an unsent chip is not a chat
+    // edit and must not trigger a cloud-history revision.
+    const failedRowUsesAttachment = conversationsRef.current[conversationId]?.messages.some(message => (
+      message.role === 'user'
+      && message.status === 'failed'
+      && message.attachments?.some(item => item.id === attachment.id)
+    ));
+    if (failedRowUsesAttachment) {
+      updateConversationById(conversationId, conversation => ({
+        messages: conversation.messages.map(message => (
+          message.role === 'user' && message.status === 'failed' && message.attachments?.some(item => item.id === attachment.id)
+            ? { ...message, attachments: message.attachments.filter(item => item.id !== attachment.id) }
+            : message
+        )),
+      }));
+    }
+  }, [updateConversationById]);
+
+  const recordCloudSave = useCallback((saved: SavedConversation, syncedLocalUpdatedAt: number) => {
+    setConversations(previous => {
+      const current = previous[saved.id];
+      if (!current) return previous;
+      const next = {
+        ...previous,
+        [saved.id]: {
+          ...current,
+          cloudRevision: saved.revision,
+          cloudUpdatedAt: saved.updated_at,
+          cloudSyncedLocalUpdatedAt: syncedLocalUpdatedAt,
+        },
+      };
+      conversationsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const applyCloudWinner = useCallback((saved: SavedConversation) => {
+    setConversations(previous => {
+      const local = previous[saved.id];
+      const winner = !local || saved.updated_at >= local.updatedAt
+        ? savedConversationToLocal(saved, local)
+        : {
+          ...local,
+          cloudRevision: saved.revision,
+          cloudUpdatedAt: saved.updated_at,
+        };
+      const next = enforceCapAndQueueDeletion({ ...previous, [saved.id]: winner }, currentConversationIdRef.current);
+      conversationsRef.current = next;
+      return next;
+    });
+  }, [enforceCapAndQueueDeletion]);
+
+  /**
+   * A record that once had a cloud revision but is absent from a complete
+   * account snapshot was deleted elsewhere. Tombstone it locally so another
+   * tab cannot merge the stale copy back. Conversations that have never had a
+   * cloud revision are intentionally left alone: they are genuinely local and
+   * still need their first upload.
+   */
+  const removeRemotelyDeletedConversation = useCallback((
+    conversationId: string,
+    announce = true,
+    authoritative = false,
+  ): boolean => {
+    const deleted = conversationsRef.current[conversationId];
+    if (!deleted || (!authoritative && deleted.cloudRevision === undefined)) return false;
+
+    const deletedAt = Math.max(
+      Date.now(),
+      (pendingDeletionsRef.current[conversationId] ?? 0) + 1,
+    );
+    tombstonesRef.current = { ...tombstonesRef.current, [conversationId]: deletedAt };
+    const pending = { ...pendingDeletionsRef.current };
+    delete pending[conversationId];
+    pendingDeletionsRef.current = pending;
+    delete pendingDeletionRetryAtRef.current[conversationId];
+
+    const next: ConversationMap = { ...conversationsRef.current };
+    delete next[conversationId];
+    let selectedId = currentConversationIdRef.current;
+    if (!next[selectedId]) {
+      selectedId = Object.values(next)
+        .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ?? generateConversationId();
+      if (!next[selectedId]) next[selectedId] = createNewConversation(selectedId, welcomeMessage);
+      currentConversationIdRef.current = selectedId;
+      requestedConversationIdRef.current = selectedId;
+      const selectedDraft = next[selectedId]?.draft ?? '';
+      inputRef.current = selectedDraft;
+      setCurrentConversationId(selectedId);
+      setInput(selectedDraft);
+      setShowExamples((next[selectedId]?.messages.length ?? 0) <= 1);
+      writeConversationUrl(selectedId, 'replace');
+    }
+
+    conversationsRef.current = next;
+    setConversations(next);
+    setComposerAttachments(previous => {
+      if (!previous[conversationId]) return previous;
+      const remaining = { ...previous };
+      delete remaining[conversationId];
+      composerAttachmentsRef.current = remaining;
+      return remaining;
+    });
+    if (announce) setAnnouncement('A chat deleted from your account on another device was removed here too.');
+    return true;
+  }, [welcomeMessage]);
+
+  const syncConversationToCloud = useCallback(async (
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<boolean> => {
+    const snapshot = conversationsRef.current[conversationId];
+    if (!snapshot || !cloudSyncable(snapshot) || isGuest) return true;
+    if (cloudSyncPausedRef.current || signal.aborted) return false;
+    setCloudStatus('saving');
+    setCloudError('');
+
+    const upsert = (conversation: Conversation, revision: number) => ChatAPI.upsertSavedConversation({
+      id: conversation.id,
+      title: conversation.title,
+      messages: conversation.messages,
+      created_at: conversation.createdAt,
+    }, revision, { signal });
+
+    try {
+      const result = await upsert(snapshot, snapshot.cloudRevision ?? 0);
+      if (cloudSyncPausedRef.current || signal.aborted) return false;
+      recordCloudSave(result.conversation, snapshot.updatedAt);
+      return true;
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) return false;
+      if (error instanceof APIError && error.code === 'conversation_deleted') {
+        // The server's owner-scoped deletion guard is authoritative even for a
+        // stale device copy that lost its last known cloud revision metadata.
+        removeRemotelyDeletedConversation(conversationId, true, true);
+        return true;
+      }
+      if (error instanceof APIError && error.code === 'revision_conflict') {
+        try {
+          const { conversation: remote } = await ChatAPI.getSavedConversation(conversationId, { signal });
+          if (cloudSyncPausedRef.current || signal.aborted) return false;
+          const latestLocal = conversationsRef.current[conversationId];
+          if (!latestLocal || remote.updated_at >= latestLocal.updatedAt) {
+            applyCloudWinner(remote);
+            return true;
+          }
+          const retried = await upsert(latestLocal, remote.revision);
+          if (cloudSyncPausedRef.current || signal.aborted) return false;
+          recordCloudSave(retried.conversation, latestLocal.updatedAt);
+          return true;
+        } catch (conflictError) {
+          if (conflictError instanceof APIError && conflictError.code === 'not_found') {
+            // The conflict proved a cloud record existed; a following 404 is a
+            // concurrent deletion, not permission to recreate that record.
+            if (removeRemotelyDeletedConversation(conversationId, true, true)) return true;
+          }
+        }
+      }
+      setCloudStatus('error');
+      setCloudError('Changes are safe on this device. Cloud history will retry after the next edit or reload.');
+      return false;
+    }
+  }, [applyCloudWinner, isGuest, recordCloudSave, removeRemotelyDeletedConversation]);
+
+  const deleteCloudConversation = useCallback(async (conversation: Conversation) => {
+    if (isGuest || !conversation.cloudRevision) return;
+    const controller = cloudSyncAbortRef.current?.signal.aborted === false
+      ? cloudSyncAbortRef.current
+      : new AbortController();
+    cloudSyncAbortRef.current = controller;
+    try {
+      await ChatAPI.deleteSavedConversation(conversation.id, conversation.cloudRevision, { signal: controller.signal });
+    } catch (error) {
+      if (error instanceof APIError && error.code === 'not_found') return;
+      if (error instanceof APIError && error.code === 'revision_conflict') {
+        try {
+          const { conversation: remote } = await ChatAPI.getSavedConversation(conversation.id, { signal: controller.signal });
+          await ChatAPI.deleteSavedConversation(conversation.id, remote.revision, { signal: controller.signal });
+          return;
+        } catch { /* retry from the tombstone during the next bootstrap */ }
+      }
+      setCloudStatus('error');
+      setCloudError('The chat was removed here. Cloud deletion will retry when history reloads.');
+    }
+  }, [isGuest]);
+
   const addMessage = useCallback((conversationId: string, message: Message) => {
     updateConversationById(conversationId, conversation => ({
       messages: [...conversation.messages, message],
@@ -630,6 +1181,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const abortActiveTurn = useCallback((persistPartial: boolean) => {
     const turn = activeTurnRef.current;
     if (!turn) return;
+    reportChatLifecycle('chat_stopped', {
+      eventId: turn.turnId,
+      durationMs: Date.now() - turn.startedAt,
+      outcome: persistPartial ? 'user' : 'discarded',
+    });
     activeTurnRef.current = null;
     turn.controller.abort();
     cancelStreamingFrame();
@@ -645,6 +1201,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
             timestamp: Date.now(),
             status: 'stopped' as const,
             annotations: turn.annotations,
+            turnId: turn.turnId,
+            activities: turn.activities,
           }],
         }));
       } else if (turn.rollbackMessages) {
@@ -663,6 +1221,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     setActiveRequestId(null);
     setStreamingState(null);
     AudioService.stop();
+    setSpeakingMessageId(null);
   }, [cancelStreamingFrame, updateConversationById]);
 
   const cleanupTurnstileWidget = useCallback(() => {
@@ -699,12 +1258,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const createAndSelectConversation = useCallback(() => {
     const id = generateConversationId();
     const conversation = createNewConversation(id, welcomeMessage);
-    setConversations(previous => enforceCapAndQueueDeletion({ ...previous, [id]: conversation }, id));
+    setConversations(previous => {
+      const next = enforceCapAndQueueDeletion({ ...previous, [id]: conversation }, id);
+      conversationsRef.current = next;
+      return next;
+    });
+    currentConversationIdRef.current = id;
     setCurrentConversationId(id);
+    inputRef.current = '';
     setInput('');
     setErrorMessage('');
+    setSpeakingMessageId(null);
     setShowExamples(true);
     setAutoFollow(true);
+    writeConversationUrl(id, 'push');
   }, [enforceCapAndQueueDeletion, welcomeMessage]);
 
   const handleNewConversation = useCallback(() => {
@@ -712,31 +1279,49 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     abortActiveTurn(true);
     cancelPendingCaptcha(true);
     createAndSelectConversation();
+    reportClientEvent('conversation_created', { outcome: 'new' });
   }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, stopListening]);
 
-  const handleSelectConversation = useCallback((conversationId: string) => {
+  const handleSelectConversation = useCallback((conversationId: string, updateUrl = true) => {
     if (conversationId === currentConversationIdRef.current) {
       setDrawerOpen(false);
+      if (updateUrl) writeConversationUrl(conversationId, 'replace');
       return;
     }
     stopListening();
     abortActiveTurn(true);
     cancelPendingCaptcha(true);
     AudioService.stop();
+    setSpeakingMessageId(null);
+    currentConversationIdRef.current = conversationId;
     setCurrentConversationId(conversationId);
     const selected = conversationsRef.current[conversationId];
     setAnnouncement(`${selected?.title ?? 'Conversation'} selected. ${selected?.messages.length ?? 0} messages.`);
-    setInput('');
+    const selectedDraft = selected?.draft ?? '';
+    inputRef.current = selectedDraft;
+    setInput(selectedDraft);
     setErrorMessage('');
     setDrawerOpen(false);
     setShowExamples(false);
     setAutoFollow(true);
+    if (updateUrl) writeConversationUrl(conversationId, 'push');
+    reportClientEvent('conversation_opened', {
+      outcome: updateUrl ? 'history' : 'navigation',
+      value: selected?.messages.length,
+    });
   }, [abortActiveTurn, cancelPendingCaptcha, stopListening]);
 
   const retryPendingDeletions = useCallback(() => {
     for (const conversationId of Object.keys(pendingDeletionsRef.current)) {
       if ((pendingDeletionRetryAtRef.current[conversationId] ?? 0) > Date.now()) continue;
       void ChatAPI.deleteConversation(conversationId).then(() => {
+        tombstonesRef.current = {
+          ...tombstonesRef.current,
+          [conversationId]: Math.max(
+            Date.now(),
+            (pendingDeletionsRef.current[conversationId] ?? 0) + 1,
+          ),
+        };
         const next = { ...pendingDeletionsRef.current };
         delete next[conversationId];
         pendingDeletionsRef.current = next;
@@ -758,6 +1343,23 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   }, [retryPendingDeletions]);
 
   const handleDeleteConversation = useCallback((conversationId: string) => {
+    const deletedConversation = conversationsRef.current[conversationId];
+    if (deletedConversation) void deleteCloudConversation(deletedConversation);
+    const pendingAttachments = composerAttachmentsRef.current[conversationId] ?? [];
+    if (pendingAttachments.length) {
+      setComposerAttachments(previous => {
+        const next = { ...previous };
+        delete next[conversationId];
+        composerAttachmentsRef.current = next;
+        return next;
+      });
+      for (const attachment of pendingAttachments) {
+        void ChatAPI.deleteChatAttachment(attachment.id).catch(() => {
+          // Support-linked handles remain owned by their case; every other
+          // failed cleanup is still covered by server expiry/pruning.
+        });
+      }
+    }
     if (activeTurnRef.current?.conversationId === conversationId) abortActiveTurn(false);
     if (pendingCaptchaRef.current?.params.conversationId === conversationId) cancelPendingCaptcha(false);
 
@@ -771,6 +1373,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       return next;
     });
     void ChatAPI.deleteConversation(conversationId).then(() => {
+      tombstonesRef.current = {
+        ...tombstonesRef.current,
+        [conversationId]: Math.max(
+          Date.now(),
+          (pendingDeletionsRef.current[conversationId] ?? 0) + 1,
+        ),
+      };
       const next = { ...pendingDeletionsRef.current };
       delete next[conversationId];
       pendingDeletionsRef.current = next;
@@ -783,7 +1392,406 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       console.error('Failed to delete server conversation; will retry:', error);
     });
     if (conversationId === currentConversationIdRef.current) createAndSelectConversation();
-  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, persistStore]);
+  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, deleteCloudConversation, persistStore]);
+
+  const requestRenameConversation = useCallback((conversationId: string) => {
+    const conversation = conversationsRef.current[conversationId];
+    if (!conversation) return;
+    setRenameConversationId(conversationId);
+    setRenameTitle(conversation.title);
+  }, []);
+
+  const confirmRenameConversation = useCallback(() => {
+    if (!renameConversationId) return;
+    const title = renameTitle.trim().slice(0, 80);
+    if (!title) return;
+    setConversations(previous => {
+      const conversation = previous[renameConversationId];
+      if (!conversation || conversation.title === title) return previous;
+      const next = {
+        ...previous,
+        [renameConversationId]: { ...conversation, title, updatedAt: Date.now() },
+      };
+      conversationsRef.current = next;
+      return next;
+    });
+    setAnnouncement(`Conversation renamed to ${title}.`);
+    setRenameConversationId(null);
+    reportClientEvent('conversation_renamed', { outcome: 'manual' });
+  }, [renameConversationId, renameTitle]);
+
+  const requestDeleteConversation = useCallback((conversationId: string) => {
+    if (conversationsRef.current[conversationId]) setDeleteConversationId(conversationId);
+  }, []);
+
+  const confirmDeleteConversation = useCallback(() => {
+    if (!deleteConversationId) return;
+    handleDeleteConversation(deleteConversationId);
+    setDeleteConversationId(null);
+    setAnnouncement('Conversation deleted.');
+    reportClientEvent('conversation_deleted', { outcome: 'single' });
+  }, [deleteConversationId, handleDeleteConversation]);
+
+  const quiesceCloudSync = useCallback(() => {
+    cloudSyncPausedRef.current = true;
+    setCloudSyncPaused(true);
+    setCloudReady(false);
+    cloudBootstrapAbortRef.current?.abort();
+    cloudBootstrapAbortRef.current = null;
+    cloudSyncAbortRef.current?.abort();
+    cloudSyncAbortRef.current = null;
+    cloudSyncLoopRef.current = false;
+    if (cloudSyncTimerRef.current !== null) {
+      window.clearTimeout(cloudSyncTimerRef.current);
+      cloudSyncTimerRef.current = null;
+    }
+  }, []);
+
+  const resumeCloudSync = useCallback(() => {
+    cloudSyncPausedRef.current = false;
+    setCloudReady(false);
+    setCloudStatus(isOnlineRef.current ? 'loading' : 'offline');
+    setCloudSyncPaused(false);
+  }, []);
+
+  /**
+   * The account-data dialog invokes this only after the server has atomically
+   * deleted the member-owned chat product records. Replace the browser store
+   * with one empty conversation and tombstone every prior id so another open
+   * tab cannot merge deleted history back into this one.
+   */
+  const handleDeleteAllSavedDataSucceeded = useCallback(async () => {
+    stopListening();
+    abortActiveTurn(false);
+    cancelPendingCaptcha(false);
+    AudioService.stop();
+
+    // Defense in depth: the dialog already quiesces before the server request,
+    // but keep the guard asserted throughout the irreversible local reset.
+    quiesceCloudSync();
+
+    const keys = storageKeys(userId);
+    let diskStore: ReturnType<typeof parseStore>;
+    try {
+      diskStore = parseStore(localStorage.getItem(keys.store));
+    } catch {
+      throw new Error('Browser storage could not be cleared.');
+    }
+    const deletedAt = Date.now();
+    const tombstones = { ...tombstonesRef.current };
+    const knownConversationIds = new Set([
+      ...Object.keys(conversationsRef.current),
+      ...Object.keys(diskStore?.conversations ?? {}),
+      ...Object.keys(pendingDeletionsRef.current),
+      ...Object.keys(diskStore?.pendingServerDeletions ?? {}),
+    ]);
+    for (const conversationId of knownConversationIds) {
+      const pendingAt = Math.max(
+        pendingDeletionsRef.current[conversationId] ?? 0,
+        diskStore?.pendingServerDeletions[conversationId] ?? 0,
+      );
+      tombstones[conversationId] = Math.max(
+        deletedAt,
+        pendingAt + 1,
+      );
+    }
+
+    const conversationId = generateConversationId();
+    const freshConversation = createNewConversation(conversationId, welcomeMessage);
+    const nextConversations: ConversationMap = { [conversationId]: freshConversation };
+
+    tombstonesRef.current = tombstones;
+    // Product deletion is confirmed. Do not turn it into hidden immediate
+    // provider deletion calls: provider mappings retain their documented,
+    // separate 30-day cleanup lifecycle.
+    pendingDeletionsRef.current = {};
+    pendingDeletionRetryAtRef.current = {};
+    conversationsRef.current = nextConversations;
+    currentConversationIdRef.current = conversationId;
+    requestedConversationIdRef.current = conversationId;
+    inputRef.current = '';
+    composerAttachmentsRef.current = {};
+    attachmentBusyRef.current = false;
+
+    setConversations(nextConversations);
+    setCurrentConversationId(conversationId);
+    setInput('');
+    setComposerAttachments({});
+    setAttachmentBusy(false);
+    setFeedbackByMessage({});
+    setFeedbackPending({});
+    setStreamingState(null);
+    setActiveRequestId(null);
+    setActivities([]);
+    setCompletedTrail(null);
+    setSpeakingMessageId(null);
+    setRenameConversationId(null);
+    setDeleteConversationId(null);
+    setSupportCasesOpen(false);
+    setShareLinksOpen(false);
+    setPreferencesOpen(false);
+    setDrawerOpen(false);
+    setChatMenuAnchor(null);
+    setErrorMessage('');
+    setShowExamples(true);
+    setAutoFollow(true);
+    setCloudError('');
+    writeConversationUrl(conversationId, 'replace');
+
+    // Persist the tombstoned empty replacement synchronously. This both clears
+    // the current browser and broadcasts the deletion to other open tabs.
+    const result = saveStore(userId, {
+      version: 4,
+      conversations: nextConversations,
+      tombstones,
+      pendingServerDeletions: {},
+    }, conversationId);
+    try {
+      localStorage.removeItem(keys.legacyStoreV3);
+      localStorage.removeItem(keys.legacyCurrentV3);
+      localStorage.removeItem(keys.legacyConversations);
+      localStorage.removeItem(keys.legacyCurrent);
+      localStorage.removeItem(cloudBootstrapStorageKey(userId));
+    } catch {
+      throw new Error('Browser storage could not be cleared.');
+    }
+    if (!result.persisted) {
+      throw new Error('Browser storage could not be cleared.');
+    }
+
+    setAnnouncement('Saved AI chat data was deleted. A new empty chat is ready.');
+  }, [abortActiveTurn, cancelPendingCaptcha, quiesceCloudSync, stopListening, userId, welcomeMessage]);
+
+  /**
+   * Member bootstrap: hydrate the newest cloud records, resolve each local/cloud
+   * pair by its content clock, and upload pre-existing local history once.
+   */
+  useEffect(() => {
+    if (isGuest || cloudSyncPaused) return;
+    const controller = new AbortController();
+    cloudBootstrapAbortRef.current?.abort();
+    cloudBootstrapAbortRef.current = controller;
+    let active = true;
+
+    void (async () => {
+      setCloudStatus(isOnlineRef.current ? 'loading' : 'offline');
+      if (!isOnlineRef.current) {
+        setCloudReady(true);
+        return;
+      }
+      try {
+        const summaries: Awaited<ReturnType<typeof ChatAPI.listSavedConversations>>['conversations'] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await ChatAPI.listSavedConversations({
+            limit: Math.min(50, MAX_CLOUD_CONVERSATIONS - summaries.length),
+            ...(cursor ? { cursor } : {}),
+            signal: controller.signal,
+          });
+          summaries.push(...page.conversations);
+          cursor = page.next_cursor ?? undefined;
+        } while (cursor && summaries.length < MAX_CLOUD_CONVERSATIONS);
+
+        // Only infer remote deletion from a complete inventory. A local chat
+        // with no cloud revision is an unsynced device record and must survive.
+        if (!cursor) {
+          const serverIds = new Set(summaries.map(summary => summary.id));
+          for (const local of Object.values(conversationsRef.current)) {
+            if (local.cloudRevision !== undefined && !serverIds.has(local.id)) {
+              removeRemotelyDeletedConversation(local.id, false);
+            }
+          }
+        }
+
+        const tombstoned = summaries.filter(summary => tombstonesRef.current[summary.id] !== undefined);
+        const tombstoneResults = await settleInBatches(tombstoned.map(summary => async () => {
+          try {
+            await ChatAPI.deleteSavedConversation(summary.id, summary.revision, { signal: controller.signal });
+          } catch (error) {
+            if (error instanceof APIError && error.code === 'not_found') return;
+            if (!(error instanceof APIError) || error.code !== 'revision_conflict') throw error;
+            try {
+              const latest = await ChatAPI.getSavedConversation(summary.id, { signal: controller.signal });
+              await ChatAPI.deleteSavedConversation(summary.id, latest.conversation.revision, { signal: controller.signal });
+            } catch (conflictError) {
+              if (conflictError instanceof APIError && conflictError.code === 'not_found') return;
+              throw conflictError;
+            }
+          }
+        }));
+        const tombstoneDeleteFailed = tombstoneResults.some(result => result.status === 'rejected');
+
+        const visibleSummaries = summaries.filter(summary => tombstonesRef.current[summary.id] === undefined);
+        const settled = await settleInBatches(
+          visibleSummaries.map(summary => () => ChatAPI.getSavedConversation(summary.id, { signal: controller.signal }))
+        );
+        settled.forEach((result, index) => {
+          if (
+            result.status === 'rejected'
+            && result.reason instanceof APIError
+            && result.reason.code === 'not_found'
+          ) {
+            removeRemotelyDeletedConversation(visibleSummaries[index]!.id, false);
+          }
+        });
+        const detailReadFailed = settled.some(result => result.status === 'rejected'
+          && (!(result.reason instanceof APIError) || result.reason.code !== 'not_found'));
+        const saved = settled.flatMap(result => result.status === 'fulfilled' ? [result.value.conversation] : []);
+        const requestedId = requestedConversationIdRef.current;
+        if (
+          requestedId
+          && tombstonesRef.current[requestedId] === undefined
+          && !summaries.some(summary => summary.id === requestedId)
+        ) {
+          try {
+            const requested = await ChatAPI.getSavedConversation(requestedId, { signal: controller.signal });
+            saved.push(requested.conversation);
+          } catch (error) {
+            if (!(error instanceof APIError) || error.code !== 'not_found') throw error;
+          }
+        }
+        if (!active || controller.signal.aborted) return;
+
+        let merged = { ...conversationsRef.current };
+        if (initialChatState.createdFallback && saved.length && !cloudSyncable(merged[initialChatState.currentId])) {
+          delete merged[initialChatState.currentId];
+        }
+        for (const remote of saved) {
+          const local = merged[remote.id];
+          merged[remote.id] = !local || remote.updated_at >= local.updatedAt
+            ? savedConversationToLocal(remote, local)
+            : {
+              ...local,
+              cloudRevision: remote.revision,
+              cloudUpdatedAt: remote.updated_at,
+            };
+        }
+
+        const newestCloudId = saved
+          .slice()
+          .sort((left, right) => right.updated_at - left.updated_at)[0]?.id;
+        const selectedId = requestedId && merged[requestedId]
+          ? requestedId
+          : initialChatState.createdFallback && newestCloudId
+            ? newestCloudId
+            : merged[currentConversationIdRef.current]
+              ? currentConversationIdRef.current
+              : Object.keys(merged)[0];
+        if (!selectedId) throw new Error('Cloud history returned no selectable conversation');
+        merged = enforceCapAndQueueDeletion(merged, selectedId);
+        conversationsRef.current = merged;
+        setConversations(merged);
+        currentConversationIdRef.current = selectedId;
+        setCurrentConversationId(selectedId);
+        const selectedDraft = merged[selectedId]?.draft ?? '';
+        inputRef.current = selectedDraft;
+        setInput(selectedDraft);
+        setShowExamples((merged[selectedId]?.messages.length ?? 0) <= 1);
+        writeConversationUrl(selectedId, 'replace');
+
+        let bootstrapSucceeded = !tombstoneDeleteFailed && !detailReadFailed;
+        let alreadyUploaded = false;
+        try { alreadyUploaded = localStorage.getItem(cloudBootstrapStorageKey(userId)) === 'complete'; } catch { /* optional */ }
+        if (!alreadyUploaded) {
+          const uploadIds = Object.values(merged)
+            .filter(conversation => cloudSyncable(conversation)
+              && conversation.cloudSyncedLocalUpdatedAt !== conversation.updatedAt)
+            .map(conversation => conversation.id);
+          for (const conversationId of uploadIds) {
+            if (!await syncConversationToCloud(conversationId, controller.signal)) bootstrapSucceeded = false;
+          }
+          if (bootstrapSucceeded) {
+            try { localStorage.setItem(cloudBootstrapStorageKey(userId), 'complete'); } catch { /* optional */ }
+          }
+        }
+        if (!active || controller.signal.aborted) return;
+        setCloudReady(true);
+        setCloudStatus(bootstrapSucceeded ? 'synced' : 'error');
+        if (!bootstrapSucceeded) {
+          setCloudError(previous => previous || (detailReadFailed
+            ? 'Some account history could not be loaded. Local chats remain available; reload to retry.'
+            : 'A cloud deletion is still pending. It will retry when history reloads.'));
+        }
+      } catch (error) {
+        if (!active || controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) return;
+        setCloudReady(true);
+        setCloudStatus('error');
+        setCloudError(error instanceof APIError && error.code === 'csrf_unavailable'
+          ? 'Cloud history needs a fresh secure page token. Reload this page to resume syncing.'
+          : 'Cloud history is unavailable. Chats remain safe on this device.');
+      }
+    })();
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (cloudBootstrapAbortRef.current === controller) cloudBootstrapAbortRef.current = null;
+    };
+  }, [cloudSyncPaused, enforceCapAndQueueDeletion, initialChatState.createdFallback, initialChatState.currentId, isGuest, isOnline, removeRemotelyDeletedConversation, syncConversationToCloud, userId]);
+
+  const cloudDirtySignature = useMemo(() => Object.values(conversations)
+    .filter(conversation => !isGuest
+      && cloudSyncable(conversation)
+      && conversation.cloudSyncedLocalUpdatedAt !== conversation.updatedAt)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map(conversation => `${conversation.id}:${conversation.updatedAt}:${conversation.cloudRevision ?? 0}`)
+    .join('|'), [conversations, isGuest]);
+
+  useEffect(() => {
+    if (isGuest || cloudSyncPausedRef.current || !cloudReady || !isOnline || isLoading || !cloudDirtySignature || cloudSyncLoopRef.current) return;
+    if (cloudSyncTimerRef.current !== null) window.clearTimeout(cloudSyncTimerRef.current);
+    cloudSyncTimerRef.current = window.setTimeout(() => {
+      cloudSyncTimerRef.current = null;
+      if (cloudSyncPausedRef.current || cloudSyncLoopRef.current) return;
+      cloudSyncLoopRef.current = true;
+      const controller = cloudSyncAbortRef.current?.signal.aborted === false
+        ? cloudSyncAbortRef.current
+        : new AbortController();
+      cloudSyncAbortRef.current = controller;
+      const dirtyIds = Object.values(conversationsRef.current)
+        .filter(conversation => cloudSyncable(conversation)
+          && conversation.cloudSyncedLocalUpdatedAt !== conversation.updatedAt)
+        .map(conversation => conversation.id);
+      void (async () => {
+        let success = true;
+        for (const conversationId of dirtyIds) {
+          if (!await syncConversationToCloud(conversationId, controller.signal)) success = false;
+        }
+        cloudSyncLoopRef.current = false;
+        if (!controller.signal.aborted) {
+          setCloudStatus(success ? 'synced' : 'error');
+          if (success) setCloudSyncGeneration(value => value + 1);
+        }
+      })();
+    }, CLOUD_SYNC_DEBOUNCE_MS);
+    return () => {
+      if (cloudSyncTimerRef.current !== null) {
+        window.clearTimeout(cloudSyncTimerRef.current);
+        cloudSyncTimerRef.current = null;
+      }
+    };
+  }, [cloudDirtySignature, cloudReady, cloudSyncGeneration, cloudSyncPaused, isGuest, isLoading, isOnline, syncConversationToCloud]);
+
+  useEffect(() => () => {
+    if (cloudSyncTimerRef.current !== null) window.clearTimeout(cloudSyncTimerRef.current);
+    cloudBootstrapAbortRef.current?.abort();
+    cloudSyncAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (isGuest) writeConversationUrl(currentConversationIdRef.current, 'replace');
+    const handlePopState = () => {
+      const conversationId = safeConversationQuery();
+      if (!conversationId || conversationId === currentConversationIdRef.current) return;
+      if (conversationsRef.current[conversationId]) {
+        handleSelectConversation(conversationId, false);
+      } else {
+        setErrorMessage('That chat is not available in this history.');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [handleSelectConversation, isGuest]);
 
   // Cross-tab merge: deletions (tombstones) always win; conversations take
   // the most recently updated copy.
@@ -795,14 +1803,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       if (!remote) return;
       const currentTombstoned = remote.tombstones[currentConversationIdRef.current] !== undefined
         || (tombstonesRef.current[currentConversationIdRef.current] !== undefined);
-      // Do not persist the merge straight back to disk; the other tab is the
-      // writer of record for this event.
-      skipNextPersistRef.current = true;
       // Merge against the LATEST state, not the passive ref, so a just-enqueued
-      // in-flight update (e.g. a completed AI reply) is not clobbered.
+      // in-flight update (e.g. a completed AI reply) is not clobbered. The
+      // canonical no-op write guard lets this merged state be persisted safely
+      // without reviving the old cross-tab ping-pong.
       setConversations(previous => {
         const merged = mergeStores({
-          version: 3,
+          version: 4,
           conversations: previous,
           tombstones: tombstonesRef.current,
           pendingServerDeletions: pendingDeletionsRef.current,
@@ -886,7 +1893,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
    * consume any of it.
    */
   const handleUsageCommand = useCallback(async (conversationId: string) => {
+    inputRef.current = '';
     setInput('');
+    setConversationDraft(conversationId, '');
     setErrorMessage('');
     setShowExamples(false);
 
@@ -942,11 +1951,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         status: 'complete' as const,
       }],
     }));
-  }, [isGuest, updateConversationById]);
+  }, [isGuest, setConversationDraft, updateConversationById]);
 
   /** Transactionally resets the current conversation after the server confirms. */
   const handleClearCommand = useCallback(async (conversationId: string) => {
+    inputRef.current = '';
     setInput('');
+    setConversationDraft(conversationId, '');
     setIsClearing(true);
     setErrorMessage('');
     try {
@@ -954,6 +1965,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       updateConversationById(conversationId, () => ({
         title: 'New Chat',
         messages: [createWelcomeMessage(welcomeMessage)],
+        draft: '',
+        draftUpdatedAt: Date.now(),
         needsServerResync: false,
       }));
       setShowExamples(true);
@@ -964,7 +1977,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     } finally {
       setIsClearing(false);
     }
-  }, [updateConversationById, welcomeMessage]);
+  }, [setConversationDraft, updateConversationById, welcomeMessage]);
 
   /**
    * Runs one chat turn transactionally: nothing is mutated until validation
@@ -974,6 +1987,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   const runTurn = useCallback(async (params: TurnParams) => {
     const content = params.content.trim();
     if (!content || activeTurnRef.current || isClearingRef.current) return;
+    if (!isOnlineRef.current) {
+      setErrorMessage('You are offline. Your draft is saved and can be sent after you reconnect.');
+      return;
+    }
     if (pendingCaptchaRef.current && !params.captchaToken) {
       setErrorMessage('Complete the security check before sending another message.');
       return;
@@ -988,6 +2005,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     const existingConversation = conversationsRef.current[conversationId]
       || createNewConversation(conversationId, welcomeMessage);
     const baseMessages = params.baseMessages ?? existingConversation.messages;
+    const turnAttachments = params.attachments ?? [];
     const resetConversation = Boolean(params.forceReset || existingConversation.needsServerResync);
     // NOTE: history is uploaded on every turn but chat.php only consumes it
     // when it has no conversation record yet (chat.php:1242). Gating it on
@@ -1020,6 +2038,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       rawContent: content,
       timestamp: Date.now(),
       status: 'complete',
+      ...(turnAttachments.length ? {
+        attachments: turnAttachments.map(({ id, name, mime, size }) => ({ id, name, mime, size })),
+      } : {}),
     };
     const isFirstQuestion = !baseMessages.some(message => message.role === 'user');
     setConversations(previous => {
@@ -1032,16 +2053,22 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
             ? `${content.slice(0, 50)}${content.length > 50 ? '…' : ''}`
             : conversation.title,
           messages: [...baseMessages, userMessage],
+          draft: '',
+          draftUpdatedAt: Date.now(),
           updatedAt: Date.now(),
         },
       }, conversationId);
     });
-    if (params.kind === 'send') setInput('');
+    if (params.kind === 'send') {
+      inputRef.current = '';
+      setInput('');
+    }
 
     const requestId = messageId('_request');
     const controller = new AbortController();
     const turn: ActiveTurn = {
       requestId,
+      turnId: generateTurnId(),
       conversationId,
       controller,
       userMessageId: userMessage.id,
@@ -1049,10 +2076,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       annotations: [],
       activities: [],
       startedAt: Date.now(),
+      firstTokenReported: false,
       rollbackMessages: params.rollbackMessages,
       rollbackTitle: params.rollbackTitle,
     };
     activeTurnRef.current = turn;
+    reportChatLifecycle('chat_send_started', {
+      eventId: turn.turnId,
+      outcome: params.kind,
+      value: turnAttachments.length,
+    });
     setActiveRequestId(requestId);
     // The previous turn's trail belongs to the previous answer.
     setCompletedTrail(null);
@@ -1093,6 +2126,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         conversationId,
         resetConversation: resetConversation || undefined,
         history,
+        attachmentIds: turnAttachments.map(attachment => attachment.id),
         turnId,
         onActivity: (next) => {
           const active = activeTurnRef.current;
@@ -1103,6 +2137,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         onChunk: (partialText, annotations) => {
           const active = activeTurnRef.current;
           if (!active || active.requestId !== requestId) return;
+          if (!active.firstTokenReported && partialText.length > 0) {
+            active.firstTokenReported = true;
+            reportChatLifecycle('chat_first_token', {
+              eventId: active.turnId,
+              durationMs: Date.now() - active.startedAt,
+              outcome: params.kind,
+            });
+          }
           active.partialText = partialText;
           active.annotations = annotations;
           // Coalesce chunk updates to animation frames; per-chunk renders
@@ -1112,9 +2154,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       });
 
       let result: StreamingResponse;
-      const turnId = generateTurnId();
       try {
-        result = await send(turnId);
+        result = await send(turn.turnId);
       } catch (error) {
         // Retry once, but only when the failure is transient AND nothing was
         // consumed: with no output delivered the server has not committed a
@@ -1125,7 +2166,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         if (!active || active.requestId !== requestId) throw error;
         await sleep(retryDelayMs);
         if (activeTurnRef.current?.requestId !== requestId || controller.signal.aborted) throw error;
-        result = await send(turnId);
+        result = await send(turn.turnId);
       }
 
       if (activeTurnRef.current?.requestId !== requestId) return;
@@ -1142,7 +2183,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           result.diagnostics
         );
       }
+      if (!turn.firstTokenReported) {
+        turn.firstTokenReported = true;
+        reportChatLifecycle('chat_first_token', {
+          eventId: turn.turnId,
+          durationMs: Date.now() - turn.startedAt,
+          outcome: params.kind,
+        });
+      }
       const answerId = messageId('_ai');
+      const steps = activeTurnRef.current?.activities ?? [];
       updateConversationById(conversationId, conversation => ({
         messages: [...conversation.messages, {
           id: answerId,
@@ -1151,20 +2201,31 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           timestamp: Date.now(),
           status: 'complete' as const,
           annotations: result.annotations,
+          responseId: result.responseId,
+          turnId: turn.turnId,
+          activities: steps,
         }],
         needsServerResync: false,
       }));
-      setAnnouncement('Assistant response complete.');
+      setAnnouncement(assistantCompletionAnnouncement(result.text));
+      clearSentAttachments(conversationId, turnAttachments);
       // Hand the steps to the answer before clearActiveTurn drops them, so the
       // trail does not blink out at the moment the answer lands.
-      const steps = activeTurnRef.current?.activities ?? [];
       setCompletedTrail(steps.length
         ? { messageId: answerId, activities: steps, durationMs: Date.now() - turn.startedAt }
         : null);
+      reportChatLifecycle('chat_completed', {
+        eventId: turn.turnId,
+        durationMs: Date.now() - turn.startedAt,
+        outcome: params.kind,
+      });
       clearActiveTurn(requestId);
       setUsageRefresh(value => value + 1);
       if (ENV.ENABLE_VOICE && !mutedRef.current) {
-        void AudioService.playTTS(result.text).catch(error => console.error('TTS playback failed:', error));
+        setSpeakingMessageId(answerId);
+        void AudioService.playTTS(result.text)
+          .catch(error => console.error('TTS playback failed:', error))
+          .finally(() => setSpeakingMessageId(current => current === answerId ? null : current));
       }
     } catch (error) {
       const active = activeTurnRef.current;
@@ -1182,7 +2243,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         }
         pendingCaptchaRef.current = { params, userMessage };
         clearActiveTurn(requestId);
-        if (params.kind === 'send') setInput(content);
+        if (params.kind === 'send') {
+          inputRef.current = content;
+          setInput(content);
+          setConversationDraft(conversationId, content);
+        }
         setShowCaptcha(true);
         setErrorMessage('Complete the security check to send your message.');
         return;
@@ -1208,9 +2273,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               timestamp: Date.now(),
               status: 'stopped' as const,
               annotations,
+              turnId: turn.turnId,
+              activities: active.activities,
             }],
           }));
         }
+        reportChatLifecycle('chat_stopped', {
+          eventId: turn.turnId,
+          durationMs: Date.now() - turn.startedAt,
+          outcome: 'transport',
+        });
         clearActiveTurn(requestId);
         return;
       }
@@ -1233,21 +2305,31 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
             timestamp: Date.now(),
             status: 'interrupted' as const,
             annotations,
+            turnId: turn.turnId,
+            activities: active.activities,
           }],
         }));
       } else {
         updateMessage(conversationId, userMessage.id, { status: 'failed' });
       }
+      reportChatLifecycle('chat_failed', {
+        eventId: turn.turnId,
+        durationMs: Date.now() - turn.startedAt,
+        errorCode: telemetryErrorCode(error),
+        outcome: params.kind,
+      });
       clearActiveTurn(requestId);
       setErrorMessage(getErrorText(error));
       setUsageRefresh(value => value + 1);
     }
   }, [
     clearActiveTurn,
+    clearSentAttachments,
     enforceCapAndQueueDeletion,
     getErrorText,
     handleClearCommand,
     handleUsageCommand,
+    setConversationDraft,
     stopListening,
     updateConversationById,
     updateMessage,
@@ -1257,11 +2339,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
   useEffect(() => { runTurnRef.current = runTurn; }, [runTurn]);
 
   const handleSendMessage = useCallback(async (messageContent: string | null = null) => {
+    if (attachmentBusyRef.current) {
+      setErrorMessage('Wait for the current file upload to finish before sending.');
+      return;
+    }
     const content = messageContent === null ? inputRef.current : messageContent;
+    const conversationId = currentConversationIdRef.current;
     await runTurn({
-      conversationId: currentConversationIdRef.current,
+      conversationId,
       content,
       kind: 'send',
+      attachments: (composerAttachmentsRef.current[conversationId] ?? []).map(
+        ({ id, name, mime, size }) => ({ id, name, mime, size }),
+      ),
     });
   }, [runTurn]);
 
@@ -1308,6 +2398,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
 
   const branchGuard = useCallback((): Conversation | null => {
     if (activeTurnRef.current || isClearingRef.current) return null;
+    if (attachmentBusyRef.current) {
+      setErrorMessage('Wait for the current file upload to finish before changing this branch.');
+      return null;
+    }
     if (pendingCaptchaRef.current) {
       setErrorMessage('Complete the security check before sending another message.');
       return null;
@@ -1315,11 +2409,64 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     return conversationsRef.current[currentConversationIdRef.current] ?? null;
   }, []);
 
+  const handleBranchConversation = useCallback(() => {
+    const source = branchGuard();
+    if (!source) return;
+    const id = generateConversationId();
+    const now = Date.now();
+    const branched: Conversation = {
+      ...source,
+      id,
+      title: `Branch of ${source.title}`.slice(0, 80),
+      messages: source.messages.map(message => {
+        const copy = {
+          ...message,
+          ...(message.annotations ? { annotations: message.annotations.map(annotation => ({ ...annotation })) } : {}),
+        };
+        // Attachment handles are conversation-bound server capabilities. A
+        // branched transcript keeps the visible text but cannot inherit those
+        // handles as if they belonged to the new conversation.
+        delete copy.attachments;
+        return copy;
+      }),
+      createdAt: now,
+      updatedAt: now,
+      draft: '',
+      draftUpdatedAt: now,
+      cloudRevision: undefined,
+      cloudUpdatedAt: undefined,
+      cloudSyncedLocalUpdatedAt: undefined,
+      needsServerResync: true,
+    };
+    setConversations(previous => {
+      const next = enforceCapAndQueueDeletion({ ...previous, [id]: branched }, id);
+      conversationsRef.current = next;
+      return next;
+    });
+    AudioService.stop();
+    setSpeakingMessageId(null);
+    currentConversationIdRef.current = id;
+    setCurrentConversationId(id);
+    inputRef.current = '';
+    setInput('');
+    setChatMenuAnchor(null);
+    setErrorMessage('');
+    setShowExamples(false);
+    setAutoFollow(true);
+    writeConversationUrl(id, 'push');
+    setAnnouncement(`Created ${branched.title}. The original chat is unchanged.`);
+    reportClientEvent('conversation_created', {
+      outcome: 'branch',
+      value: branched.messages.length,
+    });
+  }, [branchGuard, enforceCapAndQueueDeletion]);
+
   const handleEditMessage = useCallback((id: string, newContent: string) => {
     const conversation = branchGuard();
     if (!conversation) return;
     const index = conversation.messages.findIndex(message => message.id === id);
     if (index < 0) return;
+    const sourceMessage = conversation.messages[index];
     void runTurn({
       conversationId: conversation.id,
       content: newContent,
@@ -1328,6 +2475,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       rollbackMessages: conversation.messages,
       rollbackTitle: conversation.title,
       forceReset: true,
+      attachments: sourceMessage.attachments?.map(attachment => ({ ...attachment })),
     });
   }, [branchGuard, runTurn]);
 
@@ -1336,14 +2484,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     if (!conversation) return;
     const lastUserIndex = conversation.messages.map(message => message.role).lastIndexOf('user');
     if (lastUserIndex < 0) return;
+    const sourceMessage = conversation.messages[lastUserIndex];
     void runTurn({
       conversationId: conversation.id,
-      content: conversation.messages[lastUserIndex].rawContent,
+      content: sourceMessage.rawContent,
       kind: 'regenerate',
       baseMessages: conversation.messages.slice(0, lastUserIndex),
       rollbackMessages: conversation.messages,
       rollbackTitle: conversation.title,
       forceReset: true,
+      attachments: sourceMessage.attachments?.map(attachment => ({ ...attachment })),
     });
   }, [branchGuard, runTurn]);
 
@@ -1352,14 +2502,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     if (!conversation) return;
     const index = conversation.messages.findIndex(message => message.id === id && message.role === 'user');
     if (index < 0) return;
+    const sourceMessage = conversation.messages[index];
     void runTurn({
       conversationId: conversation.id,
-      content: conversation.messages[index].rawContent,
+      content: sourceMessage.rawContent,
       kind: 'retry',
       baseMessages: conversation.messages.slice(0, index),
       rollbackMessages: conversation.messages,
       rollbackTitle: conversation.title,
       forceReset: true,
+      attachments: sourceMessage.attachments?.map(attachment => ({ ...attachment })),
     });
   }, [branchGuard, runTurn]);
 
@@ -1367,14 +2519,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     if (!ENV.ENABLE_VOICE) return;
     const Constructor = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Constructor) return;
-    const recognition = new Constructor();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    const recognition = configureSpeechRecognition(new Constructor());
     recognition.onresult = event => {
       const transcript = Array.from(event.results).map(result => result[0].transcript).join('');
       const prefix = dictationPrefixRef.current;
-      setInput(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
+      setCurrentDraft(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
     };
     recognition.onerror = event => {
       console.error('Speech recognition error:', event.error);
@@ -1396,7 +2545,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       recognition.onend = null;
       try { recognition.stop(); } catch { /* already stopped */ }
     };
-  }, []);
+  }, [setCurrentDraft]);
 
   const handleStartListening = useCallback(() => {
     if (!speechRecognition || activeTurnRef.current) return;
@@ -1415,14 +2564,113 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       const next = !previous;
       try { localStorage.setItem(muteStorageKey(userId), JSON.stringify(next)); } catch { /* optional */ }
       AudioService.setMuted(next || !ENV.ENABLE_VOICE);
+      if (next) setSpeakingMessageId(null);
       return next;
     });
   }, [userId]);
+
+  const handleSpeakMessage = useCallback(async (id: string, content: string) => {
+    if (!ENV.ENABLE_VOICE) return;
+    if (mutedRef.current) {
+      mutedRef.current = false;
+      setIsMuted(false);
+      try { localStorage.setItem(muteStorageKey(userId), 'false'); } catch { /* optional */ }
+      AudioService.setMuted(false);
+    }
+    setSpeakingMessageId(id);
+    try {
+      await AudioService.playTTS(content);
+    } catch (error) {
+      console.error('TTS playback failed:', error);
+      setErrorMessage('This message could not be read aloud. Please try again.');
+    } finally {
+      setSpeakingMessageId(current => current === id ? null : current);
+    }
+  }, [userId]);
+
+  const handleStopSpeaking = useCallback(() => {
+    AudioService.stop();
+    setSpeakingMessageId(null);
+  }, []);
+
+  const toggleDesktopRail = useCallback(() => {
+    setDesktopRailCollapsed(previous => {
+      const next = !previous;
+      try { localStorage.setItem(railStorageKey(userId), String(next)); } catch { /* optional */ }
+      return next;
+    });
+  }, [userId]);
+
+  const handleExportConversation = useCallback(() => {
+    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    if (!conversation) return;
+    setChatMenuAnchor(null);
+    void import('../services/conversationExport')
+      .then(({ createConversationExport, downloadConversationExport }) => {
+        downloadConversationExport(createConversationExport(conversation, 'markdown'));
+        reportConversationExport('markdown', 'download', conversation.messages.length);
+        setAnnouncement('Conversation export started.');
+      })
+      .catch(() => setErrorMessage('The conversation export could not be prepared. Please retry.'));
+  }, []);
+
+  const handlePrintConversation = useCallback(() => {
+    setChatMenuAnchor(null);
+    requestAnimationFrame(() => window.print());
+  }, []);
+
+  const handleSubmitFeedback = useCallback(async (
+    messageId: string,
+    rating: FeedbackRating,
+    reason?: string,
+  ) => {
+    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    const message = conversation?.messages.find(candidate => candidate.id === messageId);
+    if (!conversation || !message?.responseId || !message.turnId) return;
+    setFeedbackPending(previous => ({ ...previous, [messageId]: true }));
+    try {
+      await ChatAPI.submitChatFeedback({
+        responseId: message.responseId,
+        turnId: message.turnId,
+        conversationId: conversation.id,
+        rating,
+        ...(reason ? { reason } : {}),
+      });
+      setFeedbackByMessage(previous => ({ ...previous, [messageId]: rating }));
+      setAnnouncement('Feedback saved.');
+      reportClientEvent('message_feedback', {
+        eventId: message.turnId,
+        outcome: rating,
+      });
+    } catch {
+      setErrorMessage('Feedback could not be saved. Check your connection and try again.');
+    } finally {
+      setFeedbackPending(previous => {
+        const next = { ...previous };
+        delete next[messageId];
+        return next;
+      });
+    }
+  }, []);
+
+  const handleMenuUsage = useCallback(() => {
+    setChatMenuAnchor(null);
+    void handleUsageCommand(currentConversationIdRef.current);
+  }, [handleUsageCommand]);
+
+  const handleMenuClear = useCallback(() => {
+    setChatMenuAnchor(null);
+    void handleClearCommand(currentConversationIdRef.current);
+  }, [handleClearCommand]);
 
   // Stable identities: InputArea and ConversationSidebar are memoized, and a
   // fresh arrow here would defeat that on every streaming frame.
   const handleSend = useCallback(() => { void handleSendMessage(); }, [handleSendMessage]);
   const handleStop = useCallback(() => abortActiveTurn(true), [abortActiveTurn]);
+  const handleAttachmentBusyChange = useCallback((busy: boolean) => {
+    attachmentBusyRef.current = busy;
+    setAttachmentBusy(busy);
+  }, []);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
   const lastUserMessageId = useMemo(() => {
@@ -1668,7 +2916,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         }
         : { ...conversation, needsServerResync: true, updatedAt: Date.now() };
       saveStore(userId, {
-        version: 3,
+        version: 4,
         conversations: {
           ...conversationsRef.current,
           [active.conversationId]: restored,
@@ -1699,6 +2947,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
     ? `${usage.used ?? 0} today`
     : `${usage?.used ?? 0} / ${usage?.limit ?? 0} today`;
   const usageTooltip = `AI messages today · ${usageTierLabel}`;
+  const currentCloudSynced = !isGuest
+    && Boolean(currentConversation.cloudRevision)
+    && currentConversation.cloudSyncedLocalUpdatedAt === currentConversation.updatedAt;
+  const currentComposerAttachments = composerAttachments[currentConversationId] ?? [];
+  const currentSupportAttachmentIds = [...new Set([
+    ...currentConversation.messages.flatMap(message => message.attachments?.map(attachment => attachment.id) ?? []),
+    ...currentComposerAttachments.map(attachment => attachment.id),
+  ])];
+  const visibleCloudStatus = isGuest ? 'device' : !isOnline ? 'offline' : cloudStatus;
+  const cloudStatusLabel = visibleCloudStatus === 'device' ? 'On this device'
+    : visibleCloudStatus === 'loading' ? 'Loading history…'
+      : visibleCloudStatus === 'saving' ? 'Saving…'
+        : visibleCloudStatus === 'synced' ? 'Synced'
+          : visibleCloudStatus === 'offline' ? 'Offline · saved here'
+            : 'Sync paused';
+  const cloudStatusTooltip = cloudError || (isGuest
+    ? 'Guest chats stay in this browser.'
+    : visibleCloudStatus === 'synced' ? 'This chat is saved to your account.'
+      : 'Changes remain available on this device.');
+  const deleteConversation = deleteConversationId ? conversations[deleteConversationId] : undefined;
+  const retryableFailedMessage = useMemo(() => {
+    for (let index = currentConversation.messages.length - 1; index >= 0; index -= 1) {
+      const message = currentConversation.messages[index];
+      if (message.role === 'user' && message.status === 'failed') return message;
+    }
+    return undefined;
+  }, [currentConversation.messages]);
 
   return (
     <Box
@@ -1710,27 +2985,43 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
       // be expressed here. See the `.wf-chat-window` block there.
       sx={{ display: 'flex', backgroundColor: containerBg }}
     >
-      <ConversationSidebar
-        open={drawerOpen}
-        onClose={closeDrawer}
-        conversations={sortedConversations}
-        currentConversationId={currentConversationId}
-        onSelectConversation={handleSelectConversation}
-        onDeleteConversation={handleDeleteConversation}
-        onNewConversation={handleNewConversation}
-      />
+      <React.Suspense fallback={(
+        <Box
+          aria-hidden
+          sx={{
+            display: { xs: 'none', md: 'block' },
+            width: desktopRailCollapsed ? 64 : 288,
+            flexShrink: 0,
+            borderRight: `1px solid ${borderColor}`,
+            bgcolor: 'background.paper',
+          }}
+        />
+      )}>
+        <ConversationSidebar
+          open={drawerOpen}
+          onClose={closeDrawer}
+          conversations={sortedConversations}
+          currentConversationId={currentConversationId}
+          onSelectConversation={handleSelectConversation}
+          onDeleteConversation={requestDeleteConversation}
+          onNewConversation={handleNewConversation}
+          onRenameConversation={requestRenameConversation}
+          desktopCollapsed={desktopRailCollapsed}
+          onToggleDesktopCollapsed={toggleDesktopRail}
+        />
+      </React.Suspense>
 
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {/* Just the first row of a fixed-height column — no stickiness needed.
             It was sticky only while the document was the scroller. */}
-        <Box sx={{ borderBottom: `1px solid ${borderColor}`, px: { xs: 1, sm: 2 }, py: 1.25, display: 'flex', alignItems: 'center', gap: 1.5, backgroundColor: 'background.paper', flexShrink: 0 }}>
-          <IconButton onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
-          <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ width: 36, height: 36, bgcolor: '#0a2c4d' }} />
+        <Box className="wf-chat-header" sx={{ borderBottom: `1px solid ${borderColor}`, px: { xs: 0.75, sm: 2 }, py: { xs: 0.75, sm: 1.25 }, minHeight: { xs: 52, sm: 62 }, display: 'flex', alignItems: 'center', gap: { xs: 0.5, sm: 1.5 }, backgroundColor: 'background.paper', flexShrink: 0 }}>
+          <IconButton sx={{ display: { xs: 'inline-flex', md: 'none' } }} onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
+          <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ display: { xs: 'none', sm: 'flex' }, width: 36, height: 36, bgcolor: '#0a2c4d' }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Typography component={isStandalone ? 'h1' : 'h2'} variant="h6" sx={{ lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {currentConversation.title}
             </Typography>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+            <Box sx={{ display: { xs: 'none', sm: 'flex' }, alignItems: 'center', gap: 0.75 }}>
               <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>{ASSISTANT_NAME} · Windows and IT assistant</Typography>
             </Box>
           </Box>
@@ -1741,8 +3032,104 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               </Box>
             </Tooltip>
           )}
-          <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={handleNewConversation}>New chat</Button>
+          <Tooltip title={cloudStatusTooltip}>
+            <Box
+              className="wf-sync-status"
+              role="status"
+              tabIndex={0}
+              aria-label={`History status: ${cloudStatusLabel}`}
+              sx={{ px: { xs: 0.6, sm: 1 }, py: 0.35, borderRadius: 999, border: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', gap: 0.6, flexShrink: 0 }}
+            >
+              {visibleCloudStatus === 'loading' || visibleCloudStatus === 'saving'
+                ? <CircularProgress size={12} />
+                : visibleCloudStatus === 'offline' || visibleCloudStatus === 'error'
+                  ? <CloudOffOutlinedIcon sx={{ fontSize: 15 }} />
+                  : <CloudDoneOutlinedIcon sx={{ fontSize: 15 }} />}
+              <Typography sx={{ display: { xs: 'none', sm: 'block' }, fontSize: 11.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>{cloudStatusLabel}</Typography>
+            </Box>
+          </Tooltip>
+          <Tooltip title="New chat">
+            <IconButton sx={{ display: { xs: 'inline-flex', sm: 'none' } }} onClick={handleNewConversation} aria-label="New chat">
+              <AddIcon />
+            </IconButton>
+          </Tooltip>
+          <Button sx={{ display: { xs: 'none', sm: 'inline-flex' } }} size="small" variant="outlined" startIcon={<AddIcon />} onClick={handleNewConversation}>New chat</Button>
+          <Tooltip title="Chat actions">
+            <IconButton
+              aria-label="Chat actions"
+              aria-controls={chatMenuAnchor ? 'wf-chat-actions-menu' : undefined}
+              aria-haspopup="menu"
+              aria-expanded={chatMenuAnchor ? 'true' : undefined}
+              onClick={(event) => setChatMenuAnchor(event.currentTarget)}
+            >
+              <MoreVertIcon />
+            </IconButton>
+          </Tooltip>
         </Box>
+
+        <Menu
+          id="wf-chat-actions-menu"
+          anchorEl={chatMenuAnchor}
+          open={Boolean(chatMenuAnchor)}
+          onClose={() => setChatMenuAnchor(null)}
+          container={() => document.getElementById('wf-chat-window')}
+        >
+          <MenuItem disabled={isLoading} onClick={() => {
+            setChatMenuAnchor(null);
+            requestRenameConversation(currentConversationIdRef.current);
+          }}><EditOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Rename</MenuItem>
+          <MenuItem disabled={isLoading} onClick={handleBranchConversation}>
+            <AccountTreeOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Branch to new chat
+          </MenuItem>
+          {!isGuest && (
+            <MenuItem disabled={!currentConversation.cloudRevision} onClick={() => {
+              setChatMenuAnchor(null);
+              setShareLinksOpen(true);
+            }}>
+              <LinkOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Share links
+            </MenuItem>
+          )}
+          {!isGuest && (
+            <MenuItem onClick={() => {
+              setChatMenuAnchor(null);
+              setSupportCasesOpen(true);
+            }}>
+              <SupportAgentIcon fontSize="small" sx={{ mr: 1.25 }} />Support cases
+            </MenuItem>
+          )}
+          <Divider />
+          <MenuItem onClick={handleExportConversation}>
+            <DownloadOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Export Markdown
+          </MenuItem>
+          <MenuItem onClick={handlePrintConversation}>
+            <PrintOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Print
+          </MenuItem>
+          <Divider />
+          <MenuItem disabled={isLoading || !isOnline} onClick={handleMenuClear}>
+            <RestartAltIcon fontSize="small" sx={{ mr: 1.25 }} />Clear chat
+          </MenuItem>
+          <MenuItem disabled={isLoading || !isOnline} onClick={handleMenuUsage}>
+            <DataUsageOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Usage
+          </MenuItem>
+          <MenuItem onClick={() => {
+            setChatMenuAnchor(null);
+            setPreferencesOpen(true);
+          }}>
+            <SettingsOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Chat settings
+          </MenuItem>
+          {!isGuest && (
+            <MenuItem disabled={isLoading || attachmentBusy} onClick={() => {
+              setChatMenuAnchor(null);
+              setAccountDataOpen(true);
+            }}>
+              <ManageAccountsOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Account data
+            </MenuItem>
+          )}
+          <MenuItem disabled={isLoading} sx={{ color: 'error.main' }} onClick={() => {
+            setChatMenuAnchor(null);
+            requestDeleteConversation(currentConversationIdRef.current);
+          }}><DeleteOutlineIcon fontSize="small" sx={{ mr: 1.25 }} />Delete chat</MenuItem>
+        </Menu>
 
         <Box
           ref={messagesContainerRef}
@@ -1766,11 +3153,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                     {/* Where a new turn is scrolled to. Zero-height, so it costs
                         the transcript nothing when no turn is in flight. */}
                     {isLastUser && <Box ref={turnAnchorRef} aria-hidden data-wf-turn-anchor sx={{ height: 0 }} />}
-                    {completedTrail?.messageId === message.id && (
+                    {completedTrail?.messageId === message.id ? (
                       <ActivityTrail
                         activities={completedTrail.activities}
                         durationMs={completedTrail.durationMs}
                       />
+                    ) : Boolean(message.activities?.length) && (
+                      <ActivityTrail activities={message.activities ?? []} />
                     )}
                     <MessageComponent
                       msg={message}
@@ -1785,6 +3174,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                       // Only the rows that actually render busy-gated actions see
                       // this flip, so the rest keep their memo across a turn.
                       isBusy={isLoading && (isLast || isLastUser)}
+                      isSpeaking={speakingMessageId === message.id}
+                      onSpeak={ENV.ENABLE_VOICE ? handleSpeakMessage : undefined}
+                      onStopSpeaking={handleStopSpeaking}
+                      feedback={feedbackByMessage[message.id]}
+                      feedbackPending={Boolean(feedbackPending[message.id])}
+                      onFeedback={handleSubmitFeedback}
                     />
                   </React.Fragment>
                 );
@@ -1842,12 +3237,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
               </Box>
             )}
 
-            {errorMessage && (
-              <Box role="status" sx={{ px: 3, py: 1.5, textAlign: 'center' }}>
-                <Typography color="error">{errorMessage}</Typography>
-              </Box>
-            )}
-
             {showExamples && currentConversation.messages.length === 1 && !isLoading && (
               <Fade in timeout={reduceMotion ? 0 : undefined}>
                 <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pb: 3 }}>
@@ -1860,7 +3249,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
                         key={prompt}
                         component="button"
                         onClick={() => {
-                          setInput(prompt);
+                          setCurrentDraft(prompt);
                           requestAnimationFrame(() => textFieldRef.current?.querySelector('textarea')?.focus());
                         }}
                         sx={{ textAlign: 'left', cursor: 'pointer', font: 'inherit', display: 'flex', alignItems: 'center', gap: 1.25, p: 1.5, border: t => `1px solid ${t.palette.divider}`, borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary', transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s', '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' } }}
@@ -1895,14 +3284,69 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           {announcement}
         </Box>
 
+        {(!isOnline || errorMessage) && (
+          <Alert
+            severity={isOnline ? 'error' : 'warning'}
+            variant="outlined"
+            role="alert"
+            sx={{ mx: { xs: 1, sm: 2 }, mt: 1, flexShrink: 0, alignItems: 'center' }}
+            action={isOnline ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                {retryableFailedMessage && !isLoading && (
+                  <Button color="inherit" size="small" onClick={() => handleRetryMessage(retryableFailedMessage.id)}>
+                    Retry
+                  </Button>
+                )}
+                <Button color="inherit" size="small" onClick={() => setErrorMessage('')}>
+                  Dismiss
+                </Button>
+              </Box>
+            ) : undefined}
+          >
+            {isOnline ? errorMessage : 'You are offline. Drafts stay saved on this device; reconnect to send.'}
+          </Alert>
+        )}
+
+        {!isGuest && (
+          <Box
+            sx={{
+              px: { xs: 1, sm: 2 },
+              pt: 1,
+              bgcolor: 'background.paper',
+              borderTop: `1px solid ${borderColor}`,
+              flexShrink: 0,
+            }}
+          >
+            <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
+              <React.Suspense fallback={(
+                <Typography role="status" variant="caption" color="text.secondary" sx={{ display: 'block', py: 1.5 }}>
+                  Loading attachment tools…
+                </Typography>
+              )}>
+                <AttachmentTray
+                  key={currentConversationId}
+                  signedIn
+                  conversationId={currentConversationId}
+                  attachments={currentComposerAttachments}
+                  onChange={attachments => setComposerAttachmentsForConversation(currentConversationId, attachments)}
+                  onBusyChange={handleAttachmentBusyChange}
+                  onRemoveAttachment={attachment => deleteComposerAttachment(currentConversationId, attachment)}
+                  disabled={isLoading || showCaptcha || !isOnline}
+                />
+              </React.Suspense>
+            </Box>
+          </Box>
+        )}
+
         <InputArea
           input={input}
-          setInput={setInput}
+          setInput={setCurrentDraft}
           isLoading={isLoading}
           isListening={isListening}
           isSpeechRecognitionSupported={isSpeechRecognitionSupported}
           isMuted={isMuted}
           voiceEnabled={ENV.ENABLE_VOICE}
+          isOffline={!isOnline}
           inputBytes={inputBytes}
           maxMessageBytes={MAX_MESSAGE_BYTES}
           onSend={handleSend}
@@ -1916,7 +3360,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
         {/* The forum's breadcrumb ad, relocated here from above the chat so it
             cannot take 280px (390px on a phone) out of a viewport that no
             longer scrolls. Renders nothing for members or off the embed. */}
-        <AdSlot isGuest={isGuest} />
+        {isGuest && (
+          <React.Suspense fallback={null}>
+            <AdSlot isGuest />
+          </React.Suspense>
+        )}
       </Box>
 
       {/* A fixed overlay cannot move document flow. Inline in the transcript
@@ -1939,6 +3387,115 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, us
           <div id="turnstile-container" aria-label="Security check" />
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={Boolean(renameConversationId)}
+        onClose={() => setRenameConversationId(null)}
+        aria-labelledby="wf-rename-chat-title"
+        fullWidth
+        maxWidth="xs"
+        container={() => document.getElementById('wf-chat-window')}
+      >
+        <DialogTitle id="wf-rename-chat-title">Rename chat</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            label="Chat name"
+            value={renameTitle}
+            onChange={(event) => setRenameTitle(event.target.value.slice(0, 80))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && renameTitle.trim()) confirmRenameConversation();
+            }}
+            slotProps={{ htmlInput: { maxLength: 80 } }}
+            helperText={`${renameTitle.length} / 80`}
+            sx={{ mt: 1 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRenameConversationId(null)}>Cancel</Button>
+          <Button variant="contained" disabled={!renameTitle.trim()} onClick={confirmRenameConversation}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleteConversationId)}
+        onClose={() => setDeleteConversationId(null)}
+        aria-labelledby="wf-delete-chat-title"
+        container={() => document.getElementById('wf-chat-window')}
+      >
+        <DialogTitle id="wf-delete-chat-title">Delete chat?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            “{deleteConversation?.title ?? 'This chat'}” will be removed from this device and queued for secure server deletion. This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConversationId(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={confirmDeleteConversation}>Delete</Button>
+        </DialogActions>
+      </Dialog>
+
+      {!isGuest && shareLinksOpen && (
+        <React.Suspense fallback={null}>
+          <ShareLinksDialog
+            open
+            onClose={() => setShareLinksOpen(false)}
+            signedIn
+            conversationId={currentConversation.cloudRevision ? currentConversation.id : undefined}
+            conversationTitle={currentConversation.title}
+            conversationRevision={currentCloudSynced ? currentConversation.cloudRevision : undefined}
+            onShareCreated={() => setAnnouncement('A new share link was created. Its token is shown only in the share-links dialog.')}
+          />
+        </React.Suspense>
+      )}
+
+      {!isGuest && supportCasesOpen && (
+        <React.Suspense fallback={null}>
+          <SupportCasesDialog
+            open
+            onClose={() => setSupportCasesOpen(false)}
+            signedIn
+            currentConversationId={currentCloudSynced ? currentConversation.id : undefined}
+            attachmentIds={currentSupportAttachmentIds}
+            onForumHandoffCopied={() => setAnnouncement('Support case BBCode copied. Nothing was posted automatically.')}
+          />
+        </React.Suspense>
+      )}
+
+      {!isGuest && accountDataOpen && (
+        <React.Suspense fallback={null}>
+          <AccountDataDialog
+            open
+            onClose={() => setAccountDataOpen(false)}
+            signedIn
+            onDeleteAllStarting={quiesceCloudSync}
+            onDeleteAllSucceeded={handleDeleteAllSavedDataSucceeded}
+            onDeleteAllFinished={resumeCloudSync}
+            onExportDownloaded={() => setAnnouncement('Your saved AI chat data export was downloaded.')}
+          />
+        </React.Suspense>
+      )}
+
+      {preferencesOpen && (
+        <React.Suspense fallback={null}>
+          <PreferencesDialog
+            open
+            onClose={() => setPreferencesOpen(false)}
+            voiceEnabled={ENV.ENABLE_VOICE}
+          />
+        </React.Suspense>
+      )}
     </Box>
   );
+};
+
+export const ChatWindow: React.FC<ChatWindowProps> = (props) => {
+  const [shareToken, setShareToken] = useState(safeShareQuery);
+  useEffect(() => {
+    const handlePopState = () => setShareToken(safeShareQuery());
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+  return shareToken ? <SharedChatView key={shareToken} token={shareToken} /> : <InteractiveChatWindow {...props} />;
 };

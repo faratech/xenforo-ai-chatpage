@@ -8,9 +8,132 @@
  */
 
 import { ChatAPI } from './api';
+import { reportClientEvent } from './telemetry';
 
 export const MAX_TTS_CHUNK_BYTES = 4800;
 export const MAX_TTS_CHUNKS = 3;
+
+export const TTS_VOICES = [
+  'alloy',
+  'ash',
+  'ballad',
+  'cedar',
+  'coral',
+  'echo',
+  'fable',
+  'marin',
+  'nova',
+  'onyx',
+  'sage',
+  'shimmer',
+  'verse',
+] as const;
+
+export type TTSVoice = typeof TTS_VOICES[number];
+
+export interface TTSPreferences {
+  voice: TTSVoice;
+  /** Synthesis speed accepted by the audio API. */
+  speed: number;
+}
+
+export const DEFAULT_TTS_PREFERENCES: TTSPreferences = {
+  voice: 'alloy',
+  speed: 1,
+};
+
+export const TTS_PREFERENCES_STORAGE_KEY = 'wf_chat_tts_preferences:v1';
+
+const defaultTTSStorage = (): Storage | null => {
+  if (import.meta.env.MODE === 'test') return null;
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+
+const MIN_TTS_SPEED = 0.25;
+const MAX_TTS_SPEED = 4;
+
+export const normalizeTTSPreferences = (
+  preferences: Partial<TTSPreferences> = {},
+): TTSPreferences => {
+  const voice = TTS_VOICES.includes(preferences.voice as TTSVoice)
+    ? preferences.voice as TTSVoice
+    : DEFAULT_TTS_PREFERENCES.voice;
+  const requestedSpeed = typeof preferences.speed === 'number' && Number.isFinite(preferences.speed)
+    ? preferences.speed
+    : DEFAULT_TTS_PREFERENCES.speed;
+  const speed = Math.round(
+    Math.min(MAX_TTS_SPEED, Math.max(MIN_TTS_SPEED, requestedSpeed)) * 100,
+  ) / 100;
+  return { voice, speed };
+};
+
+export const loadStoredTTSPreferences = (
+  storage: Pick<Storage, 'getItem'> | null = defaultTTSStorage(),
+): TTSPreferences => {
+  if (!storage) return { ...DEFAULT_TTS_PREFERENCES };
+  try {
+    const raw = storage.getItem(TTS_PREFERENCES_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_TTS_PREFERENCES };
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object'
+      ? normalizeTTSPreferences(parsed as Partial<TTSPreferences>)
+      : { ...DEFAULT_TTS_PREFERENCES };
+  } catch {
+    return { ...DEFAULT_TTS_PREFERENCES };
+  }
+};
+
+export const saveStoredTTSPreferences = (
+  preferences: Partial<TTSPreferences>,
+  storage: Pick<Storage, 'setItem'> | null = defaultTTSStorage(),
+): TTSPreferences => {
+  const normalized = normalizeTTSPreferences(preferences);
+  if (!storage) return normalized;
+  try {
+    storage.setItem(TTS_PREFERENCES_STORAGE_KEY, JSON.stringify(normalized));
+  } catch {
+    // Playback still uses the selection for this session when storage is full
+    // or unavailable in a privacy-restricted browser.
+  }
+  return normalized;
+};
+
+export const DEFAULT_DICTATION_LANGUAGE = 'en-US';
+
+/** Canonicalizes a BCP-47 language without accepting arbitrary long input. */
+export const normalizeDictationLanguage = (
+  value: string | undefined,
+  fallback = DEFAULT_DICTATION_LANGUAGE,
+): string => {
+  const candidate = value?.trim();
+  if (!candidate || candidate.length > 35) return fallback;
+  try {
+    return Intl.getCanonicalLocales(candidate)[0] ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+export const resolveDictationLanguage = (
+  preferred?: string,
+  browserLanguages: readonly string[] = typeof navigator === 'undefined' ? [] : navigator.languages,
+): string => normalizeDictationLanguage(preferred || browserLanguages[0]);
+
+/** Applies the shared dictation defaults to a newly created browser recognizer. */
+export const configureSpeechRecognition = (
+  recognition: SpeechRecognition,
+  language?: string,
+): SpeechRecognition => {
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = resolveDictationLanguage(language);
+  return recognition;
+};
 
 const encoder = new TextEncoder();
 const utf8Length = (value: string): number => encoder.encode(value).length;
@@ -144,6 +267,16 @@ export class AudioService {
   private static generation = 0;
   private static muted = false;
   private static pagehideRegistered = false;
+  private static preferences = loadStoredTTSPreferences();
+
+  static configure(preferences: Partial<TTSPreferences>): TTSPreferences {
+    this.preferences = normalizeTTSPreferences({ ...this.preferences, ...preferences });
+    return { ...this.preferences };
+  }
+
+  static getPreferences(): TTSPreferences {
+    return { ...this.preferences };
+  }
 
   static setMuted(muted: boolean): void {
     this.muted = muted;
@@ -156,7 +289,7 @@ export class AudioService {
     window.addEventListener('pagehide', () => this.stop());
   }
 
-  static async playTTS(markdown: string): Promise<void> {
+  static async playTTS(markdown: string, preferences?: Partial<TTSPreferences>): Promise<void> {
     this.stop();
     if (this.muted) return;
     this.registerPagehide();
@@ -164,12 +297,30 @@ export class AudioService {
     const text = markdownToSpeechText(markdown);
     const chunks = splitSpeechChunks(text);
     if (!chunks.length) return;
+    const playbackPreferences = normalizeTTSPreferences({
+      ...this.preferences,
+      ...preferences,
+    });
 
     const generation = this.generation;
-    for (const chunk of chunks) {
-      if (generation !== this.generation || this.muted) return;
-      const finished = await this.playChunk(chunk, generation);
-      if (!finished) return;
+    const startedAt = Date.now();
+    reportClientEvent('tts_started', { value: chunks.length });
+    try {
+      for (const chunk of chunks) {
+        if (generation !== this.generation || this.muted) return;
+        const finished = await this.playChunk(chunk, generation, playbackPreferences);
+        if (!finished) return;
+      }
+      reportClientEvent('tts_completed', {
+        durationMs: Date.now() - startedAt,
+        value: chunks.length,
+      });
+    } catch (error) {
+      reportClientEvent('tts_failed', {
+        durationMs: Date.now() - startedAt,
+        errorCode: error instanceof Error ? error.name : 'playback_error',
+      });
+      throw error;
     }
   }
 
@@ -178,13 +329,21 @@ export class AudioService {
    * naturally, false when the queue was cancelled. Throws on synthesis
    * or playback failure after cleaning up, which also stops the queue.
    */
-  private static async playChunk(text: string, generation: number): Promise<boolean> {
+  private static async playChunk(
+    text: string,
+    generation: number,
+    preferences: TTSPreferences,
+  ): Promise<boolean> {
     const controller = new AbortController();
     this.currentRequest = controller;
     let releaseAudio: (() => void) | null = null;
 
     try {
-      const audioBlob = await ChatAPI.requestTTS(text, { signal: controller.signal });
+      const audioBlob = await ChatAPI.requestTTS(text, {
+        signal: controller.signal,
+        voice: preferences.voice,
+        speed: preferences.speed,
+      });
       if (controller.signal.aborted || this.muted || generation !== this.generation) return false;
 
       const audioUrl = URL.createObjectURL(audioBlob);

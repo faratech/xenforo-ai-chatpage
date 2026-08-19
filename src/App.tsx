@@ -5,6 +5,7 @@ import Button from '@mui/material/Button';
 import CircularProgress from '@mui/material/CircularProgress';
 import { APIError, ChatAPI } from './services/api';
 import { installClientTelemetry } from './services/telemetry';
+import { loadLazyModule } from './services/lazyImport';
 import { ENV } from './config/env';
 import type { UserData } from './types';
 import './App.css';
@@ -23,10 +24,10 @@ interface AppProps {
   initialIdentityPromise?: Promise<UserData> | null;
 }
 
-const ChatWindow = lazy(async () => {
+const ChatWindow = lazy(() => loadLazyModule(async () => {
   const module = await import('./components/ChatWindow');
   return { default: module.ChatWindow };
-});
+}));
 
 /**
  * Main App Component — resolves the XenForo identity and initializes chat.
@@ -66,6 +67,9 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
         const bootstrapRequest = initialIdentityRequestRef.current;
         initialIdentityRequestRef.current = null;
         const data = await (bootstrapRequest ?? ChatAPI.getUserData());
+        if (typeof data.csrf_token === 'string' && data.csrf_token.trim()) {
+          ChatAPI.setCsrfToken(data.csrf_token);
+        }
         const resolvedId = data.user_id === undefined || data.user_id === null
           ? ''
           : String(data.user_id);
@@ -108,6 +112,7 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
           setIdentityLocked(true);
         } else {
           ChatAPI.setExpectedIdentityId('');
+          ChatAPI.setCsrfToken('');
           identityRef.current = null;
           setIdentity(null);
           setIdentityError('Chat could not verify your WindowsForum session. No local history was loaded.');

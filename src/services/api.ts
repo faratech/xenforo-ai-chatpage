@@ -17,6 +17,55 @@ import type {
   StreamDiagnostics,
 } from '../types';
 import { generateTurnId } from '../utils/ids';
+import type { TTSVoice } from './speech';
+import type {
+  ChatAttachmentDeleteResponse,
+  ChatAttachmentResponse,
+  ChatFeedbackResponse,
+  ClientTelemetryPayload,
+  ConversationShareCreateResponse,
+  ConversationShareListOptions,
+  ConversationShareListResponse,
+  ConversationShareResponse,
+  CursorPageOptions,
+  DeleteAllSavedChatDataResponse,
+  FeedbackRating,
+  SavedChatDataExportResponse,
+  SavedConversationDraft,
+  SavedConversationListResponse,
+  SavedConversationResponse,
+  SupportCaseDraft,
+  SupportCaseListResponse,
+  SupportCaseResponse,
+} from './apiContracts';
+
+export type {
+  ChatAttachment,
+  ChatAttachmentDeleteResponse,
+  ChatAttachmentKind,
+  ChatFeedback,
+  ClientTelemetryEvent,
+  ClientTelemetryPayload,
+  ConversationShare,
+  ConversationShareListItem,
+  ConversationShareListOptions,
+  ConversationShareListResponse,
+  ConversationShareSummary,
+  CursorPageOptions,
+  DeleteAllSavedChatDataResponse,
+  FeedbackRating,
+  PCProfile,
+  SavedConversation,
+  SavedConversationDraft,
+  SavedConversationSummary,
+  SavedChatDataAttachment,
+  SavedChatDataExport,
+  SavedChatDataExportResponse,
+  SavedChatDataFeedback,
+  SupportCase,
+  SupportCaseDraft,
+  SupportCaseStatus,
+} from './apiContracts';
 
 const apiBase = ENV.getApiBase();
 
@@ -28,6 +77,8 @@ export const CHAT_FIRST_BYTE_TIMEOUT_MS = 130_000;
 export const READ_INACTIVITY_TIMEOUT_MS = 45_000;
 /** TTS is the one call that used to run unbounded; a stalled worker muted every later reply. */
 export const TTS_REQUEST_TIMEOUT_MS = 20_000;
+/** Uploads have a separate ceiling so a healthy large file is not cut off by JSON bootstrap timing. */
+export const UPLOAD_REQUEST_TIMEOUT_MS = 60_000;
 /** Hard transport ceiling; keeps a malformed/unbounded SSE response out of memory. */
 export const CHAT_STREAM_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -88,6 +139,13 @@ interface SendMessagePayload {
   reset_conversation?: boolean;
   has_local_history?: boolean;
   history?: ChatMessageHistoryItem[];
+  attachment_ids?: string[];
+}
+
+export interface TTSRequestOptions {
+  signal?: AbortSignal;
+  voice?: TTSVoice;
+  speed?: number;
 }
 
 export interface APIErrorOptions {
@@ -388,22 +446,26 @@ function withDeadline(timeoutMs: number, signal?: AbortSignal): DeadlineHandle {
  */
 async function fetchAPI<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  timeoutMs = JSON_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   // The deadline must cover the body read, not just time-to-headers: a
   // stalled response body would otherwise hang forever (json() ignores a
   // cleared timer). It is cleared only after the body is fully consumed.
-  const deadline = withDeadline(JSON_REQUEST_TIMEOUT_MS);
+  const deadline = withDeadline(timeoutMs, options.signal ?? undefined);
   try {
     let response: Response;
     try {
+      const headers = new Headers(options.headers);
+      const isMultipart = typeof FormData !== 'undefined' && options.body instanceof FormData;
+      if (!isMultipart && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+      }
+      const { signal: _callerSignal, headers: _callerHeaders, ...requestOptions } = options;
       response = await fetch(`${apiBase}${endpoint}`, {
+        ...requestOptions,
         credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
-        ...options,
+        headers,
         signal: deadline.signal,
       });
     } catch (error) {
@@ -455,16 +517,60 @@ async function fetchAPI<T>(
  */
 export class ChatAPI {
   private static expectedIdentityId = '';
+  private static csrfToken = '';
 
   static setExpectedIdentityId(identityId: string): void {
     this.expectedIdentityId = identityId;
   }
 
+  /** Allows the XenForo host shell to pass its current CSRF token explicitly. */
+  static setCsrfToken(token: string): void {
+    this.csrfToken = token.trim();
+  }
+
+  private static resolveCsrfToken(): string {
+    if (this.csrfToken) return this.csrfToken;
+    if (typeof window === 'undefined' || typeof document === 'undefined') return '';
+
+    const xenForo = (window as unknown as {
+      XF?: { config?: { csrf?: unknown } };
+    }).XF;
+    const candidates = [
+      xenForo?.config?.csrf,
+      document.querySelector<HTMLInputElement>('input[name="_xfToken"]')?.value,
+      document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content,
+    ];
+    return candidates.find((value): value is string => (
+      typeof value === 'string' && value.trim() !== ''
+    ))?.trim() ?? '';
+  }
+
+  private static protectedPayload<T extends Record<string, unknown>>(
+    payload: T,
+  ): T & { expected_identity_id: string; _xfToken: string } {
+    const csrfToken = this.resolveCsrfToken();
+    if (!csrfToken) {
+      throw new APIError('The secure page token is unavailable. Reload the page and try again.', {
+        code: 'csrf_unavailable',
+        retryable: false,
+      });
+    }
+    return {
+      ...payload,
+      expected_identity_id: this.expectedIdentityId,
+      _xfToken: csrfToken,
+    };
+  }
+
   static async getUserData(): Promise<UserData> {
-    return fetchAPI<UserData>(ENV.ENDPOINTS.USER_DATA, {
+    const data = await fetchAPI<UserData>(ENV.ENDPOINTS.USER_DATA, {
       method: 'POST',
       body: JSON.stringify({ action: 'getUserData' }),
     });
+    if (typeof data.csrf_token === 'string' && data.csrf_token.trim()) {
+      this.setCsrfToken(data.csrf_token);
+    }
+    return data;
   }
 
   static async getUsage(): Promise<UsageData> {
@@ -489,6 +595,7 @@ export class ChatAPI {
       conversationId?: string;
       resetConversation?: boolean;
       history?: ChatMessageHistoryItem[];
+      attachmentIds?: string[];
       turnId?: string;
       includeHistory?: boolean;
       onChunk?: (partialText: string, annotations: Annotation[]) => void;
@@ -501,6 +608,7 @@ export class ChatAPI {
       conversationId,
       resetConversation,
       history,
+      attachmentIds,
       onChunk,
       onActivity,
     } = options;
@@ -517,6 +625,11 @@ export class ChatAPI {
     if (history?.length) {
       if (resetConversation || options.includeHistory) payload.history = history;
       else payload.has_local_history = true;
+    }
+    if (attachmentIds?.length) {
+      payload.attachment_ids = [...new Set(
+        attachmentIds.filter(id => typeof id === 'string' && id.trim() !== '').map(id => id.trim()),
+      )];
     }
 
     // One deadline covers connection, headers, and the first body byte.
@@ -1048,9 +1161,287 @@ export class ChatAPI {
     return this.assertConversationCleared('deleteConversation', conversationId);
   }
 
+  static async listSavedConversations(
+    options: CursorPageOptions = {},
+  ): Promise<SavedConversationListResponse> {
+    return fetchAPI<SavedConversationListResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'listSavedConversations',
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+      })),
+    });
+  }
+
+  static async getSavedConversation(
+    conversationId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SavedConversationResponse> {
+    return fetchAPI<SavedConversationResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'getSavedConversation',
+        client_conversation_id: conversationId,
+      })),
+    });
+  }
+
+  static async upsertSavedConversation(
+    conversation: SavedConversationDraft,
+    expectedRevision: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SavedConversationResponse> {
+    return fetchAPI<SavedConversationResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'upsertSavedConversation',
+        conversation,
+        expected_revision: expectedRevision,
+      })),
+    });
+  }
+
+  static async deleteSavedConversation(
+    conversationId: string,
+    expectedRevision: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ success: true }> {
+    return fetchAPI<{ success: true }>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'deleteSavedConversation',
+        client_conversation_id: conversationId,
+        expected_revision: expectedRevision,
+      })),
+    });
+  }
+
+  static async submitChatFeedback(
+    feedback: {
+      responseId: string;
+      turnId: string;
+      conversationId?: string;
+      rating: FeedbackRating;
+      reason?: string;
+    },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ChatFeedbackResponse> {
+    const csrfToken = this.resolveCsrfToken();
+    return fetchAPI<ChatFeedbackResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify({
+        action: 'submitChatFeedback',
+        response_id: feedback.responseId,
+        turn_id: feedback.turnId,
+        ...(feedback.conversationId ? { client_conversation_id: feedback.conversationId } : {}),
+        rating: feedback.rating,
+        ...(feedback.reason?.trim() ? { reason: feedback.reason.trim() } : {}),
+        ...(this.expectedIdentityId ? { expected_identity_id: this.expectedIdentityId } : {}),
+        ...(csrfToken ? { _xfToken: csrfToken } : {}),
+      }),
+    });
+  }
+
+  static async uploadChatAttachment(
+    file: File,
+    options: { conversationId?: string; signal?: AbortSignal } = {},
+  ): Promise<ChatAttachmentResponse> {
+    const csrfToken = this.resolveCsrfToken();
+    if (!csrfToken) {
+      throw new APIError('The secure page token is unavailable. Reload the page and try again.', {
+        code: 'csrf_unavailable',
+        retryable: false,
+      });
+    }
+    const body = new FormData();
+    body.set('action', 'uploadChatAttachment');
+    body.set('file', file, file.name);
+    body.set('expected_identity_id', this.expectedIdentityId);
+    body.set('_xfToken', csrfToken);
+    if (options.conversationId) body.set('client_conversation_id', options.conversationId);
+
+    return fetchAPI<ChatAttachmentResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body,
+    }, UPLOAD_REQUEST_TIMEOUT_MS);
+  }
+
+  static async deleteChatAttachment(
+    attachmentId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ChatAttachmentDeleteResponse> {
+    return fetchAPI<ChatAttachmentDeleteResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'deleteChatAttachment',
+        attachment_id: attachmentId,
+      })),
+    });
+  }
+
+  static async listConversationShares(
+    options: ConversationShareListOptions = {},
+  ): Promise<ConversationShareListResponse> {
+    return fetchAPI<ConversationShareListResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'listConversationShares',
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.conversationId === undefined
+          ? {}
+          : { client_conversation_id: options.conversationId }),
+      })),
+    });
+  }
+
+  static async createConversationShare(
+    conversationId: string,
+    expectedRevision: number,
+    options: { expiresIn?: number; signal?: AbortSignal } = {},
+  ): Promise<ConversationShareCreateResponse> {
+    return fetchAPI<ConversationShareCreateResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'createConversationShare',
+        client_conversation_id: conversationId,
+        expected_revision: expectedRevision,
+        ...(options.expiresIn === undefined ? {} : { expires_in: options.expiresIn }),
+      })),
+    });
+  }
+
+  static async getConversationShare(
+    token: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConversationShareResponse> {
+    return fetchAPI<ConversationShareResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify({ action: 'getConversationShare', token }),
+    });
+  }
+
+  static async revokeConversationShare(
+    shareId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ success: true }> {
+    return fetchAPI<{ success: true }>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'revokeConversationShare',
+        share_id: shareId,
+      })),
+    });
+  }
+
+  static async listSupportCases(
+    options: CursorPageOptions = {},
+  ): Promise<SupportCaseListResponse> {
+    return fetchAPI<SupportCaseListResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'listSupportCases',
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+      })),
+    });
+  }
+
+  static async getSupportCase(
+    caseId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SupportCaseResponse> {
+    return fetchAPI<SupportCaseResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'getSupportCase',
+        case_id: caseId,
+      })),
+    });
+  }
+
+  static async upsertSupportCase(
+    supportCase: SupportCaseDraft,
+    expectedRevision: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SupportCaseResponse> {
+    return fetchAPI<SupportCaseResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'upsertSupportCase',
+        case: supportCase,
+        expected_revision: expectedRevision,
+      })),
+    });
+  }
+
+  static async deleteSupportCase(
+    caseId: string,
+    expectedRevision: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ success: true }> {
+    return fetchAPI<{ success: true }>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'deleteSupportCase',
+        case_id: caseId,
+        expected_revision: expectedRevision,
+      })),
+    });
+  }
+
+  static async exportSavedChatData(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SavedChatDataExportResponse> {
+    return fetchAPI<SavedChatDataExportResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'exportSavedChatData',
+      })),
+    });
+  }
+
+  static async deleteAllSavedChatData(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DeleteAllSavedChatDataResponse> {
+    return fetchAPI<DeleteAllSavedChatDataResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'deleteAllSavedChatData',
+      })),
+    });
+  }
+
+  /** The only telemetry transport; callers cannot add content-bearing fields. */
+  static async submitClientTelemetry(payload: ClientTelemetryPayload): Promise<void> {
+    await fetchAPI<{ success: boolean }>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      keepalive: true,
+      body: JSON.stringify({ action: 'clientTelemetry', ...payload }),
+    });
+  }
+
   static async requestTTS(
     text: string,
-    options: { signal?: AbortSignal } = {}
+    options: TTSRequestOptions = {}
   ): Promise<Blob> {
     // Deadline covers the body read, not just the headers: a worker that
     // accepts the connection and stalls would otherwise leave the audio
@@ -1063,7 +1454,12 @@ export class ChatAPI {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, expected_identity_id: this.expectedIdentityId }),
+          body: JSON.stringify({
+            text,
+            expected_identity_id: this.expectedIdentityId,
+            ...(options.voice ? { voice: options.voice } : {}),
+            ...(options.speed === undefined ? {} : { speed: options.speed }),
+          }),
           signal: deadline.signal,
         });
       } catch (error) {

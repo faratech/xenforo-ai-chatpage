@@ -176,10 +176,14 @@ const server = createServer({
   try {
     const fileStat = await stat(filePath);
     if (!fileStat.isFile()) throw new Error('not a file');
-    response.writeHead(200, {
+    const headers = {
       'cache-control': 'no-store',
       'content-type': mime.get(path.extname(filePath)) || 'application/octet-stream',
-    });
+    };
+    if (requestUrl.pathname === '/chatpage/service-worker.js') {
+      headers['service-worker-allowed'] = '/pages/ai/';
+    }
+    response.writeHead(200, headers);
     response.end(await readFile(filePath));
   } catch {
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -198,19 +202,32 @@ const origin = `https://127.0.0.1:${address.port}`;
 const browser = await chromium.launch({
   executablePath,
   headless: true,
-  args: ['--disable-dev-shm-usage', '--no-sandbox'],
+  args: ['--disable-dev-shm-usage', '--ignore-certificate-errors', '--no-sandbox'],
 });
 
-const createPage = async (name, mode, { failChatChunk = false } = {}) => {
+const createPage = async (
+  name,
+  mode,
+  {
+    failChatChunk = false,
+    failPreferencesChunkOnce = false,
+    blockServiceWorkers = false,
+  } = {},
+) => {
   const state = {
     chatPayloads: [],
     identityCalls: 0,
     mode,
+    optionalChunkFailures: 0,
+    optionalChunkRequests: 0,
     streamAborted: false,
     telemetry: [],
   };
   scenarios.set(name, state);
-  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    serviceWorkers: blockServiceWorkers ? 'block' : 'allow',
+  });
   const page = await context.newPage();
   const routeApi = async route => {
     const request = route.request();
@@ -234,6 +251,16 @@ const createPage = async (name, mode, { failChatChunk = false } = {}) => {
   if (failChatChunk) {
     await page.route(/\/ChatWindow-[^/]+\.chunk\.js(?:\?.*)?$/, route => route.abort('failed'));
   }
+  if (failPreferencesChunkOnce) {
+    await page.route(/\/PreferencesDialog-[^/]+\.chunk\.js(?:\?.*)?$/, route => {
+      state.optionalChunkRequests += 1;
+      if (state.optionalChunkFailures === 0) {
+        state.optionalChunkFailures += 1;
+        return route.abort('failed');
+      }
+      return route.continue();
+    });
+  }
   return { context, page, state };
 };
 
@@ -241,8 +268,33 @@ const waitForComposer = page => page.getByRole('textbox', { name: 'Type your mes
 
 try {
   const manifest = JSON.parse(await readFile(path.join(distRoot, 'manifest.json'), 'utf8'));
-  assert.equal(manifest.start_url, '/chatpage/');
-  assert.equal(manifest.scope, '/chatpage/');
+  assert.equal(manifest.id, '/pages/ai/');
+  assert.equal(manifest.start_url, '/pages/ai/');
+  assert.equal(manifest.scope, '/pages/ai/');
+
+  {
+    const { context, page } = await createPage('pwa-canonical', 'completion');
+    await page.goto(`${origin}/pages/ai/`);
+    await waitForComposer(page);
+    let pwaState;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      pwaState = await page.evaluate(async () => ({
+        secure: globalThis.isSecureContext,
+        supported: 'serviceWorker' in globalThis.navigator,
+        manifest: globalThis.document.querySelector('link[rel="manifest"]')?.getAttribute('href'),
+        scopes: (await globalThis.navigator.serviceWorker.getRegistrations())
+          .map(registration => registration.scope),
+      }));
+      if (pwaState.scopes.includes(`${origin}/pages/ai/`)) break;
+      await page.waitForTimeout(100);
+    }
+    assert.equal(pwaState.manifest, '/chatpage/manifest.json');
+    assert(
+      pwaState.scopes.includes(`${origin}/pages/ai/`),
+      `canonical service worker scope was not registered: ${JSON.stringify(pwaState)}`,
+    );
+    await context.close();
+  }
 
   {
     const { context, page, state } = await createPage('completion', 'completion');
@@ -360,7 +412,49 @@ try {
   }
 
   {
-    const { context, page, state } = await createPage('chunk-failure', 'completion', { failChatChunk: true });
+    const { context, page, state } = await createPage('lazy-recovery', 'completion', {
+      failPreferencesChunkOnce: true,
+      blockServiceWorkers: true,
+    });
+    await page.addInitScript(() => {
+      const key = 'wf_browser_smoke_document_loads';
+      const count = Number(globalThis.sessionStorage.getItem(key) || '0');
+      globalThis.sessionStorage.setItem(key, String(count + 1));
+    });
+    await page.goto(`${origin}/chatpage/`);
+    await waitForComposer(page);
+    assert.equal(
+      await page.evaluate(() => globalThis.sessionStorage.getItem('wf_browser_smoke_document_loads')),
+      '1',
+      'optional chunk scenario must start from one document load',
+    );
+
+    await page.getByRole('button', { name: 'Chat actions' }).click();
+    await page.getByRole('menuitem', { name: 'Chat settings' }).click();
+    await page.waitForFunction(() => (
+      globalThis.sessionStorage.getItem('wf_browser_smoke_document_loads') === '2'
+    ));
+    await waitForComposer(page);
+    assert.equal(state.optionalChunkFailures, 1, 'optional chunk must fail exactly once');
+
+    await page.getByRole('button', { name: 'Chat actions' }).click();
+    await page.getByRole('menuitem', { name: 'Chat settings' }).click();
+    await page.getByRole('heading', { name: 'Chat settings' }).waitFor();
+    await page.waitForTimeout(250);
+    assert.equal(state.optionalChunkRequests, 2, 'recovered dialog must fetch the optional chunk once more');
+    assert.equal(
+      await page.evaluate(() => globalThis.sessionStorage.getItem('wf_browser_smoke_document_loads')),
+      '2',
+      'optional chunk recovery must reload the document exactly once',
+    );
+    await context.close();
+  }
+
+  {
+    const { context, page, state } = await createPage('chunk-failure', 'completion', {
+      failChatChunk: true,
+      blockServiceWorkers: true,
+    });
     await page.goto(`${origin}/chatpage/`);
     await page.getByText('Oops! Something went wrong').waitFor();
     await page.waitForTimeout(250);
@@ -368,7 +462,7 @@ try {
     await context.close();
   }
 
-  process.stdout.write('browser smoke: completion, cold mobile, abort, Turnstile, chunk failure, manifest, and axe checks passed\n');
+  process.stdout.write('browser smoke: PWA, completion, cold mobile, abort, Turnstile, lazy recovery, chunk failure, manifest, and axe checks passed\n');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

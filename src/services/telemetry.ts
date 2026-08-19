@@ -1,20 +1,18 @@
-import { ENV } from '../config/env';
+import { ChatAPI } from './api';
+import type { ClientTelemetryEvent } from './apiContracts';
 
-type ClientEvent =
-  | 'app_error'
-  | 'unhandled_rejection'
-  | 'largest_contentful_paint'
-  | 'layout_shift'
-  | 'navigation';
-
-interface ClientEventDetails {
+export interface ClientEventDetails {
+  /** Ephemeral turn/event correlation only; never pass a user or conversation id. */
+  eventId?: string;
   errorCode?: string;
   durationMs?: number;
   value?: number;
+  /** Low-cardinality result enum such as success, stopped, or markdown_download. */
+  outcome?: string;
 }
 
 const BUILD_ID = typeof __WF_BUILD_ID__ === 'string' ? __WF_BUILD_ID__ : 'development';
-const SURFACE = typeof __WF_SURFACE__ === 'string' ? __WF_SURFACE__ : 'chatpage';
+const SURFACE = 'chatpage' as const;
 
 const normalizedCode = (value: string | undefined): string | undefined => {
   if (!value) return undefined;
@@ -22,27 +20,90 @@ const normalizedCode = (value: string | undefined): string | undefined => {
   return code || undefined;
 };
 
-export const reportClientEvent = (event: ClientEvent, details: ClientEventDetails = {}): void => {
+const normalizedEventId = (value: string | undefined): string | undefined => {
+  if (!value) return undefined;
+  const id = value.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 96);
+  return id || undefined;
+};
+
+const normalizedOutcome = (value: string | undefined): string | undefined => {
+  if (!value) return undefined;
+  const outcome = value.toLowerCase().replace(/[^a-z0-9_.-]/g, '_').slice(0, 64);
+  return outcome || undefined;
+};
+
+const boundedDuration = (value: number | undefined): number | undefined => (
+  value === undefined || !Number.isFinite(value)
+    ? undefined
+    : Math.min(600_000, Math.max(0, Math.round(value)))
+);
+
+const boundedValue = (value: number | undefined): number | undefined => (
+  value === undefined || !Number.isFinite(value)
+    ? undefined
+    : Number(Math.min(1_000, Math.max(0, value)).toFixed(4))
+);
+
+export const reportClientEvent = (
+  event: ClientTelemetryEvent,
+  details: ClientEventDetails = {},
+): void => {
   if (import.meta.env.MODE === 'test') return;
 
   const payload = {
-    action: 'clientTelemetry',
     event,
     release: BUILD_ID,
     surface: SURFACE,
+    event_id: normalizedEventId(details.eventId),
     error_code: normalizedCode(details.errorCode),
-    duration_ms: details.durationMs === undefined ? undefined : Math.round(details.durationMs),
-    value: details.value === undefined ? undefined : Number(details.value.toFixed(4)),
+    duration_ms: boundedDuration(details.durationMs),
+    value: boundedValue(details.value),
+    outcome: normalizedOutcome(details.outcome),
   };
 
-  void fetch(`${ENV.getApiBase()}${ENV.ENDPOINTS.CHAT}`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    keepalive: true,
-  }).catch(() => undefined);
+  void ChatAPI.submitClientTelemetry(payload).catch(() => undefined);
 };
+
+export type ChatLifecycleEvent =
+  | 'chat_send_started'
+  | 'chat_first_token'
+  | 'chat_completed'
+  | 'chat_stopped'
+  | 'chat_failed';
+
+export const reportChatLifecycle = (
+  event: ChatLifecycleEvent,
+  details: ClientEventDetails = {},
+): void => reportClientEvent(event, details);
+
+export type SourceKind = 'url' | 'file' | 'container_file' | 'generated_file';
+
+export const reportSourceOpened = (
+  sourceKind: SourceKind,
+  sourceIndex?: number,
+  eventId?: string,
+): void => reportClientEvent('source_opened', {
+  eventId,
+  outcome: sourceKind,
+  value: sourceIndex,
+});
+
+export type ExportDelivery =
+  | 'download'
+  | 'web-share-file'
+  | 'web-share-text'
+  | 'cancelled';
+
+export const reportConversationExport = (
+  format: 'markdown' | 'json',
+  delivery: ExportDelivery,
+  messageCount: number,
+  eventId?: string,
+): void => reportClientEvent('conversation_exported', {
+  eventId,
+  outcome: `${format}_${delivery}`,
+  value: messageCount,
+});
 
 export const installClientTelemetry = (): (() => void) => {
   if (import.meta.env.MODE === 'test') return () => undefined;

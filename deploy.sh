@@ -20,6 +20,9 @@
 #   - Any failure after activation begins restores the previous assets AND the
 #     snapshotted templates, re-runs designer import, re-purges Cloudflare and
 #     re-verifies the restored state before exiting nonzero.
+#   - The transaction boundary is frontend release assets plus XenForo chat
+#     templates. Live backend PHP, additive database schema, systemd units,
+#     and already-installed browser service-worker state are not rolled back.
 #   - Ambiguous SSH failures (rc=255) are reconciled by re-probing the peer
 #     (peer_probe_state -> switched / not-switched / unreachable).
 #   - Fresh links created by a failed activation are unlinked, never left dangling.
@@ -38,7 +41,7 @@
 #     "legacy_local": "...", "legacy_remote": "...",
 #     "template_snapshot": "<dir under $DEPLOY_RECOVERY_ROOT>",
 #     "release_metadata": "<private RELEASE-METADATA.json path>",
-#     "backend_hashes": {"chat.php":"...", ...},
+#     "backend_hashes": {"chat.php":"...", "chat-product-contract.php":"...", ...},
 #     "migrated_local": bool, "migrated_remote": bool,
 #     "fresh_local": bool, "fresh_remote": bool,
 #     "local_switched": bool, "remote_switched": bool,
@@ -93,6 +96,23 @@ readonly DEPLOY_SSH_CONNECT_TIMEOUT="${DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
 readonly DEPLOY_PROBE_ATTEMPTS="${DEPLOY_PROBE_ATTEMPTS:-3}"
 readonly INVENTORY_NAME="RELEASE-INVENTORY.sha256"
 readonly RELEASE_METADATA_NAME="RELEASE-METADATA.json"
+readonly -a CURRENT_RELEASE_STABLE_ARTIFACTS=(
+  index.html
+  manifest.json
+  offline.html
+  legacy-service-worker.js
+  service-worker.js
+  bot-avatar.webp
+  pwa-icon-192.png
+  pwa-icon-512.png
+  static/js/main.js
+  static/css/main.css
+)
+readonly -a ROLLBACK_COMPAT_ARTIFACTS=(
+  static/js/main.js
+  static/css/main.css
+  bot-avatar.webp
+)
 
 readonly -a XF_STYLES=(wf3 wf3_domperf)
 readonly -a XF_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
@@ -101,10 +121,20 @@ readonly WF5_STYLE_ID="${WF5_STYLE_ID:-51}"
 readonly -a WF5_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html)
 readonly LEGACY_CHAT_STYLE_ID="${LEGACY_CHAT_STYLE_ID:-17}"
 readonly BACKEND_TEST_FILE="${BACKEND_TEST_FILE:-$(dirname "$XENFORO_ROOT")/tests/test_chat_predicates.php}"
-readonly -a BACKEND_PHP_FILES=(
+readonly BACKEND_PRODUCT_TEST_FILE="${BACKEND_PRODUCT_TEST_FILE:-$(dirname "$XENFORO_ROOT")/tests/test_chat_product_contract.php}"
+readonly BACKEND_PRODUCT_CONTRACT_FILE="${BACKEND_PRODUCT_CONTRACT_FILE:-$APP_ROOT/scripts/chat-product-contract.php}"
+readonly BACKEND_PRODUCT_MIGRATION_FILE="${BACKEND_PRODUCT_MIGRATION_FILE:-$APP_ROOT/scripts/migrate-chat-product-foundation.php}"
+readonly BACKEND_PRODUCT_PRUNER_FILE="${BACKEND_PRODUCT_PRUNER_FILE:-$APP_ROOT/scripts/prune-chat-product-data.php}"
+readonly -a BACKEND_REQUIRED_PHP_FILES=(
   "$XENFORO_ROOT/chat.php"
-  "$XENFORO_ROOT/tts.php"
   "$XENFORO_ROOT/wf_chat_predicates.php"
+  "$BACKEND_PRODUCT_CONTRACT_FILE"
+  "$BACKEND_PRODUCT_MIGRATION_FILE"
+  "$BACKEND_PRODUCT_PRUNER_FILE"
+)
+readonly -a BACKEND_PHP_FILES=(
+  "${BACKEND_REQUIRED_PHP_FILES[@]}"
+  "$XENFORO_ROOT/tts.php"
 )
 
 ACTION=""
@@ -134,6 +164,9 @@ WORKTREE_DIRTY=0
 BACKEND_CHAT_HASH=""
 BACKEND_TTS_HASH=""
 BACKEND_PREDICATES_HASH=""
+BACKEND_PRODUCT_CONTRACT_HASH=""
+BACKEND_PRODUCT_MIGRATION_HASH=""
+BACKEND_PRODUCT_PRUNER_HASH=""
 
 log() {
   printf '%s\n' "$*"
@@ -197,14 +230,20 @@ template_bundle_for_release() {
 }
 
 backend_hashes_json() {
-  printf '{"chat.php":%s,"tts.php":%s,"wf_chat_predicates.php":%s}' \
+  printf '{"chat.php":%s,"tts.php":%s,"wf_chat_predicates.php":%s,"chat-product-contract.php":%s,"migrate-chat-product-foundation.php":%s,"prune-chat-product-data.php":%s}' \
     "$(json_str "$BACKEND_CHAT_HASH")" \
     "$(json_str "$BACKEND_TTS_HASH")" \
-    "$(json_str "$BACKEND_PREDICATES_HASH")"
+    "$(json_str "$BACKEND_PREDICATES_HASH")" \
+    "$(json_str "$BACKEND_PRODUCT_CONTRACT_HASH")" \
+    "$(json_str "$BACKEND_PRODUCT_MIGRATION_HASH")" \
+    "$(json_str "$BACKEND_PRODUCT_PRUNER_HASH")"
 }
 
 capture_backend_hashes() {
   local file hash
+  for file in "${BACKEND_REQUIRED_PHP_FILES[@]}"; do
+    [[ -f "$file" ]] || { fail "Required chat backend PHP file is missing: $file"; return 1; }
+  done
   for file in "${BACKEND_PHP_FILES[@]}"; do
     hash=""
     if [[ -f "$file" ]]; then
@@ -214,6 +253,9 @@ capture_backend_hashes() {
       chat.php) BACKEND_CHAT_HASH="$hash" ;;
       tts.php) BACKEND_TTS_HASH="$hash" ;;
       wf_chat_predicates.php) BACKEND_PREDICATES_HASH="$hash" ;;
+      chat-product-contract.php) BACKEND_PRODUCT_CONTRACT_HASH="$hash" ;;
+      migrate-chat-product-foundation.php) BACKEND_PRODUCT_MIGRATION_HASH="$hash" ;;
+      prune-chat-product-data.php) BACKEND_PRODUCT_PRUNER_HASH="$hash" ;;
     esac
   done
 }
@@ -684,25 +726,29 @@ verify_peer_template_sources() {
 run_backend_checks() {
   local file linted=0
 
+  for file in "${BACKEND_REQUIRED_PHP_FILES[@]}"; do
+    [[ -f "$file" ]] || die "Required chat backend PHP file is missing: $file"
+  done
+  [[ -f "$BACKEND_TEST_FILE" ]] \
+    || die "Required backend predicate test is missing: $BACKEND_TEST_FILE"
+  [[ -f "$BACKEND_PRODUCT_TEST_FILE" ]] \
+    || die "Required backend product contract test is missing: $BACKEND_PRODUCT_TEST_FILE"
+
   for file in "${BACKEND_PHP_FILES[@]}"; do
     [[ -f "$file" ]] || continue
     php -l "$file" >/dev/null \
       || die "PHP lint failed for $file"
     linted=$((linted + 1))
   done
-  if ((linted > 0)); then
-    log "PHP lint passed for $linted chat backend files."
-  else
-    log "No chat backend PHP files were present; skipping PHP lint."
-  fi
+  log "PHP lint passed for $linted chat backend files."
 
-  if [[ -f "$BACKEND_TEST_FILE" ]]; then
-    php "$BACKEND_TEST_FILE" \
-      || die "Backend predicate tests failed: $BACKEND_TEST_FILE"
-    log "Backend predicate tests passed: $BACKEND_TEST_FILE"
-  else
-    log "Backend predicate test is unavailable; skipping $BACKEND_TEST_FILE."
-  fi
+  php "$BACKEND_TEST_FILE" \
+    || die "Backend predicate tests failed: $BACKEND_TEST_FILE"
+  log "Backend predicate tests passed: $BACKEND_TEST_FILE"
+
+  php "$BACKEND_PRODUCT_TEST_FILE" \
+    || die "Backend product contract tests failed: $BACKEND_PRODUCT_TEST_FILE"
+  log "Backend product contract tests passed: $BACKEND_PRODUCT_TEST_FILE"
 }
 
 run_release_checks() {
@@ -869,7 +915,7 @@ assert_header() {
   fi
 
   printf '%s\n' "$headers" | tr -d '\r' | grep -Eiq "$expected" \
-    || { fail "$url is missing the expected Cache-Control policy: $expected"; return 1; }
+    || { fail "$url is missing the expected response header: $expected"; return 1; }
 }
 
 assert_origin_hash() {
@@ -963,17 +1009,50 @@ assert_chat_page_markup() {
 }
 
 verify_live_release() {
-  local release="$1" require_chat_contract="${2:-1}" hashed_file hashed_relative
+  local release="$1" require_chat_contract="${2:-1}" relative file basename
+  local no_cache='cache-control:.*no-cache.*must-revalidate'
+  local immutable='cache-control:.*max-age=31536000.*immutable'
+  local -a stable_artifacts=()
+  local -a hashed_files=()
+  local -a hashed_artifacts=()
 
-  assert_origin_hash 'static/js/main.js' "$release/static/js/main.js" "$ORIGIN_IP" || return 1
-  assert_origin_hash 'static/css/main.css' "$release/static/css/main.css" "$ORIGIN_IP" || return 1
-  assert_origin_hash 'bot-avatar.webp' "$release/bot-avatar.webp" "$ORIGIN_IP" || return 1
-  assert_origin_hash 'static/js/main.js' "$release/static/js/main.js" "$PEER_ORIGIN_IP" || return 1
-  assert_origin_hash 'static/css/main.css' "$release/static/css/main.css" "$PEER_ORIGIN_IP" || return 1
-  assert_origin_hash 'bot-avatar.webp' "$release/bot-avatar.webp" "$PEER_ORIGIN_IP" || return 1
-  assert_public_hash 'static/js/main.js' "$release/static/js/main.js" || return 1
-  assert_public_hash 'static/css/main.css' "$release/static/css/main.css" || return 1
-  assert_public_hash 'bot-avatar.webp' "$release/bot-avatar.webp" || return 1
+  if [[ "$require_chat_contract" == 1 ]]; then
+    stable_artifacts=("${CURRENT_RELEASE_STABLE_ARTIFACTS[@]}")
+    mapfile -d '' -t hashed_files < <(
+      {
+        find "$release/static/js" -maxdepth 1 -type f -name '*.js' ! -name main.js -print0
+        find "$release/static/css" -maxdepth 1 -type f -name '*.css' ! -name main.css -print0
+        if [[ -d "$release/static/media" ]]; then
+          find "$release/static/media" -type f -print0
+        fi
+      } | sort -z
+    )
+    for file in "${hashed_files[@]}"; do
+      basename="$(basename -- "$file")"
+      if [[ ! "$basename" =~ -[A-Za-z0-9_-]{8,}\.(chunk\.js|css|avif|gif|ico|jpe?g|png|svg|webp|woff2?)$ ]]; then
+        fail "Current release contains a non-content-hashed static artifact: ${file#"$release/"}"
+        return 1
+      fi
+      hashed_artifacts+=("${file#"$release/"}")
+    done
+    ((${#hashed_artifacts[@]} > 0)) \
+      || { fail "Current release contains no content-hashed static artifacts"; return 1; }
+  else
+    # Pre-PWA rollback releases legitimately lack the manifest, workers,
+    # offline shell, icons, and possibly content-hashed chunks. Keep the
+    # rollback verifier compatible with those releases while the forward
+    # deploy path remains strict.
+    stable_artifacts=("${ROLLBACK_COMPAT_ARTIFACTS[@]}")
+  fi
+
+  for relative in "${stable_artifacts[@]}" "${hashed_artifacts[@]}"; do
+    file="$release/$relative"
+    [[ -f "$file" ]] \
+      || { fail "Release is missing required live artifact: $relative"; return 1; }
+    assert_origin_hash "$relative" "$file" "$ORIGIN_IP" || return 1
+    assert_origin_hash "$relative" "$file" "$PEER_ORIGIN_IP" || return 1
+    assert_public_hash "$relative" "$file" || return 1
+  done
 
   if [[ "$require_chat_contract" == 1 ]]; then
     assert_chat_page_markup origin || return 1
@@ -981,32 +1060,33 @@ verify_live_release() {
     assert_chat_page_markup public || return 1
   fi
 
-  assert_header "$LIVE_ORIGIN/chatpage/static/js/main.js?v=2" \
-    'cache-control:.*no-cache.*must-revalidate' public || return 1
-  assert_header "$LIVE_ORIGIN/chatpage/static/css/main.css?v=2" \
-    'cache-control:.*no-cache.*must-revalidate' origin || return 1
-  assert_header "$LIVE_ORIGIN/chatpage/static/js/main.js?v=2" \
-    'cache-control:.*no-cache.*must-revalidate' peer || return 1
-  assert_header "$LIVE_ORIGIN/chatpage/bot-avatar.webp?v=2" \
-    'cache-control:.*no-cache.*must-revalidate' origin || return 1
-  assert_header "$LIVE_ORIGIN/chatpage/bot-avatar.webp?v=2" \
-    'cache-control:.*no-cache.*must-revalidate' peer || return 1
+  for relative in "${stable_artifacts[@]}"; do
+    assert_header "$LIVE_ORIGIN/chatpage/$relative?v=2" "$no_cache" origin || return 1
+    assert_header "$LIVE_ORIGIN/chatpage/$relative?v=2" "$no_cache" peer || return 1
+    assert_header "$LIVE_ORIGIN/chatpage/$relative?v=2" "$no_cache" public || return 1
+  done
 
-  hashed_file="$(find "$release/static/js" -maxdepth 1 -type f -name '*.chunk.js' -print -quit 2>/dev/null)" || hashed_file=""
-  if [[ -n "$hashed_file" && "$(basename "$hashed_file")" =~ -[A-Za-z0-9_-]{8,}\.chunk\.js$ ]]; then
-    hashed_relative="${hashed_file#"$release/"}"
-    assert_header "$LIVE_ORIGIN/chatpage/$hashed_relative" \
-      'cache-control:.*max-age=31536000.*immutable' origin || return 1
-    assert_header "$LIVE_ORIGIN/chatpage/$hashed_relative" \
-      'cache-control:.*max-age=31536000.*immutable' peer || return 1
+  for relative in "${hashed_artifacts[@]}"; do
+    assert_header "$LIVE_ORIGIN/chatpage/$relative" "$immutable" origin || return 1
+    assert_header "$LIVE_ORIGIN/chatpage/$relative" "$immutable" peer || return 1
+    assert_header "$LIVE_ORIGIN/chatpage/$relative" "$immutable" public || return 1
+  done
+
+  if [[ "$require_chat_contract" == 1 ]]; then
+    assert_header "$LIVE_ORIGIN/chatpage/service-worker.js" \
+      '^service-worker-allowed:[[:space:]]*/pages/ai/[[:space:]]*$' origin || return 1
+    assert_header "$LIVE_ORIGIN/chatpage/service-worker.js" \
+      '^service-worker-allowed:[[:space:]]*/pages/ai/[[:space:]]*$' peer || return 1
+    assert_header "$LIVE_ORIGIN/chatpage/service-worker.js" \
+      '^service-worker-allowed:[[:space:]]*/pages/ai/[[:space:]]*$' public || return 1
   fi
 
   local origins="both origins"
   peer_enabled || origins="the local origin"
   if [[ "$require_chat_contract" == 1 ]]; then
-    log "Verified $origins, public hashes, rendered /pages/ai markup, and cache headers."
+    log "Verified every current PWA/lazy artifact on $origins and the public edge, rendered /pages/ai markup, and cache/scope headers."
   else
-    log "Verified $origins, public hashes, and cache headers for the restored release."
+    log "Verified rollback-compatible frontend assets on $origins and the public edge."
   fi
 }
 
@@ -1799,6 +1879,8 @@ activate_release() {
 
 rollback_release() {
   local rollback_target current remote_current remote_rollback_target out
+
+  warn "Rollback scope is frontend release assets and bundled chat templates only; backend PHP, database schema, systemd units, and installed browser PWA state remain unchanged."
 
   [[ -L "$PUBLIC_LINK" ]] || die "$PUBLIC_LINK is not a managed release symlink"
   [[ -L "$RELEASE_ROOT/previous" ]] || die "No previous release is recorded"

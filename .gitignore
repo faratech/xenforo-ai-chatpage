@@ -28,3 +28,5 @@ yarn-error.log*
 
 # Playwright screenshots taken during debugging
 *.png
+!public/pwa-icon-192.png
+!public/pwa-icon-512.png

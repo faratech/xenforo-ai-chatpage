@@ -100,6 +100,8 @@ setup_sandbox() {
   printf '<?php // sandbox predicates\n' >"$XENFORO_ROOT/wf_chat_predicates.php"
   printf '<?php echo "sandbox predicate tests passed\\n";\n' \
     >"$SANDBOX_LOCAL/tests/test_chat_predicates.php"
+  printf '<?php echo "sandbox chat product tests passed\\n";\n' \
+    >"$SANDBOX_LOCAL/tests/test_chat_product_contract.php"
 
   make_fake_styles "$XENFORO_STYLES_ROOT" "v1"
   make_fake_styles "$PEER_STYLES_ROOT" "v1"
@@ -114,6 +116,9 @@ make_app_repo() {
   cp "$RT_APP_SRC/scripts/verify-dist.mjs" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/verify-xenforo-templates.mjs" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/verify-xenforo-compiled-templates.mjs" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/chat-product-contract.php" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/migrate-chat-product-foundation.php" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/prune-chat-product-data.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/snapshot-xenforo-template-db.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/sync-xenforo-db-style.php" "$SB/app/scripts/"
   chmod 755 "$SB/app/deploy.sh"
@@ -239,19 +244,28 @@ TEMPLATE
 make_fake_dist() {
   local dir="$1" tag="$2"
   rm -rf -- "$dir"
-  mkdir -p "$dir/static/js" "$dir/static/css"
+  mkdir -p "$dir/static/js" "$dir/static/css" "$dir/static/media"
 
   cp -f -- "$RT_APP_SRC/public/.htaccess" "$dir/.htaccess"
+  cp -f -- "$RT_APP_SRC/public/legacy-service-worker.js" "$dir/legacy-service-worker.js"
+  cp -f -- "$RT_APP_SRC/public/offline.html" "$dir/offline.html"
+  cp -f -- "$RT_APP_SRC/public/pwa-icon-192.png" "$dir/pwa-icon-192.png"
+  cp -f -- "$RT_APP_SRC/public/pwa-icon-512.png" "$dir/pwa-icon-512.png"
+  cp -f -- "$RT_APP_SRC/public/service-worker.js" "$dir/service-worker.js"
 
   printf 'FAKEWEBP-%s' "$tag" >"$dir/bot-avatar.webp"
   printf 'User-agent: *\nDisallow:\n' >"$dir/robots.txt"
 
   cat >"$dir/manifest.json" <<'MANIFEST'
 {
+  "id": "/pages/ai/",
   "name": "WindowsForum AI Chat",
-  "start_url": "/chatpage/",
-  "scope": "/chatpage/",
-  "icons": [{ "src": "bot-avatar.webp", "sizes": "192x192", "type": "image/webp" }]
+  "start_url": "/pages/ai/",
+  "scope": "/pages/ai/",
+  "icons": [
+    { "src": "pwa-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "pwa-icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
 }
 MANIFEST
 
@@ -276,6 +290,8 @@ import"./vendor-sandbox1.chunk.js";import("./ChatWindow-sandbox1.chunk.js");docu
 JS
   printf 'export const v = "%s";\n' "$tag" >"$dir/static/js/vendor-sandbox1.chunk.js"
   printf 'export const chatWindow = "%s";\n' "$tag" >"$dir/static/js/ChatWindow-sandbox1.chunk.js"
+  printf '.sandbox-%s{display:block}\n' "$tag" >"$dir/static/css/theme-sandbox1.css"
+  printf 'HASHED-WEBP-%s' "$tag" >"$dir/static/media/logo-sandbox1.webp"
 
   cat >"$dir/static/css/main.css" <<CSS
 @charset "UTF-8";
@@ -559,13 +575,38 @@ if [[ ! -f "$file" ]]; then
 fi
 
 if ((head)); then
-  case "$rel" in
-    *.chunk.js|static/media/*) cc='public, max-age=31536000, immutable' ;;
-    *) cc='no-cache, must-revalidate' ;;
-  esac
-  printf 'HTTP/2 200\r\ncache-control: %s\r\ncontent-type: application/octet-stream\r\n\r\n' "$cc"
+  if [[ "$rel" == pwa-icon-192.png || "$rel" == pwa-icon-512.png ]]; then
+    cc='no-cache, must-revalidate'
+  elif [[ "$rel" =~ -[A-Za-z0-9_-]{8,}\.(chunk\.js|css|avif|gif|ico|jpe?g|png|svg|webp|woff2?)$ ]]; then
+    cc='public, max-age=31536000, immutable'
+  else
+    cc='no-cache, must-revalidate'
+  fi
+  if [[ "$mode" == bad-cache ]]; then
+    if [[ "$cc" == *immutable* ]]; then
+      cc='no-cache, must-revalidate'
+    else
+      cc='public, max-age=31536000, immutable'
+    fi
+    stub_log "INJECTED bad-cache"
+  fi
+  printf 'HTTP/2 200\r\ncache-control: %s\r\ncontent-type: application/octet-stream\r\n' "$cc"
+  if [[ "$rel" == service-worker.js && "$mode" != missing-sw-scope ]]; then
+    printf 'service-worker-allowed: /pages/ai/\r\n'
+  elif [[ "$mode" == missing-sw-scope ]]; then
+    stub_log "INJECTED missing-sw-scope"
+  fi
+  printf '\r\n'
 else
-  if [[ -n "$out" ]]; then cp -f -- "$file" "$out"; else cat -- "$file"; fi
+  if [[ -n "$out" ]]; then
+    cp -f -- "$file" "$out"
+    if [[ "$mode" == corrupt-body ]]; then
+      printf 'CORRUPTED-BY-SANDBOX' >>"$out"
+      stub_log "INJECTED corrupt-body"
+    fi
+  else
+    cat -- "$file"
+  fi
 fi
 exit 0
 CURLSTUB

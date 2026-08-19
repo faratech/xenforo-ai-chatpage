@@ -13,11 +13,21 @@
 </IfModule>
 
 <IfModule mod_headers.c>
-  <FilesMatch "^(?:index\.html|manifest\.json|bot-avatar\.webp|main\.(?:js|css))$">
-    Header always set Cache-Control "no-cache, must-revalidate"
-  </FilesMatch>
+  # The script is served from the immutable release tree under /chatpage, but
+  # it is registered only for the canonical /pages/ai/ client scope. The
+  # separate legacy worker stays under its natural /chatpage/ scope.
+  <Files "service-worker.js">
+    Header always set Service-Worker-Allowed "/pages/ai/"
+  </Files>
 
   <FilesMatch ".*-[A-Za-z0-9_-]{8,}\.(?:chunk\.js|css|avif|gif|ico|jpe?g|png|svg|webp|woff2?)$">
     Header always set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+
+  # Stable release entrypoints and install assets must revalidate. Keep this
+  # rule after the hashed-asset matcher: names such as pwa-icon-192.png also
+  # happen to satisfy that broad filename pattern but are intentionally stable.
+  <FilesMatch "^(?:index\.html|manifest\.json|offline\.html|(?:legacy-)?service-worker\.js|bot-avatar\.webp|pwa-icon-(?:192|512)\.png|main\.(?:js|css))$">
+    Header always set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
 </IfModule>

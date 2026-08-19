@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <title>WindowsForum AI is offline</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { display: grid; min-height: 100vh; margin: 0; place-items: center; background: Canvas; color: CanvasText; }
+      main { box-sizing: border-box; width: min(34rem, calc(100% - 2rem)); padding: 2rem; text-align: center; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 1rem; }
+      img { width: 5rem; height: 5rem; border-radius: 1rem; }
+      button { padding: .65rem 1rem; font: inherit; font-weight: 650; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/chatpage/bot-avatar.webp" alt="">
+      <h1>You’re offline</h1>
+      <p>Reconnect to continue with WindowsForum AI. Private conversations are not stored in the offline cache.</p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

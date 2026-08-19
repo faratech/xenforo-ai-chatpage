@@ -34,6 +34,7 @@ export const InputArea = memo<InputAreaProps>(({
   isSpeechRecognitionSupported,
   isMuted,
   voiceEnabled,
+  isOffline = false,
   inputBytes,
   maxMessageBytes,
   onSend,
@@ -46,7 +47,7 @@ export const InputArea = memo<InputAreaProps>(({
   const theme = useTheme();
   const isOverLimit = inputBytes > maxMessageBytes;
   const isNearLimit = inputBytes >= Math.floor(maxMessageBytes * 0.8);
-  const canSend = !!input.trim() && !isLoading && !isOverLimit;
+  const canSend = !!input.trim() && !isLoading && !isOverLimit && !isOffline;
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -164,7 +165,7 @@ export const InputArea = memo<InputAreaProps>(({
               </IconButton>
             </Tooltip>
           ) : (
-            <Tooltip title="Send message">
+            <Tooltip title={isOffline ? 'Reconnect to send' : 'Send message'}>
               <span>
                 <IconButton
                   onClick={onSend}
@@ -192,7 +193,9 @@ export const InputArea = memo<InputAreaProps>(({
           sx={{ justifyContent: 'space-between', mt: 1, px: 0.5, gap: 1, flexWrap: 'wrap' }}
         >
           <Typography id="wf-composer-help" variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
-            {isListening ? 'Listening… speak now' : 'Press Enter to send · Shift+Enter for new line'}
+            {isOffline
+              ? 'Offline · your draft is saved on this device'
+              : isListening ? 'Listening… speak now' : 'Press Enter to send · Shift+Enter for new line'}
           </Typography>
           <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
             {ASSISTANT_NAME} can make mistakes

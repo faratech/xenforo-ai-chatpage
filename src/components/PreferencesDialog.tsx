@@ -1,0 +1,172 @@
+import { useEffect, useState } from 'react';
+import Alert from '@mui/material/Alert';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
+import Divider from '@mui/material/Divider';
+import MenuItem from '@mui/material/MenuItem';
+import Stack from '@mui/material/Stack';
+import TextField from '@mui/material/TextField';
+import Typography from '@mui/material/Typography';
+import InstallDesktopOutlinedIcon from '@mui/icons-material/InstallDesktopOutlined';
+import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
+import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
+import {
+  AudioService,
+  TTS_VOICES,
+  saveStoredTTSPreferences,
+  type TTSPreferences,
+  type TTSVoice,
+} from '../services/speech';
+import { pwaInstallPrompt, type InstallPromptOutcome } from '../services/pwa';
+
+export interface PreferencesDialogProps {
+  open: boolean;
+  onClose: () => void;
+  voiceEnabled: boolean;
+}
+
+const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5] as const;
+const voiceLabel = (voice: string): string => voice.charAt(0).toUpperCase() + voice.slice(1);
+
+const installOutcomeText = (outcome: InstallPromptOutcome): string => {
+  if (outcome === 'accepted') return 'WindowsForum AI was added to this device.';
+  if (outcome === 'dismissed') return 'Installation was cancelled.';
+  return 'Installation is not currently offered by this browser.';
+};
+
+/** Device-level chat preferences; no prompt or conversation content is stored. */
+export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDialogProps) => {
+  const [preferences, setPreferences] = useState<TTSPreferences>(() => AudioService.getPreferences());
+  const [installAvailable, setInstallAvailable] = useState(pwaInstallPrompt.available);
+  const [installing, setInstalling] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    pwaInstallPrompt.start();
+    return pwaInstallPrompt.subscribe(setInstallAvailable);
+  }, []);
+
+  const updatePreferences = (patch: Partial<TTSPreferences>) => {
+    const next = saveStoredTTSPreferences({ ...preferences, ...patch });
+    AudioService.configure(next);
+    setPreferences(next);
+    setNotice('Voice preferences saved on this device.');
+  };
+
+  const installApp = async () => {
+    if (installing) return;
+    setInstalling(true);
+    setNotice(null);
+    try {
+      setNotice(installOutcomeText(await pwaInstallPrompt.prompt()));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const closeDialog = () => {
+    if (installing) return;
+    setNotice(null);
+    onClose();
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={closeDialog}
+      fullWidth
+      maxWidth="xs"
+      aria-labelledby="wf-chat-settings-title"
+      container={() => document.getElementById('wf-chat-window')}
+    >
+      <DialogTitle id="wf-chat-settings-title">
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+          <SettingsOutlinedIcon color="primary" />
+          <Typography component="span" variant="h6">Chat settings</Typography>
+        </Stack>
+      </DialogTitle>
+      <DialogContent dividers>
+        <Stack spacing={2.25}>
+          {notice && <Alert severity="info" role="status">{notice}</Alert>}
+
+          <Box component="section" aria-labelledby="wf-install-heading">
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.75 }}>
+              <InstallDesktopOutlinedIcon color="primary" />
+              <Typography id="wf-install-heading" component="h3" variant="subtitle1" sx={{ fontWeight: 700 }}>
+                Install app
+              </Typography>
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.25 }}>
+              Open WindowsForum AI in its own window and keep a launcher on this device.
+            </Typography>
+            <Button
+              variant="outlined"
+              startIcon={<InstallDesktopOutlinedIcon />}
+              disabled={!installAvailable || installing}
+              onClick={() => { void installApp(); }}
+            >
+              {installing ? 'Opening installer…' : 'Install WindowsForum AI'}
+            </Button>
+            {!installAvailable && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+                If your browser supports installation, use its app or “Add to home screen” menu.
+              </Typography>
+            )}
+          </Box>
+
+          {voiceEnabled && (
+            <>
+              <Divider />
+              <Box component="section" aria-labelledby="wf-voice-heading">
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1.25 }}>
+                  <RecordVoiceOverOutlinedIcon color="primary" />
+                  <Box>
+                    <Typography id="wf-voice-heading" component="h3" variant="subtitle1" sx={{ fontWeight: 700 }}>
+                      Read aloud
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Used when you play an assistant answer.
+                    </Typography>
+                  </Box>
+                </Stack>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+                  <TextField
+                    select
+                    fullWidth
+                    size="small"
+                    label="Voice"
+                    value={preferences.voice}
+                    onChange={event => updatePreferences({ voice: event.target.value as TTSVoice })}
+                  >
+                    {TTS_VOICES.map(voice => (
+                      <MenuItem key={voice} value={voice}>{voiceLabel(voice)}</MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    select
+                    fullWidth
+                    size="small"
+                    label="Speed"
+                    value={preferences.speed}
+                    onChange={event => updatePreferences({ speed: Number(event.target.value) })}
+                  >
+                    {SPEED_OPTIONS.map(speed => (
+                      <MenuItem key={speed} value={speed}>{speed}×</MenuItem>
+                    ))}
+                  </TextField>
+                </Stack>
+              </Box>
+            </>
+          )}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={closeDialog} disabled={installing}>Done</Button>
+      </DialogActions>
+    </Dialog>
+  );
+};

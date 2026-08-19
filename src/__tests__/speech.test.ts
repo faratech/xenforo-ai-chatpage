@@ -2,13 +2,65 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatAPI } from '../services/api';
 import {
   AudioService,
+  DEFAULT_TTS_PREFERENCES,
   MAX_TTS_CHUNKS,
   MAX_TTS_CHUNK_BYTES,
+  configureSpeechRecognition,
+  loadStoredTTSPreferences,
   markdownToSpeechText,
+  normalizeDictationLanguage,
+  normalizeTTSPreferences,
+  resolveDictationLanguage,
+  saveStoredTTSPreferences,
   splitSpeechChunks,
 } from '../services/speech';
 
 const utf8Length = (value: string): number => new TextEncoder().encode(value).length;
+
+describe('speech preferences', () => {
+  it('validates TTS voice and clamps synthesis speed', () => {
+    expect(normalizeTTSPreferences({ voice: 'marin', speed: 1.25 })).toEqual({
+      voice: 'marin',
+      speed: 1.25,
+    });
+    expect(normalizeTTSPreferences({
+      voice: 'unknown' as 'alloy',
+      speed: 20,
+    })).toEqual({ voice: 'alloy', speed: 4 });
+  });
+
+  it('round-trips validated device voice preferences and tolerates broken storage', () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    };
+
+    expect(saveStoredTTSPreferences({ voice: 'cedar', speed: 1.25 }, storage))
+      .toEqual({ voice: 'cedar', speed: 1.25 });
+    expect(loadStoredTTSPreferences(storage)).toEqual({ voice: 'cedar', speed: 1.25 });
+    expect(loadStoredTTSPreferences({ getItem: () => '{broken' }))
+      .toEqual(DEFAULT_TTS_PREFERENCES);
+  });
+
+  it('canonicalizes dictation language and applies shared recognizer defaults', () => {
+    expect(normalizeDictationLanguage('fr-ca')).toBe('fr-CA');
+    expect(normalizeDictationLanguage('not a locale')).toBe('en-US');
+    expect(resolveDictationLanguage(undefined, ['de-de'])).toBe('de-DE');
+
+    const recognition = {
+      continuous: false,
+      interimResults: false,
+      lang: '',
+    } as SpeechRecognition;
+    expect(configureSpeechRecognition(recognition, 'es-mx')).toBe(recognition);
+    expect(recognition).toMatchObject({
+      continuous: true,
+      interimResults: true,
+      lang: 'es-MX',
+    });
+  });
+});
 
 describe('markdownToSpeechText', () => {
   it('strips markdown structure down to speakable text', () => {
@@ -143,6 +195,7 @@ describe('AudioService queue lifecycle', () => {
     events = [];
     installAudioMocks();
     AudioService.setMuted(false);
+    AudioService.configure(DEFAULT_TTS_PREFERENCES);
   });
 
   afterEach(() => {
@@ -173,6 +226,22 @@ describe('AudioService queue lifecycle', () => {
     await playback;
 
     expect(events).toEqual(['request:1', 'play:1', 'request:2', 'play:2']);
+  });
+
+  it('passes the configured voice and speed to every synthesis request', async () => {
+    const requestTTS = vi.spyOn(ChatAPI, 'requestTTS')
+      .mockResolvedValue(new Blob(['audio'], { type: 'audio/ogg' }));
+    AudioService.configure({ voice: 'cedar', speed: 1.35 });
+
+    const playback = AudioService.playTTS('Speak this sentence.');
+    await vi.waitFor(() => expect(hooks.instances.length).toBe(1));
+    expect(requestTTS).toHaveBeenCalledWith('Speak this sentence.', expect.objectContaining({
+      voice: 'cedar',
+      speed: 1.35,
+      signal: expect.any(AbortSignal),
+    }));
+    hooks.instances[0].finish();
+    await playback;
   });
 
   it('requests at most three chunks for very long answers', async () => {

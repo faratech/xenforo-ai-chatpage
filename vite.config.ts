@@ -150,6 +150,12 @@ export default defineConfig(({ command, mode }) => {
             return 'static/media/[name]-[hash][extname]';
           },
           manualChunks(id) {
+            // Bootstrap and the lazy preferences dialog share the install
+            // prompt singleton. Keep it content-hashed so no lazy chunk ever
+            // imports the stable main.js release entry.
+            if (id.endsWith('/src/services/pwa.ts')) {
+              return 'pwa';
+            }
             if (id === '\0vite/preload-helper.js') {
               return 'preload-runtime';
             }

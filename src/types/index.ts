@@ -8,6 +8,20 @@ export interface Message {
   timestamp: number;
   status?: 'complete' | 'sending' | 'stopped' | 'interrupted' | 'failed';
   annotations?: Annotation[];
+  /** Upstream response and client turn identifiers retained for support diagnostics. */
+  responseId?: string;
+  turnId?: string;
+  /** Final tool/reasoning trail for this message (server contract caps this at 20). */
+  activities?: StreamActivity[];
+  /** Local metadata for files attached to the turn. */
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
 }
 
 /**
@@ -52,6 +66,15 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  /** Unsent composer text, scoped to this conversation and browser identity. */
+  draft?: string;
+  /** Merge clock for drafts; does not reorder the conversation history. */
+  draftUpdatedAt?: number;
+  /** Optimistic-lock metadata for authenticated cloud history. */
+  cloudRevision?: number;
+  cloudUpdatedAt?: number;
+  /** Local content clock represented by cloudRevision. Draft edits do not affect it. */
+  cloudSyncedLocalUpdatedAt?: number;
   /**
    * Set when a turn was stopped or interrupted, so the server-side
    * conversation state may be missing the tail of the local transcript.
@@ -71,7 +94,17 @@ export interface ChatStoreV3 {
   conversations: ConversationMap;
   /** conversationId → deletion timestamp (ms). Wins over any older conversation copy. */
   tombstones: Record<string, number>;
-  /** conversationId → first-attempt timestamp (ms) for server deletions not yet confirmed. */
+  /** conversationId → latest queued timestamp (ms) for server deletions not yet confirmed. */
+  pendingServerDeletions: Record<string, number>;
+}
+
+/** Current local persistence envelope. V4 adds per-conversation drafts. */
+export interface ChatStoreV4 {
+  version: 4;
+  conversations: ConversationMap;
+  /** conversationId → deletion timestamp (ms). Wins over any older conversation copy. */
+  tombstones: Record<string, number>;
+  /** conversationId → latest queued timestamp (ms) for server deletions not yet confirmed. */
   pendingServerDeletions: Record<string, number>;
 }
 
@@ -161,6 +194,8 @@ export interface UserData {
   name?: string;
   user_id?: string | number;
   identity_id?: string;
+  /** Ephemeral XenForo CSRF token returned with identity bootstrap; never persist. */
+  csrf_token?: string;
 }
 
 export interface UsageData {
@@ -187,6 +222,12 @@ export interface MessageProps {
   isLastUserMessage?: boolean;
   isStreaming: boolean;
   isBusy?: boolean;
+  isSpeaking?: boolean;
+  onSpeak?: (messageId: string, content: string) => Promise<void> | void;
+  onStopSpeaking?: () => void;
+  feedback?: 'up' | 'down';
+  feedbackPending?: boolean;
+  onFeedback?: (messageId: string, rating: 'up' | 'down', reason?: string) => Promise<void> | void;
 }
 
 export interface ConversationSidebarProps {
@@ -197,6 +238,9 @@ export interface ConversationSidebarProps {
   onSelectConversation: (convId: string) => void;
   onDeleteConversation: (convId: string) => void;
   onNewConversation: () => void;
+  onRenameConversation?: (convId: string) => void;
+  desktopCollapsed?: boolean;
+  onToggleDesktopCollapsed?: () => void;
 }
 
 export interface InputAreaProps {
@@ -207,6 +251,7 @@ export interface InputAreaProps {
   isSpeechRecognitionSupported: boolean;
   isMuted: boolean;
   voiceEnabled: boolean;
+  isOffline?: boolean;
   inputBytes: number;
   maxMessageBytes: number;
   onSend: () => void;

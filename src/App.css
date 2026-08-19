@@ -212,6 +212,65 @@
   font-size: 100%;
 }
 
+#react-chat-container .wf-code-block {
+  margin: 0.9em 0;
+  overflow: hidden;
+  border: 1px solid var(--wf-code-border);
+  border-radius: 8px;
+  background: var(--wf-code-bg);
+}
+
+#react-chat-container .wf-code-block .wf-code-toolbar {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px 4px 12px;
+  border-bottom: 1px solid var(--wf-code-border);
+  color: var(--wf-muted);
+  background: var(--wf-alt);
+  font: 600 11px/1.2 var(--wf-font);
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+#react-chat-container .wf-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+#react-chat-container .wf-code-actions button {
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--wf-muted);
+  background: transparent;
+  font: 500 12px/1 var(--wf-font);
+  text-transform: none;
+  cursor: pointer;
+}
+
+#react-chat-container .wf-code-actions button:hover {
+  color: var(--wf-text);
+  background: rgba(15, 108, 189, 0.1);
+}
+
+#react-chat-container .wf-code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+#react-chat-container .wf-code-block.is-wrapped pre,
+#react-chat-container .wf-code-block.is-wrapped code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* Links */
 #react-chat-container .message-content a,
 #react-chat-container .message-file-sources a {
@@ -263,6 +322,29 @@
   box-shadow: var(--wf-shadow-block);
 }
 
+#react-chat-container .message-content img.wf-answer-image { cursor: zoom-in; }
+
+#react-chat-container .wf-image-preview {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(90vw, 1200px);
+  max-height: 78vh;
+  object-fit: contain;
+}
+
+#react-chat-container .wf-sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 /* The "Sources:" footer that sanitizeAndParse appends */
 #react-chat-container .message-content sup { color: var(--wf-primary); font-weight: 700; }
 
@@ -297,6 +379,9 @@
 #react-chat-container input:focus-visible,
 #react-chat-container textarea:focus-visible,
 #react-chat-container .message-actions button:focus-visible,
+#react-chat-container .wf-code-actions button:focus-visible,
+#react-chat-container .wf-answer-image:focus-visible,
+#react-chat-container .wf-sync-status:focus-visible,
 #react-chat-container .delete-btn:focus-visible {
   outline: 3px solid var(--wf-primary);
   outline-offset: 2px;
@@ -335,6 +420,7 @@
 /* ===== Print ===== */
 @media print {
   #react-chat-container .MuiDrawer-root,
+  #react-chat-container .wf-chat-header,
   #react-chat-container .message-actions,
   #react-chat-container .wf-input-area { display: none !important; }
   #react-chat-container .message-content { page-break-inside: avoid; }

@@ -81,4 +81,50 @@ describe('client telemetry lifecycle', () => {
     await Promise.resolve();
     expect(fetch).toHaveBeenCalledTimes(callsBeforeCleanup);
   });
+
+  it('emits only bounded, low-cardinality chat/source/export metadata', async () => {
+    const {
+      reportChatLifecycle,
+      reportConversationExport,
+      reportSourceOpened,
+    } = await import('../services/telemetry');
+
+    reportChatLifecycle('chat_failed', {
+      eventId: 'turn:abc/unsafe',
+      errorCode: 'UPSTREAM TIMEOUT!',
+      durationMs: -50,
+      outcome: 'Retry / offered',
+    });
+    reportSourceOpened('url', 3, 'turn:abc');
+    reportConversationExport('markdown', 'web-share-file', 5_000, 'export:one');
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+
+    const payloads = vi.mocked(fetch).mock.calls.map(([, init]) => (
+      JSON.parse(String(init?.body)) as Record<string, unknown>
+    ));
+    expect(payloads[0]).toMatchObject({
+      action: 'clientTelemetry',
+      event: 'chat_failed',
+      event_id: 'turn:abc_unsafe',
+      error_code: 'upstream_timeout_',
+      duration_ms: 0,
+      outcome: 'retry___offered',
+    });
+    expect(payloads[1]).toMatchObject({
+      event: 'source_opened',
+      outcome: 'url',
+      value: 3,
+    });
+    expect(payloads[2]).toMatchObject({
+      event: 'conversation_exported',
+      outcome: 'markdown_web-share-file',
+      value: 1_000,
+    });
+    for (const payload of payloads) {
+      expect(payload).not.toHaveProperty('message');
+      expect(payload).not.toHaveProperty('url');
+      expect(payload).not.toHaveProperty('title');
+      expect(payload).not.toHaveProperty('conversation_id');
+    }
+  });
 });

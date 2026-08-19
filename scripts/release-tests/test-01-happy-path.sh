@@ -37,6 +37,18 @@ assert_eq "$(json_object_value "$metadata1" backend_hashes chat.php)" \
   "$(sha256sum "$XENFORO_ROOT/chat.php" | awk '{print $1}')" "metadata chat.php hash"
 assert_eq "$(json_object_value "$STATE_FILE" backend_hashes chat.php)" \
   "$(sha256sum "$XENFORO_ROOT/chat.php" | awk '{print $1}')" "state chat.php hash"
+assert_eq "$(json_object_value "$metadata1" backend_hashes chat-product-contract.php)" \
+  "$(sha256sum "$SB/app/scripts/chat-product-contract.php" | awk '{print $1}')" \
+  "metadata chat product contract hash"
+assert_eq "$(json_object_value "$STATE_FILE" backend_hashes chat-product-contract.php)" \
+  "$(sha256sum "$SB/app/scripts/chat-product-contract.php" | awk '{print $1}')" \
+  "state chat product contract hash"
+assert_eq "$(json_object_value "$metadata1" backend_hashes migrate-chat-product-foundation.php)" \
+  "$(sha256sum "$SB/app/scripts/migrate-chat-product-foundation.php" | awk '{print $1}')" \
+  "metadata chat product migration hash"
+assert_eq "$(json_object_value "$metadata1" backend_hashes prune-chat-product-data.php)" \
+  "$(sha256sum "$SB/app/scripts/prune-chat-product-data.php" | awk '{print $1}')" \
+  "metadata chat product pruner hash"
 
 # Designer import ran on both nodes (2 styles x 2 nodes)
 assert_eq "$(stub_calls php 'remote=0 .*import-templates')" 2 "local designer imports"
@@ -47,8 +59,9 @@ assert_eq "$(stub_calls php 'remote=1 .*wf-chat-db-style-sync')" 1 "peer databas
 assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-db-style.php .* 51 bootstrap wf5')" 1 "local scoped WF5 syncs"
 assert_eq "$(stub_calls php 'remote=1 .*wf-chat-wf5-sync')" 1 "peer scoped WF5 syncs"
 assert_eq "$(stub_calls php 'import-templates wf5')" 0 "broad WF5 designer imports"
-assert_eq "$(stub_calls php ' -l ')" 3 "backend PHP lint calls"
+assert_eq "$(stub_calls php ' -l ')" 6 "backend PHP lint calls"
 assert_eq "$(stub_calls php 'test_chat_predicates.php')" 1 "backend predicate test calls"
+assert_eq "$(stub_calls php 'test_chat_product_contract.php')" 1 "backend product contract test calls"
 cmp -s "$b1/wf3/_page_node.313" \
   "$XENFORO_ROOT/db-style-17/_page_node.313" \
   || fail_test "database-managed style 17 does not match canonical wf3 template"
