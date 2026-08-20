@@ -41,7 +41,7 @@ export const canonicalConversationShareUrl = (
   origin: string = window.location.origin,
 ): string => {
   const url = new URL('/pages/ai/', origin);
-  url.searchParams.set('share', token);
+  url.hash = new URLSearchParams({ share: token }).toString();
   return url.href;
 };
 

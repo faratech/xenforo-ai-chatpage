@@ -3,6 +3,7 @@ import manifest from '../../public/manifest.json';
 import serviceWorkerSource from '../../public/service-worker.js?raw';
 import {
   PWAInstallPrompt,
+  PWAUpdatePrompt,
   PWA_CANONICAL_SCOPE,
   PWA_LEGACY_SCOPE,
   PWA_LEGACY_SERVICE_WORKER_URL,
@@ -45,7 +46,8 @@ describe('canonical PWA installation', () => {
   });
 
   it('uses the canonical worker for /pages/ai and the narrow legacy alias for /chatpage', async () => {
-    const register = vi.fn().mockResolvedValue({});
+    const registration = { waiting: null, installing: null, addEventListener: vi.fn() };
+    const register = vi.fn().mockResolvedValue(registration);
     Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
@@ -90,6 +92,52 @@ describe('canonical PWA installation', () => {
     service.stop();
   });
 
+  it('exposes a waiting update only through an explicit activation action', () => {
+    const postMessage = vi.fn();
+    const service = new PWAUpdatePrompt();
+    const availability = vi.fn();
+    service.subscribe(availability);
+    service.watch({
+      waiting: { postMessage } as unknown as ServiceWorker,
+      installing: null,
+      addEventListener: vi.fn(),
+    } as unknown as ServiceWorkerRegistration);
+
+    expect(service.available).toBe(true);
+    expect(service.activate()).toBe(true);
+    expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' });
+    expect(service.available).toBe(false);
+  });
+
+  it('observes an installer that already exists when registration resolves', () => {
+    let stateChange: (() => void) | undefined;
+    const installing = {
+      state: 'installing',
+      postMessage: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: () => void) => {
+        if (type === 'statechange') stateChange = listener;
+      }),
+    };
+    const registration = {
+      waiting: null as typeof installing | null,
+      installing,
+      addEventListener: vi.fn(),
+    };
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { controller: {} },
+    });
+    const service = new PWAUpdatePrompt();
+
+    service.watch(registration as unknown as ServiceWorkerRegistration);
+    expect(service.available).toBe(false);
+
+    registration.waiting = installing;
+    installing.state = 'installed';
+    stateChange?.();
+    expect(service.available).toBe(true);
+  });
+
   it('declares /pages/ai as the installed identity while retaining /chatpage assets', () => {
     expect(manifest).toMatchObject({
       id: '/pages/ai/',
@@ -112,5 +160,6 @@ describe('canonical PWA installation', () => {
     expect(serviceWorkerSource).toContain('PRECACHE_URLS.includes(url.pathname)');
     expect(serviceWorkerSource).toContain('evictable.slice(0, overflow)');
     expect(serviceWorkerSource.match(/await trimCache\(cache\)/g)).toHaveLength(3);
+    expect(serviceWorkerSource).toContain("event.data.type === 'SKIP_WAITING'");
   });
 });

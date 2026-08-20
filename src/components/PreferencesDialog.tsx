@@ -14,6 +14,7 @@ import Typography from '@mui/material/Typography';
 import InstallDesktopOutlinedIcon from '@mui/icons-material/InstallDesktopOutlined';
 import KeyboardOutlinedIcon from '@mui/icons-material/KeyboardOutlined';
 import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
+import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import {
   AudioService,
@@ -23,6 +24,12 @@ import {
   type TTSVoice,
 } from '../services/speech';
 import { pwaInstallPrompt, type InstallPromptOutcome } from '../services/pwa';
+import {
+  completionNotificationsSupported,
+  getCompletionNotificationPreference,
+  requestCompletionNotifications,
+  setCompletionNotificationPreference,
+} from '../services/completionNotifications';
 
 export interface PreferencesDialogProps {
   open: boolean;
@@ -98,6 +105,10 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
   const [preferences, setPreferences] = useState<TTSPreferences>(() => AudioService.getPreferences());
   const [installAvailable, setInstallAvailable] = useState(pwaInstallPrompt.available);
   const [installing, setInstalling] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    () => getCompletionNotificationPreference() === 'enabled'
+  );
+  const [requestingNotifications, setRequestingNotifications] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -123,8 +134,33 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
     }
   };
 
+  const toggleCompletionNotifications = async () => {
+    if (requestingNotifications) return;
+    setRequestingNotifications(true);
+    setNotice(null);
+    try {
+      if (notificationsEnabled) {
+        setCompletionNotificationPreference('disabled');
+        setNotificationsEnabled(false);
+        setNotice('Completion notifications are off on this device.');
+        return;
+      }
+      const permission = await requestCompletionNotifications();
+      if (permission === 'granted') {
+        setNotificationsEnabled(true);
+        setNotice('Completion notifications are on for this device.');
+      } else if (permission === 'denied') {
+        setNotice('Notifications are blocked by your browser. Allow them in site settings to turn this on.');
+      } else {
+        setNotice('Completion notifications are not supported by this browser.');
+      }
+    } finally {
+      setRequestingNotifications(false);
+    }
+  };
+
   const closeDialog = () => {
-    if (installing) return;
+    if (installing || requestingNotifications) return;
     setNotice(null);
     onClose();
   };
@@ -169,6 +205,36 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
             {!installAvailable && (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
                 If your browser supports installation, use its app or “Add to home screen” menu.
+              </Typography>
+            )}
+          </Box>
+
+          <Divider />
+          <Box component="section" aria-labelledby="wf-notifications-heading">
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.75 }}>
+              <NotificationsOutlinedIcon color="primary" />
+              <Box>
+                <Typography id="wf-notifications-heading" component="h3" variant="subtitle1" sx={{ fontWeight: 700 }}>
+                  Completion notifications
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Notify you when a response finishes while this tab is in the background.
+                </Typography>
+              </Box>
+            </Stack>
+            <Button
+              variant="outlined"
+              startIcon={<NotificationsOutlinedIcon />}
+              disabled={!completionNotificationsSupported() || requestingNotifications}
+              onClick={() => { void toggleCompletionNotifications(); }}
+            >
+              {requestingNotifications
+                ? 'Checking permission…'
+                : notificationsEnabled ? 'Turn off notifications' : 'Turn on notifications'}
+            </Button>
+            {!completionNotificationsSupported() && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+                This browser does not support desktop notifications.
               </Typography>
             )}
           </Box>
@@ -238,7 +304,7 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
         </Stack>
       </DialogContent>
       <DialogActions>
-        <Button onClick={closeDialog} disabled={installing}>Done</Button>
+        <Button onClick={closeDialog} disabled={installing || requestingNotifications}>Done</Button>
       </DialogActions>
     </Dialog>
   );

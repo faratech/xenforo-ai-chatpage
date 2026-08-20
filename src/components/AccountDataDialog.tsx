@@ -43,8 +43,13 @@ export interface AccountDataDialogProps {
   onDeleteAllSucceeded: (
     result: DeleteAllSavedChatDataResponse,
   ) => void | Promise<void>;
-  /** Resumes background work after failure or after the successful local reset. */
-  onDeleteAllFinished?: (serverDeleted: boolean) => void | Promise<void>;
+  /**
+   * Lets the root resume background work only when the server request failed
+   * or both the server deletion and browser reset completed successfully.
+   */
+  onDeleteAllFinished?: (
+    result: { serverDeleted: boolean; localResetSucceeded: boolean },
+  ) => void | Promise<void>;
   onExportDownloaded?: (generatedAt: number) => void;
 }
 
@@ -134,6 +139,7 @@ export const AccountDataDialog = ({
     setSuccess(null);
     setServerDeletionComplete(false);
     let serverDeleted = false;
+    let localResetSucceeded = false;
     try {
       await onDeleteAllStarting?.();
       if (controller.signal.aborted) return;
@@ -146,6 +152,7 @@ export const AccountDataDialog = ({
       setServerDeletionComplete(true);
       try {
         await onDeleteAllSucceeded(response);
+        localResetSucceeded = true;
       } catch (cleanupError) {
         if (!controller.signal.aborted) {
           setDeleteError(`Saved server data was deleted, but this browser could not clear its local chat data: ${errorText(cleanupError, 'local cleanup failed')}`);
@@ -165,7 +172,7 @@ export const AccountDataDialog = ({
       }
     } finally {
       try {
-        await onDeleteAllFinished?.(serverDeleted);
+        await onDeleteAllFinished?.({ serverDeleted, localResetSucceeded });
       } catch (resumeError) {
         if (!controller.signal.aborted) {
           setDeleteError(errorText(resumeError, 'Cloud history could not resume automatically. Reload this page to resume syncing.'));

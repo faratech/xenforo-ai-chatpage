@@ -4,6 +4,7 @@ import {
   conversationToJSON,
   conversationToMarkdown,
   conversationToPlainText,
+  createConversationCollectionExport,
   createConversationExport,
   shareConversationPrivately,
 } from '../services/conversationExport';
@@ -188,6 +189,81 @@ describe('private conversation exports', () => {
     });
     expect(artifact.filename).toBe('fix-wi-fi-dns-2026-08-19.md');
     expect(artifact.mimeType).toBe('text/markdown;charset=utf-8');
+  });
+
+  it('creates deterministic collection exports in the supplied conversation order', () => {
+    const exportedAt = Date.UTC(2026, 7, 19);
+    const secondConversation: Conversation = {
+      ...conversation,
+      id: 'conv_private_2',
+      title: '../ Event Viewer: follow-up?',
+      createdAt: 300,
+      updatedAt: 400,
+      messages: conversation.messages.map(message => message.role === 'ai' ? {
+        ...message,
+        rawContent: [
+          'Open Event Viewer and inspect the System log.',
+          '',
+          '### Sources',
+          '- [example.com](https://example.com/dns/?utm_source=assistant)',
+        ].join('\n'),
+        annotations: [
+          { type: 'url_citation', title: 'DNS guide', url: 'https://example.com/dns?gclid=duplicate' },
+        ],
+      } : message),
+    };
+    const selected = [secondConversation, conversation];
+
+    const markdown = createConversationCollectionExport(selected, 'markdown', { exportedAt });
+    const expectedMarkdown = selected
+      .map(item => conversationToMarkdown(item, { exportedAt }).trim())
+      .join('\n\n---\n\n') + '\n';
+    expect(markdown.content).toBe(expectedMarkdown);
+    expect(markdown.content.indexOf('# ../ Event Viewer: follow-up?'))
+      .toBeLessThan(markdown.content.indexOf('# Fix Wi-Fi / DNS'));
+    expect(markdown.content.match(/https:\/\/example\.com\/dns/g)).toHaveLength(2);
+    expect(markdown.filename).toBe('windowsforum-ai-chats-2026-08-19.md');
+    expect(markdown.filename).toMatch(/^[a-z0-9.-]+$/);
+    expect(markdown.mimeType).toBe('text/markdown;charset=utf-8');
+
+    const repeated = createConversationCollectionExport(selected, 'markdown', { exportedAt });
+    expect(repeated).toMatchObject({
+      content: markdown.content,
+      filename: markdown.filename,
+      mimeType: markdown.mimeType,
+    });
+  });
+
+  it('uses the single-export JSON projection for every collection member', () => {
+    const exportedAt = 1_700_000_000_000;
+    const secondConversation: Conversation = {
+      ...conversation,
+      id: 'conv_private_2',
+      title: 'Second conversation',
+      createdAt: 300,
+      updatedAt: 400,
+    };
+    const selected = [conversation, secondConversation];
+    const artifact = createConversationCollectionExport(selected, 'json', { exportedAt });
+    const document = JSON.parse(artifact.content) as {
+      schema: string;
+      version: number;
+      exported_at: number;
+      conversations: unknown[];
+    };
+    const singleRecords = selected.map(item => (
+      (JSON.parse(conversationToJSON(item, { exportedAt })) as { conversation: unknown }).conversation
+    ));
+
+    expect(document).toEqual({
+      schema: 'windowsforum-ai-conversation-collection',
+      version: 1,
+      exported_at: exportedAt,
+      conversations: singleRecords,
+    });
+    expect(artifact.filename).toBe('windowsforum-ai-chats-2023-11-14.json');
+    expect(artifact.mimeType).toBe('application/json;charset=utf-8');
+    expect(artifact.content.endsWith('\n')).toBe(true);
   });
 
   it('prefers native file sharing when the platform accepts files', async () => {

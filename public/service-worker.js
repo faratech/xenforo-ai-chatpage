@@ -20,6 +20,10 @@ self.addEventListener('install', event => {
   }));
 });
 
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
 const trimCache = async cache => {
   const keys = await cache.keys();
   const overflow = keys.length - MAX_CACHE_ENTRIES;

@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import axe from 'axe-core';
 import { ConversationSidebar } from '../components/ConversationSidebar';
 import type { Conversation, ConversationSidebarProps } from '../types';
@@ -35,6 +35,11 @@ const baseConversations = [
   conversation('draft', 'Driver diagnostics', 'Collect the display driver version.', { draft: 'Unsent notes' }),
 ];
 
+const withLibraryMetadata = (
+  value: Conversation,
+  metadata: { pinnedAt?: number; archivedAt?: number },
+): Conversation => Object.assign(value, metadata);
+
 interface HarnessProps extends Partial<ConversationSidebarProps> {
   initiallyOpen?: boolean;
   initiallyCollapsed?: boolean;
@@ -49,6 +54,12 @@ const Harness = ({
   onDeleteConversation = vi.fn(),
   onNewConversation = vi.fn(),
   onRenameConversation,
+  onPinConversation,
+  onArchiveConversation,
+  onBulkArchive,
+  onBulkRestore,
+  onBulkDelete,
+  onBulkExport,
   onSearchUsed,
   onSearchResultOpened,
 }: HarnessProps) => {
@@ -71,6 +82,12 @@ const Harness = ({
           onDeleteConversation={onDeleteConversation}
           onNewConversation={onNewConversation}
           onRenameConversation={onRenameConversation}
+          onPinConversation={onPinConversation}
+          onArchiveConversation={onArchiveConversation}
+          onBulkArchive={onBulkArchive}
+          onBulkRestore={onBulkRestore}
+          onBulkDelete={onBulkDelete}
+          onBulkExport={onBulkExport}
           desktopCollapsed={collapsed}
           onToggleDesktopCollapsed={onToggleDesktopCollapsed}
           onSearchUsed={onSearchUsed}
@@ -266,5 +283,194 @@ describe('ConversationSidebar search', () => {
     expect(await screen.findByRole('dialog', { name: 'Chat history' })).toBeInTheDocument();
     const results = await axe.run(document.body);
     expect(results.violations).toEqual([]);
+  });
+});
+
+describe('ConversationSidebar library organization', () => {
+  const libraryConversations = [
+    withLibraryMetadata(conversation('pinned', 'Pinned diagnostics', 'Pinned display troubleshooting notes.'), { pinnedAt: Date.now() }),
+    conversation('recent', 'Recent network chat', 'Current adapter troubleshooting.'),
+    withLibraryMetadata(conversation('archived', 'Archived update fix', 'An older update workaround.'), { archivedAt: Date.now() }),
+  ];
+
+  it('puts pinned chats first, hides archived chats normally, and searches the archive from All', () => {
+    const { container } = render(<Harness conversations={libraryConversations} currentConversationId="recent" />);
+    const desktopDrawer = container.querySelector<HTMLElement>('.MuiDrawer-docked')!;
+    const desktop = within(desktopDrawer);
+    const sectionLabels = [...desktopDrawer.querySelectorAll('.MuiListSubheader-root')].map(node => node.textContent);
+
+    expect(sectionLabels[0]).toBe('Pinned');
+    expect(desktop.getByRole('button', { name: /^Pinned diagnostics$/ })).toBeInTheDocument();
+    expect(desktop.queryByRole('button', { name: /^Archived update fix$/ })).not.toBeInTheDocument();
+
+    fireEvent.change(desktop.getByRole('searchbox', { name: 'Search chat history' }), { target: { value: 'update' } });
+
+    expect(desktop.getByText('Archived · 2 matches')).toBeInTheDocument();
+    const searchedSections = [...desktopDrawer.querySelectorAll('.MuiListSubheader-root')];
+    expect(searchedSections[searchedSections.length - 1]).toHaveTextContent('Archived');
+  });
+
+  it('filters the library between All, Pinned, and Archived views', () => {
+    const { container } = render(<Harness conversations={libraryConversations} currentConversationId="recent" />);
+    const desktop = within(container.querySelector<HTMLElement>('.MuiDrawer-docked')!);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Pinned chats' }));
+    expect(desktop.getByRole('button', { name: /^Pinned diagnostics$/ })).toBeInTheDocument();
+    expect(desktop.queryByRole('button', { name: /^Recent network chat$/ })).not.toBeInTheDocument();
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Archived chats' }));
+    expect(desktop.getByRole('button', { name: /^Archived update fix Archived$/ })).toBeInTheDocument();
+    expect(desktop.queryByRole('button', { name: /^Pinned diagnostics$/ })).not.toBeInTheDocument();
+
+    fireEvent.click(desktop.getByRole('button', { name: 'All chats' }));
+    expect(desktop.getByRole('button', { name: /^Recent network chat$/ })).toBeInTheDocument();
+    expect(desktop.queryByRole('button', { name: /^Archived update fix$/ })).not.toBeInTheDocument();
+  });
+
+  it('exposes accessible per-chat pin and archive actions', () => {
+    const onPinConversation = vi.fn();
+    const onArchiveConversation = vi.fn();
+    const { container } = render(
+      <Harness
+        conversations={libraryConversations}
+        currentConversationId="recent"
+        onPinConversation={onPinConversation}
+        onArchiveConversation={onArchiveConversation}
+      />,
+    );
+    const desktop = within(container.querySelector<HTMLElement>('.MuiDrawer-docked')!);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Actions for Pinned diagnostics' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Unpin' }));
+    expect(onPinConversation).toHaveBeenCalledWith('pinned', false);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Actions for Recent network chat' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
+    expect(onArchiveConversation).toHaveBeenCalledWith('recent', true);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Archived chats' }));
+    fireEvent.click(desktop.getByRole('button', { name: 'Actions for Archived update fix' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Restore' }));
+    expect(onArchiveConversation).toHaveBeenCalledWith('archived', false);
+  });
+
+  it('restores the row action trigger when its menu is dismissed with Escape', async () => {
+    const { container } = render(
+      <Harness
+        conversations={libraryConversations}
+        currentConversationId="recent"
+        onArchiveConversation={vi.fn()}
+      />,
+    );
+    const desktop = within(container.querySelector<HTMLElement>('.MuiDrawer-docked')!);
+    const trigger = desktop.getByRole('button', { name: 'Actions for Recent network chat' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const menu = await screen.findByRole('menu', { name: 'Actions for Recent network chat' });
+    fireEvent.keyDown(menu, { key: 'Escape' });
+
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it('supports selection, clear selection, and eligible bulk archive/restore actions', () => {
+    const onBulkArchive = vi.fn();
+    const onBulkRestore = vi.fn();
+    const { container } = render(
+      <Harness
+        conversations={libraryConversations}
+        currentConversationId="recent"
+        onBulkArchive={onBulkArchive}
+        onBulkRestore={onBulkRestore}
+      />,
+    );
+    const desktop = within(container.querySelector<HTMLElement>('.MuiDrawer-docked')!);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Select' }));
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Pinned diagnostics' }));
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Recent network chat' }));
+    expect(desktop.getByText('2 selected')).toBeInTheDocument();
+    fireEvent.click(desktop.getByRole('button', { name: 'Clear selection' }));
+    expect(desktop.getByText('0 selected')).toBeInTheDocument();
+
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Recent network chat' }));
+    fireEvent.click(desktop.getByRole('button', { name: 'Archive selected chats' }));
+    expect(onBulkArchive).toHaveBeenCalledWith(['recent']);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Archived chats' }));
+    fireEvent.click(desktop.getByRole('button', { name: 'Select' }));
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Archived update fix' }));
+    fireEvent.click(desktop.getByRole('button', { name: 'Restore selected chats' }));
+    expect(onBulkRestore).toHaveBeenCalledWith(['archived']);
+  });
+
+  it('passes all selected chats to bulk export and delete callbacks', () => {
+    const onBulkExport = vi.fn();
+    const onBulkDelete = vi.fn();
+    const { container } = render(
+      <Harness
+        conversations={libraryConversations}
+        currentConversationId="recent"
+        onBulkExport={onBulkExport}
+        onBulkDelete={onBulkDelete}
+      />,
+    );
+    const desktop = within(container.querySelector<HTMLElement>('.MuiDrawer-docked')!);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Select' }));
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Pinned diagnostics' }));
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Recent network chat' }));
+    fireEvent.click(desktop.getByRole('button', { name: 'Export selected chats' }));
+    expect(onBulkExport).toHaveBeenCalledWith(['pinned', 'recent']);
+
+    fireEvent.click(desktop.getByRole('button', { name: 'Select' }));
+    fireEvent.click(desktop.getByRole('checkbox', { name: 'Select Recent network chat' }));
+    fireEvent.click(desktop.getByRole('button', { name: 'Delete selected chats' }));
+    expect(onBulkDelete).toHaveBeenCalledWith(['recent']);
+  });
+
+  it.each(['single', 'bulk'] as const)('does not restore focus into a closed mobile drawer after %s archive', async (mode) => {
+    mobileViewport = true;
+
+    const ClosingMobileHarness = () => {
+      const [open, setOpen] = useState(false);
+      const openerRef = useRef<HTMLButtonElement | null>(null);
+      return (
+        <ThemeProvider theme={theme}>
+          <div id="wf-chat-window">
+            <button ref={openerRef} type="button" onClick={() => setOpen(true)}>Open chat history</button>
+            <ConversationSidebar
+              open={open}
+              onOpen={() => setOpen(true)}
+              onClose={() => setOpen(false)}
+              conversations={libraryConversations}
+              currentConversationId="recent"
+              onSelectConversation={vi.fn()}
+              onDeleteConversation={vi.fn()}
+              onNewConversation={vi.fn()}
+              onArchiveConversation={mode === 'single' ? () => setOpen(false) : undefined}
+              onBulkArchive={mode === 'bulk' ? () => setOpen(false) : undefined}
+            />
+          </div>
+        </ThemeProvider>
+      );
+    };
+
+    render(<ClosingMobileHarness />);
+    const opener = screen.getByRole('button', { name: 'Open chat history' });
+    opener.focus();
+    fireEvent.click(opener);
+    const drawer = await screen.findByRole('dialog', { name: 'Chat history' });
+
+    if (mode === 'single') {
+      fireEvent.click(within(drawer).getByRole('button', { name: 'Actions for Recent network chat' }));
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }));
+    } else {
+      fireEvent.click(within(drawer).getByRole('button', { name: 'Select' }));
+      fireEvent.click(within(drawer).getByRole('checkbox', { name: 'Select Recent network chat' }));
+      fireEvent.click(within(drawer).getByRole('button', { name: 'Archive selected chats' }));
+    }
+
+    await waitFor(() => expect(opener).toHaveFocus());
+    expect(document.activeElement?.closest('.wf-history-mobile-drawer')).toBeNull();
   });
 });

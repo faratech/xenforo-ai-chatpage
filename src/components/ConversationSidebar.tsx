@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Typography from '@mui/material/Typography';
@@ -20,17 +20,26 @@ import AddIcon from '@mui/icons-material/Add';
 import CloseIcon from '@mui/icons-material/Close';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
+import ArchiveOutlinedIcon from '@mui/icons-material/ArchiveOutlined';
+import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
 import MenuIcon from '@mui/icons-material/Menu';
 import MenuOpenIcon from '@mui/icons-material/MenuOpen';
 import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
+import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import SearchIcon from '@mui/icons-material/Search';
 import type { Conversation, ConversationSidebarProps } from '../types';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 
 type DateGroup = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older';
+type LibraryView = 'all' | 'pinned' | 'archived';
+
+type LibraryConversation = Conversation & {
+  pinnedAt?: number;
+  archivedAt?: number;
+};
 
 interface ConversationSearchResult {
-  conversation: Conversation;
+  conversation: LibraryConversation;
   excerpt?: string;
   matchCount: number;
 }
@@ -133,27 +142,64 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
   onDeleteConversation,
   onNewConversation,
   onRenameConversation,
+  onPinConversation,
+  onArchiveConversation,
+  onBulkArchive,
+  onBulkRestore,
+  onBulkDelete,
+  onBulkExport,
   desktopCollapsed = false,
   onToggleDesktopCollapsed,
 }) => {
   const [query, setQuery] = useState('');
+  const [libraryView, setLibraryView] = useState<LibraryView>('all');
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedConversationIds, setSelectedConversationIds] = useState<Set<string>>(() => new Set());
   const [activeResultIndex, setActiveResultIndex] = useState(-1);
   const [menuState, setMenuState] = useState<{
     anchor: HTMLElement;
-    conversation: Conversation;
+    conversation: LibraryConversation;
   } | null>(null);
   const desktopSearchRef = useRef<HTMLInputElement | null>(null);
   const mobileSearchRef = useRef<HTMLInputElement | null>(null);
-  const desktopResultRefs = useRef(new Map<string, HTMLDivElement>());
-  const mobileResultRefs = useRef(new Map<string, HTMLDivElement>());
+  const desktopResultRefs = useRef(new Map<string, HTMLButtonElement>());
+  const mobileResultRefs = useRef(new Map<string, HTMLButtonElement>());
+  const desktopSelectRef = useRef<HTMLButtonElement | null>(null);
+  const mobileSelectRef = useRef<HTMLButtonElement | null>(null);
+  const mobileDrawerOpenRef = useRef(open);
+  const previousMobileOpenRef = useRef(open);
+  const mobileReturnFocusRef = useRef<HTMLElement | null>(null);
   const shortcutFocusPendingRef = useRef(false);
   const searchSessionReportedRef = useRef(false);
+  const pendingMenuFocusRef = useRef<{
+    mobile: boolean;
+    trigger: HTMLElement;
+    conversationId: string;
+    fallbackIds: string[];
+  } | null>(null);
+  const pendingMenuDialogActionRef = useRef<{
+    mobile: boolean;
+    run: () => void;
+  } | null>(null);
   const [searchAnnouncement, setSearchAnnouncement] = useState('');
+  const conversationMenuId = useId();
   const handleMobileOpen = useCallback(() => onOpen?.(), [onOpen]);
+
+  useEffect(() => {
+    if (open && !previousMobileOpenRef.current) {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && !activeElement.closest('.wf-history-mobile-drawer')) {
+        mobileReturnFocusRef.current = activeElement;
+      }
+    }
+    mobileDrawerOpenRef.current = open;
+    previousMobileOpenRef.current = open;
+  }, [open]);
 
   const normalizedQuery = normalizeSearchText(query).toLocaleLowerCase();
 
-  const searchResults = useMemo<ConversationSearchResult[]>(() => conversations.flatMap(conversation => {
+  const matchingResults = useMemo<ConversationSearchResult[]>(() => conversations.flatMap(conversationValue => {
+    const conversation = conversationValue as LibraryConversation;
     if (!normalizedQuery) return [{ conversation, matchCount: 0 }];
 
     const titleMatches = countMatches(conversation.title, normalizedQuery);
@@ -173,17 +219,99 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
     }] : [];
   }), [conversations, normalizedQuery]);
 
+  const visibleResults = useMemo(() => matchingResults.filter(({ conversation }) => {
+    const isArchived = Boolean(conversation.archivedAt);
+    if (libraryView === 'archived') return isArchived;
+    if (libraryView === 'pinned') return Boolean(conversation.pinnedAt) && !isArchived;
+    // The normal history stays uncluttered, but search deliberately reaches
+    // the archive so an old conversation never feels lost.
+    return normalizedQuery ? true : !isArchived;
+  }), [libraryView, matchingResults, normalizedQuery]);
+
   const groups = useMemo(() => {
-    return GROUP_ORDER.map(label => ({
+    if (libraryView === 'pinned') {
+      return visibleResults.length ? [{ label: 'Pinned', results: visibleResults }] : [];
+    }
+    if (libraryView === 'archived') {
+      return visibleResults.length ? [{ label: 'Archived', results: visibleResults }] : [];
+    }
+
+    const activePinned = visibleResults.filter(({ conversation }) => conversation.pinnedAt && !conversation.archivedAt);
+    const activeRecent = visibleResults.filter(({ conversation }) => !conversation.pinnedAt && !conversation.archivedAt);
+    const archived = visibleResults.filter(({ conversation }) => conversation.archivedAt);
+    const sections: Array<{ label: string; results: ConversationSearchResult[] }> = [];
+    if (activePinned.length) sections.push({ label: 'Pinned', results: activePinned });
+    sections.push(...GROUP_ORDER.map(label => ({
       label,
-      results: searchResults.filter(result => groupForDate(result.conversation.updatedAt) === label),
-    })).filter(group => group.results.length > 0);
-  }, [searchResults]);
+      results: activeRecent.filter(result => groupForDate(result.conversation.updatedAt) === label),
+    })).filter(group => group.results.length > 0));
+    if (archived.length) sections.push({ label: 'Archived', results: archived });
+    return sections;
+  }, [libraryView, visibleResults]);
 
   const orderedResults = useMemo(() => groups.flatMap(group => group.results), [groups]);
   const resultIndexById = useMemo(() => new Map(
     orderedResults.map((result, index) => [result.conversation.id, index]),
   ), [orderedResults]);
+  const canSelect = Boolean(onBulkArchive || onBulkRestore || onBulkDelete || onBulkExport);
+  const selectedConversations = useMemo(() => conversations
+    .filter(conversation => selectedConversationIds.has(conversation.id))
+    .map(conversation => conversation as LibraryConversation), [conversations, selectedConversationIds]);
+  const selectedIds = useMemo(() => selectedConversations.map(conversation => conversation.id), [selectedConversations]);
+  const selectedActiveIds = useMemo(() => selectedConversations
+    .filter(conversation => !conversation.archivedAt)
+    .map(conversation => conversation.id), [selectedConversations]);
+  const selectedArchivedIds = useMemo(() => selectedConversations
+    .filter(conversation => conversation.archivedAt)
+    .map(conversation => conversation.id), [selectedConversations]);
+
+  const clearSelection = useCallback(() => setSelectedConversationIds(new Set()), []);
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    clearSelection();
+  }, [clearSelection]);
+
+  const toggleConversationSelection = useCallback((conversationId: string) => {
+    setSelectedConversationIds(current => {
+      const next = new Set(current);
+      if (next.has(conversationId)) next.delete(conversationId);
+      else next.add(conversationId);
+      return next;
+    });
+  }, []);
+
+  const changeLibraryView = useCallback((nextView: LibraryView | null) => {
+    if (!nextView) return;
+    setLibraryView(nextView);
+    setActiveResultIndex(-1);
+    clearSelection();
+  }, [clearSelection]);
+
+  const runBulkAction = useCallback((
+    callback: ((conversationIds: readonly string[]) => void) | undefined,
+    conversationIds: readonly string[],
+    restoreSelectFocus = false,
+  ) => {
+    if (!callback || conversationIds.length === 0) return;
+    const mobile = Boolean(document.activeElement?.closest('.wf-history-mobile-drawer'));
+    // Export/delete open a dialog. Move focus to the persistent Select button
+    // before the callback so the dialog records a connected restore target
+    // instead of the bulk-toolbar button that is about to unmount.
+    if (!restoreSelectFocus) {
+      (mobile ? mobileSelectRef : desktopSelectRef).current?.focus();
+    }
+    callback(conversationIds);
+    exitSelectionMode();
+    // The focused bulk toolbar unmounts when selection mode exits. Restore
+    // focus for in-place organization actions. Export/delete open dialogs,
+    // whose own focus trap must remain in control.
+    if (restoreSelectFocus) {
+      window.setTimeout(() => {
+        if (mobile && !mobileDrawerOpenRef.current) return;
+        (mobile ? mobileSelectRef : desktopSelectRef).current?.focus();
+      }, 0);
+    }
+  }, [exitSelectionMode]);
 
   useEffect(() => {
     if (!normalizedQuery) {
@@ -267,6 +395,10 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
   }, [desktopCollapsed, focusSearch, onOpen, onToggleDesktopCollapsed, open]);
 
   const chooseConversation = (conversationId: string, closeAfter: boolean) => {
+    if (selectionMode) {
+      toggleConversationSelection(conversationId);
+      return;
+    }
     if (normalizedQuery) onSearchResultOpened?.();
     onSelectConversation(conversationId);
     if (closeAfter) onClose();
@@ -292,6 +424,7 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
       event.preventDefault();
       event.stopPropagation();
       if (normalizedQuery) clearSearch(mobile);
+      else if (selectionMode) exitSelectionMode();
       else if (mobile) onClose();
       return;
     }
@@ -315,11 +448,52 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
       event.preventDefault();
       event.stopPropagation();
       if (normalizedQuery) clearSearch(mobile);
+      else if (selectionMode) exitSelectionMode();
       else if (mobile) onClose();
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       focusResult(resultIndex + (event.key === 'ArrowDown' ? 1 : -1), mobile);
     }
+  };
+
+  const prepareConversationMenuFocus = () => {
+    if (!menuState) return;
+    const { anchor, conversation } = menuState;
+    const mobile = Boolean(anchor.closest('.wf-history-mobile-drawer'));
+    const oldResultIds = orderedResults.map(result => result.conversation.id);
+    const oldIndex = oldResultIds.indexOf(conversation.id);
+    pendingMenuFocusRef.current = {
+      mobile,
+      trigger: anchor,
+      conversationId: conversation.id,
+      fallbackIds: [
+        ...oldResultIds.slice(Math.max(0, oldIndex + 1)),
+        ...oldResultIds.slice(0, Math.max(0, oldIndex)).reverse(),
+      ],
+    };
+  };
+
+  const closeConversationMenu = () => {
+    prepareConversationMenuFocus();
+    setMenuState(null);
+  };
+
+  const runConversationMenuAction = (action: (conversation: LibraryConversation) => void) => {
+    if (!menuState) return;
+    const { conversation } = menuState;
+    prepareConversationMenuFocus();
+    setMenuState(null);
+    action(conversation);
+  };
+
+  const runConversationDialogAction = (action: (conversation: LibraryConversation) => void) => {
+    if (!menuState) return;
+    const { anchor, conversation } = menuState;
+    pendingMenuDialogActionRef.current = {
+      mobile: Boolean(anchor.closest('.wf-history-mobile-drawer')),
+      run: () => action(conversation),
+    };
+    setMenuState(null);
   };
 
   const renderContent = (collapsed: boolean, mobile: boolean) => (
@@ -423,6 +597,71 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
         </Box>
       )}
 
+      {!collapsed && (
+        <Box sx={{ px: 1.5, pb: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+            <Box
+              role="group"
+              aria-label="Chat history view"
+              sx={{
+                flex: 1,
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                overflow: 'hidden',
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: 1,
+                '& > button:not(:first-of-type)': { borderLeft: '1px solid', borderColor: 'divider' },
+              }}
+            >
+              {([
+                ['all', 'All'],
+                ['pinned', 'Pinned'],
+                ['archived', 'Archived'],
+              ] as const).map(([view, label]) => (
+                <Button
+                  key={view}
+                  size="small"
+                  variant={libraryView === view ? 'contained' : 'text'}
+                  aria-label={`${label} chats`}
+                  aria-pressed={libraryView === view}
+                  onClick={() => changeLibraryView(view)}
+                  sx={{ minWidth: 0, borderRadius: 0, px: 0.5, py: 0.45, fontSize: 10.5, lineHeight: 1.4, textTransform: 'none' }}
+                >
+                  {label}
+                </Button>
+              ))}
+            </Box>
+            {canSelect && (
+              <Button
+                ref={mobile ? mobileSelectRef : desktopSelectRef}
+                size="small"
+                variant={selectionMode ? 'contained' : 'text'}
+                onClick={() => selectionMode ? exitSelectionMode() : setSelectionMode(true)}
+                sx={{ minWidth: 48, px: 0.75, fontSize: 10.5, textTransform: 'none' }}
+              >
+                {selectionMode ? 'Done' : 'Select'}
+              </Button>
+            )}
+          </Box>
+          {selectionMode && (
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 28, pt: 0.5 }}>
+              <Typography role="status" aria-live="polite" sx={{ fontSize: 11, color: 'text.secondary' }}>
+                {selectedIds.length} selected
+              </Typography>
+              <Button
+                size="small"
+                disabled={selectedIds.length === 0}
+                onClick={clearSelection}
+                sx={{ minWidth: 0, px: 0.5, fontSize: 10.5, textTransform: 'none' }}
+              >
+                Clear selection
+              </Button>
+            </Box>
+          )}
+        </Box>
+      )}
+
       <List aria-label="Chat history" sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', px: collapsed ? 0.75 : 1, py: 0 }}>
         {groups.map(group => (
           <Box component="li" key={group.label} sx={{ listStyle: 'none' }}>
@@ -437,7 +676,8 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
             )}
             {group.results.map(result => {
               const { conversation } = result;
-              const selected = conversation.id === currentConversationId;
+              const isCurrent = conversation.id === currentConversationId;
+              const isSelected = selectedConversationIds.has(conversation.id);
               const resultIndex = resultIndexById.get(conversation.id) ?? 0;
               const row = (
                 <Box
@@ -448,7 +688,7 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                     position: 'relative',
                     borderRadius: 1.5,
                     mb: 0.25,
-                    '&::before': selected ? {
+                    '&::before': isCurrent && !selectionMode ? {
                       content: '""',
                       position: 'absolute',
                       left: 0,
@@ -463,15 +703,21 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                   }}
                 >
                   <ListItemButton
+                    component="button"
+                    type="button"
                     id={`wf-history-${mobile ? 'mobile' : 'desktop'}-result-${resultIndex}`}
                     ref={(element) => {
                       const refs = mobile ? mobileResultRefs : desktopResultRefs;
                       if (element) refs.current.set(conversation.id, element);
                       else refs.current.delete(conversation.id);
                     }}
-                    selected={selected}
-                    aria-current={selected ? 'page' : undefined}
-                    aria-label={collapsed ? conversation.title : undefined}
+                    selected={selectionMode ? isSelected : isCurrent}
+                    role={selectionMode ? 'checkbox' : undefined}
+                    aria-checked={selectionMode ? isSelected : undefined}
+                    aria-current={!selectionMode && isCurrent ? 'page' : undefined}
+                    aria-label={selectionMode
+                      ? `${isSelected ? 'Deselect' : 'Select'} ${conversation.title}`
+                      : collapsed ? conversation.title : undefined}
                     onClick={() => chooseConversation(conversation.id, mobile)}
                     onFocus={() => setActiveResultIndex(resultIndex)}
                     onKeyDown={(event) => handleResultKeyDown(event, resultIndex, mobile)}
@@ -485,7 +731,28 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                       '&.Mui-selected': { bgcolor: 'action.selected' },
                     }}
                   >
-                    <ChatBubbleOutlineIcon sx={{ fontSize: 17, opacity: 0.85, flexShrink: 0 }} />
+                    {selectionMode ? (
+                      <Box
+                        component="span"
+                        aria-hidden="true"
+                        sx={{
+                          width: 17,
+                          height: 17,
+                          flexShrink: 0,
+                          display: 'grid',
+                          placeItems: 'center',
+                          border: '1.5px solid',
+                          borderColor: isSelected ? 'primary.main' : 'text.secondary',
+                          borderRadius: 0.5,
+                          bgcolor: isSelected ? 'primary.main' : 'transparent',
+                          color: 'primary.contrastText',
+                          fontSize: 12,
+                          lineHeight: 1,
+                        }}
+                      >
+                        {isSelected ? '✓' : ''}
+                      </Box>
+                    ) : <ChatBubbleOutlineIcon sx={{ fontSize: 17, opacity: 0.85, flexShrink: 0 }} />}
                     {!collapsed && (
                       <ListItemText
                         primary={normalizedQuery ? highlightMatches(conversation.title, normalizedQuery) : conversation.title}
@@ -495,21 +762,27 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                               {highlightMatches(result.excerpt ?? conversation.title, normalizedQuery)}
                             </Box>
                             <Box component="span" sx={{ display: 'block', mt: 0.25, color: 'text.secondary', fontSize: 10 }}>
-                              {result.matchCount} {result.matchCount === 1 ? 'match' : 'matches'}
+                              {conversation.archivedAt ? 'Archived · ' : ''}{result.matchCount} {result.matchCount === 1 ? 'match' : 'matches'}
                             </Box>
                           </>
-                        ) : conversation.draft?.trim() ? 'Draft saved' : undefined}
+                        ) : conversation.archivedAt ? 'Archived' : conversation.draft?.trim() ? 'Draft saved' : undefined}
                         slotProps={{
-                          primary: { noWrap: true, sx: { fontSize: 13, fontWeight: selected ? 650 : 500 } },
+                          primary: { noWrap: true, sx: { fontSize: 13, fontWeight: isCurrent ? 650 : 500 } },
                           secondary: { component: 'div', sx: { fontSize: 10.5, color: normalizedQuery ? 'text.secondary' : 'primary.main' } },
                         }}
                       />
                     )}
+                    {!collapsed && !selectionMode && conversation.pinnedAt && !conversation.archivedAt && (
+                      <PushPinOutlinedIcon aria-label="Pinned" sx={{ fontSize: 14, color: 'text.secondary', flexShrink: 0 }} />
+                    )}
                   </ListItemButton>
-                  {!collapsed && (
+                  {!collapsed && !selectionMode && (
                     <IconButton
                       className="conversation-menu"
                       aria-label={`Actions for ${conversation.title}`}
+                      aria-haspopup="menu"
+                      aria-expanded={menuState?.conversation.id === conversation.id}
+                      aria-controls={menuState?.conversation.id === conversation.id ? conversationMenuId : undefined}
                       size="small"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -529,10 +802,91 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
         {!groups.length && !collapsed && (
           <Box sx={{ px: 1.5, py: 4, textAlign: 'center' }}>
             <SearchIcon sx={{ color: 'text.disabled', mb: 0.75 }} />
-            <Typography sx={{ fontSize: 13, color: 'text.secondary' }}>No chats match “{query.trim()}”.</Typography>
+            <Typography sx={{ fontSize: 13, color: 'text.secondary' }}>
+              {normalizedQuery
+                ? `No chats match “${query.trim()}”.`
+                : libraryView === 'pinned'
+                  ? 'No pinned chats yet.'
+                  : libraryView === 'archived'
+                    ? 'No archived chats.'
+                    : 'No chats yet.'}
+            </Typography>
           </Box>
         )}
       </List>
+
+      {!collapsed && selectionMode && (
+        <Box
+          role="toolbar"
+          aria-label="Bulk chat actions"
+          sx={{
+            display: 'flex',
+            justifyContent: 'center',
+            gap: 0.5,
+            px: 1.5,
+            py: 0.75,
+            borderTop: (theme) => `1px solid ${theme.palette.divider}`,
+          }}
+        >
+          {onBulkArchive && (
+            <Tooltip title="Archive selected chats">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={selectedActiveIds.length === 0}
+                  aria-label="Archive selected chats"
+                  onClick={() => runBulkAction(onBulkArchive, selectedActiveIds, true)}
+                >
+                  <ArchiveOutlinedIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
+          {onBulkRestore && (
+            <Tooltip title="Restore selected chats">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={selectedArchivedIds.length === 0}
+                  aria-label="Restore selected chats"
+                  onClick={() => runBulkAction(onBulkRestore, selectedArchivedIds, true)}
+                >
+                  <ArchiveOutlinedIcon fontSize="small" sx={{ transform: 'rotate(180deg)' }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
+          {onBulkExport && (
+            <Tooltip title="Export selected chats">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={selectedIds.length === 0}
+                  aria-label="Export selected chats"
+                  onClick={() => runBulkAction(onBulkExport, selectedIds)}
+                >
+                  <FileDownloadOutlinedIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
+          {onBulkDelete && (
+            <Tooltip title="Delete selected chats">
+              <span>
+                <IconButton
+                  size="small"
+                  color="error"
+                  disabled={selectedIds.length === 0}
+                  aria-label="Delete selected chats"
+                  onClick={() => runBulkAction(onBulkDelete, selectedIds)}
+                >
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
+        </Box>
+      )}
 
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 1, px: collapsed ? 1 : 2, py: 1.25, borderTop: (theme) => `1px solid ${theme.palette.divider}`, color: 'text.secondary' }}>
         <Avatar src={BOT_AVATAR} alt="" sx={{ width: 20, height: 20, bgcolor: '#0a2c4d' }} />
@@ -578,6 +932,11 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
               shortcutFocusPendingRef.current = false;
               focusSearch(true);
             },
+            onExited: () => {
+              const returnFocus = mobileReturnFocusRef.current;
+              mobileReturnFocusRef.current = null;
+              if (returnFocus?.isConnected) returnFocus.focus();
+            },
           },
         }}
         sx={{ display: { xs: 'block', md: 'none' }, '& .MuiDrawer-paper': { width: '92vw', maxWidth: '360px', bgcolor: 'background.paper' } }}
@@ -586,22 +945,71 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
       </SwipeableDrawer>
 
       <Menu
+        id={conversationMenuId}
         anchorEl={menuState?.anchor ?? null}
         open={Boolean(menuState)}
-        onClose={() => setMenuState(null)}
+        disableRestoreFocus
+        onClose={closeConversationMenu}
         container={() => document.getElementById('wf-chat-window')}
+        slotProps={{
+          list: { 'aria-label': menuState ? `Actions for ${menuState.conversation.title}` : 'Conversation actions' },
+          transition: {
+            onExited: () => {
+              const pendingDialogAction = pendingMenuDialogActionRef.current;
+              pendingMenuDialogActionRef.current = null;
+              if (pendingDialogAction) {
+                (pendingDialogAction.mobile ? mobileSearchRef : desktopSearchRef).current?.focus();
+                pendingDialogAction.run();
+                return;
+              }
+              const pendingFocus = pendingMenuFocusRef.current;
+              pendingMenuFocusRef.current = null;
+              if (!pendingFocus) return;
+              if (pendingFocus.mobile && !mobileDrawerOpenRef.current) return;
+              // Pinning may move a row and archiving/restoring may remove it
+              // from this view. Wait until Modal restores focus, then choose
+              // the same row, a neighbour, or finally the search field.
+              const refs = pendingFocus.mobile ? mobileResultRefs : desktopResultRefs;
+              const result = [pendingFocus.conversationId, ...pendingFocus.fallbackIds]
+                .map(id => refs.current.get(id))
+                .find(Boolean);
+              const trigger = pendingFocus.trigger.isConnected ? pendingFocus.trigger : null;
+              (trigger ?? result ?? (pendingFocus.mobile ? mobileSearchRef : desktopSearchRef).current)?.focus();
+            },
+          },
+        }}
       >
+        {onPinConversation && !menuState?.conversation.archivedAt && (
+          <MenuItem onClick={() => {
+            runConversationMenuAction(conversation => {
+              onPinConversation(conversation.id, !conversation.pinnedAt);
+            });
+          }}>
+            <PushPinOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />
+            {menuState?.conversation.pinnedAt ? 'Unpin' : 'Pin'}
+          </MenuItem>
+        )}
+        {onArchiveConversation && (
+          <MenuItem onClick={() => {
+            runConversationMenuAction(conversation => {
+              onArchiveConversation(conversation.id, !conversation.archivedAt);
+            });
+          }}>
+            {menuState?.conversation.archivedAt
+              ? <ArchiveOutlinedIcon fontSize="small" sx={{ mr: 1.25, transform: 'rotate(180deg)' }} />
+              : <ArchiveOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />}
+            {menuState?.conversation.archivedAt ? 'Restore' : 'Archive'}
+          </MenuItem>
+        )}
         {onRenameConversation && (
           <MenuItem onClick={() => {
-            if (menuState) onRenameConversation(menuState.conversation.id);
-            setMenuState(null);
+            runConversationDialogAction(conversation => onRenameConversation(conversation.id));
           }}>
             <EditIcon fontSize="small" sx={{ mr: 1.25 }} /> Rename
           </MenuItem>
         )}
         <MenuItem sx={{ color: 'error.main' }} onClick={() => {
-          if (menuState) onDeleteConversation(menuState.conversation.id);
-          setMenuState(null);
+          runConversationDialogAction(conversation => onDeleteConversation(conversation.id));
         }}>
           <DeleteIcon fontSize="small" sx={{ mr: 1.25 }} /> Delete
         </MenuItem>

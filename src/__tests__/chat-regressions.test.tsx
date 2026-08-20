@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import type { ChatStoreV4 } from '../types';
 
@@ -219,7 +219,9 @@ describe('account switching', () => {
 describe('transactional branch operations', () => {
   it('rejects an over-limit edit without destroying the branch', async () => {
     await bootWithExchange();
-    fireEvent.click(screen.getByLabelText('Edit message'));
+    const questionArticle = screen.getByRole('article', { name: 'Member message' });
+    fireEvent.click(within(questionArticle).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit message' }));
     const editor = screen.getAllByRole('textbox').find(
       element => (element as HTMLTextAreaElement).value === 'First question',
     );
@@ -401,6 +403,8 @@ describe('/clear', () => {
     const conversationId = apiMocks.sendMessage.mock.calls[0][1].conversationId as string;
 
     sendText('/clear');
+    expect(await screen.findByRole('dialog', { name: 'Clear messages?' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear messages' }));
     await waitFor(() => expect(apiMocks.clearConversation).toHaveBeenCalledWith(conversationId));
     await waitFor(() => expect(screen.queryByText('First answer')).not.toBeInTheDocument());
     expect(screen.getByText(/Welcome to WindowsForum\.com/)).toBeInTheDocument();
@@ -410,7 +414,7 @@ describe('/clear', () => {
       const stored = readStore('42').conversations[conversationId];
       expect(stored).toBeDefined();
       expect(stored.messages).toHaveLength(1);
-      expect(stored.title).toBe('New Chat');
+      expect(stored.title).toBe('First question');
     });
   });
 
@@ -420,6 +424,8 @@ describe('/clear', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     sendText('/clear');
+    expect(await screen.findByRole('dialog', { name: 'Clear messages?' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear messages' }));
     expect(await screen.findByText(/could not clear this conversation/)).toBeInTheDocument();
     expect(messageParagraphs('First answer')).toHaveLength(1);
     expect(messageParagraphs('First question')).toHaveLength(1);

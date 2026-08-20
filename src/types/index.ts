@@ -75,6 +75,13 @@ export interface Conversation {
   cloudUpdatedAt?: number;
   /** Local content clock represented by cloudRevision. Draft edits do not affect it. */
   cloudSyncedLocalUpdatedAt?: number;
+  /** Server-backed library state. Timestamps are absent while the state is off. */
+  pinnedAt?: number;
+  archivedAt?: number;
+  /** Optimistic-lock revision for pin/archive changes, independent of content. */
+  metadataRevision?: number;
+  /** Local merge clock for library state, including changes not yet acknowledged by the server. */
+  metadataUpdatedAt?: number;
   /**
    * Set when a turn was stopped or interrupted, so the server-side
    * conversation state may be missing the tail of the local transcript.
@@ -215,7 +222,8 @@ export interface MessageProps {
   msg: Message;
   userAvatar: string;
   userName: string;
-  onEdit: (messageId: string, newContent: string) => void;
+  /** Returns false when another active operation prevents accepting the edit. */
+  onEdit: (messageId: string, newContent: string) => boolean;
   onRegenerate: () => void;
   onRetry: (messageId: string) => void;
   isLastMessage: boolean;
@@ -245,6 +253,15 @@ export interface ConversationSidebarProps {
   onDeleteConversation: (convId: string) => void;
   onNewConversation: () => void;
   onRenameConversation?: (convId: string) => void;
+  /** Pins or unpins one conversation in the history library. */
+  onPinConversation?: (convId: string, pinned: boolean) => void;
+  /** Archives or restores one conversation in the history library. */
+  onArchiveConversation?: (convId: string, archived: boolean) => void;
+  /** Bulk actions receive only the selected conversations eligible for that action. */
+  onBulkArchive?: (convIds: readonly string[]) => void;
+  onBulkRestore?: (convIds: readonly string[]) => void;
+  onBulkDelete?: (convIds: readonly string[]) => void;
+  onBulkExport?: (convIds: readonly string[]) => void;
   desktopCollapsed?: boolean;
   onToggleDesktopCollapsed?: () => void;
 }

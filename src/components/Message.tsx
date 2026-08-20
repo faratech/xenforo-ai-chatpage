@@ -11,6 +11,10 @@ import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
+import ListItemIcon from '@mui/material/ListItemIcon';
+import ListItemText from '@mui/material/ListItemText';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
 import { useTheme } from '@mui/material/styles';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -23,6 +27,8 @@ import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import VolumeUpOutlinedIcon from '@mui/icons-material/VolumeUpOutlined';
 import ThumbDownOutlinedIcon from '@mui/icons-material/ThumbDownOutlined';
 import ThumbUpOutlinedIcon from '@mui/icons-material/ThumbUpOutlined';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
+import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import type { Annotation, MessageProps } from '../types';
 import {
   canonicalHttpUrlKey,
@@ -99,6 +105,11 @@ const citationMeta = (annotation: Annotation): string => {
 };
 
 const COLLAPSED_SOURCE_COUNT = 4;
+
+type MessageComponentProps = MessageProps & {
+  /** Copies a stable link to this message when the conversation host supports it. */
+  onCopyPermalink?: (messageId: string) => Promise<void> | void;
+};
 
 const INLINE_CITATION_SX = {
   '& .wf-inline-citation': {
@@ -425,8 +436,7 @@ const SourcesList = ({
  * While a response streams, content renders as escaped plain text; Markdown
  * parsing and sanitization run exactly once, when the message completes.
  */
-export const Message = memo<MessageProps>(({
-  msg,
+export const Message = memo<MessageComponentProps>(({ msg,
   userAvatar,
   userName,
   onEdit,
@@ -442,6 +452,7 @@ export const Message = memo<MessageProps>(({
   feedback,
   feedbackPending = false,
   onFeedback,
+  onCopyPermalink,
 }) => {
   const theme = useTheme();
   const isUser = msg.role === 'user';
@@ -455,8 +466,12 @@ export const Message = memo<MessageProps>(({
   const [feedbackReason, setFeedbackReason] = useState('');
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const [highlightedSourceIndex, setHighlightedSourceIndex] = useState<number | null>(null);
+  const [actionsMenuAnchor, setActionsMenuAnchor] = useState<HTMLElement | null>(null);
   const sourcesListId = useId();
+  const actionsMenuId = useId();
   const articleRef = useRef<HTMLElement | null>(null);
+  const actionsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const editInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSourceFocusRef = useRef<number | null>(null);
   const sourceHighlightResetRef = useRef<number | null>(null);
 
@@ -643,6 +658,11 @@ export const Message = memo<MessageProps>(({
     setSelectedImage({ src: target.currentSrc || target.src, alt: target.alt || 'Answer image' });
   }, []);
 
+  const closeEditorAndRestoreFocus = useCallback(() => {
+    setIsEditing(false);
+    requestAnimationFrame(() => (actionsButtonRef.current ?? articleRef.current)?.focus());
+  }, []);
+
   const handleEdit = useCallback(() => {
     if (isEditing) {
       const trimmed = editText.trim();
@@ -657,14 +677,29 @@ export const Message = memo<MessageProps>(({
         return;
       }
       setEditError('');
-      onEdit(msg.id, trimmed);
-      setIsEditing(false);
+      if (onEdit(msg.id, trimmed) === false) {
+        setEditError('This edit cannot be sent yet. Reconnect or finish the current chat action, then try again.');
+        return;
+      }
+      closeEditorAndRestoreFocus();
     } else {
       setEditText(msg.rawContent);
       setEditError('');
       setIsEditing(true);
     }
-  }, [isEditing, editText, msg.id, msg.rawContent, onEdit]);
+  }, [closeEditorAndRestoreFocus, isEditing, editText, msg.id, msg.rawContent, onEdit]);
+
+  const handleCopyPermalink = useCallback(async () => {
+    if (!onCopyPermalink) return;
+    setActionsMenuAnchor(null);
+    try {
+      await onCopyPermalink(msg.id);
+      setActionAnnouncement('Link to message copied.');
+    } catch (error) {
+      console.error('Message link copy failed:', error);
+      setActionAnnouncement('Link to message could not be copied.');
+    }
+  }, [msg.id, onCopyPermalink]);
 
   const time = msg.timestamp
     ? new Date(msg.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -706,102 +741,133 @@ export const Message = memo<MessageProps>(({
   );
 
   const actions = !isStreaming && !isEditing && (
-    <Stack
-      className="message-actions"
-      direction="row"
-      spacing={0.25}
-      sx={{
-        mt: 0.75,
-        opacity: 0,
-        transition: 'opacity 0.2s',
-        '@media (hover: none), (pointer: coarse)': { opacity: 1 },
-        '&:focus-within': { opacity: 1 },
-      }}
-    >
-      <Tooltip title={copyStatus === 'copied' ? 'Copied!' : copyStatus === 'failed' ? 'Copy failed' : 'Copy'}>
-        <IconButton size="small" onClick={() => { void handleCopy(); }} aria-label="Copy message content">
-          {copyStatus === 'copied' ? <CheckIcon fontSize="small" /> : <ContentCopyIcon fontSize="small" />}
-        </IconButton>
-      </Tooltip>
-
-      {isUser && isLastUserMessage && !isBusy && (
-        <Tooltip title="Edit">
-          <IconButton size="small" onClick={handleEdit} aria-label="Edit message">
-            <EditIcon fontSize="small" />
+    <>
+      <Stack
+        className="message-actions"
+        direction="row"
+        spacing={0.25}
+        sx={{
+          mt: 0.75,
+          color: 'text.secondary',
+        }}
+      >
+        <Tooltip title={copyStatus === 'copied' ? 'Copied!' : copyStatus === 'failed' ? 'Copy failed' : 'Copy'}>
+          <IconButton size="small" onClick={() => { void handleCopy(); }} aria-label="Copy message content">
+            {copyStatus === 'copied' ? <CheckIcon fontSize="small" /> : <ContentCopyIcon fontSize="small" />}
           </IconButton>
         </Tooltip>
-      )}
 
-      {isUser && msg.status === 'failed' && !isBusy && (
-        <Tooltip title="Retry">
-          <IconButton size="small" onClick={() => onRetry(msg.id)} aria-label="Retry message">
-            <RefreshIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      )}
+        {isUser && msg.status === 'failed' && !isBusy && (
+          <Tooltip title="Retry">
+            <IconButton size="small" onClick={() => onRetry(msg.id)} aria-label="Retry message">
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
 
-      {!isUser && isLastMessage && !isBusy && (
-        <Tooltip title="Regenerate">
-          <IconButton size="small" onClick={() => onRegenerate()} aria-label="Regenerate response">
-            <RefreshIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      )}
+        {!isUser && isLastMessage && !isBusy && (
+          <Tooltip title="Regenerate">
+            <IconButton size="small" onClick={() => onRegenerate()} aria-label="Regenerate response">
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
 
-      {!isUser && onSpeak && (
-        <Tooltip title={isSpeaking ? 'Stop reading' : 'Read aloud'}>
-          <IconButton
-            size="small"
+        {(onCopyPermalink
+          || (isUser && isLastUserMessage && !isBusy)
+          || (!isUser && Boolean(onSpeak))
+          || (!isUser && Boolean(msg.responseId && msg.turnId && onFeedback))) && (
+          <Tooltip title="Message actions">
+            <IconButton
+              ref={actionsButtonRef}
+              size="small"
+              aria-label="Message actions"
+              aria-haspopup="menu"
+              aria-controls={actionsMenuAnchor ? actionsMenuId : undefined}
+              aria-expanded={actionsMenuAnchor ? 'true' : undefined}
+              onClick={(event) => setActionsMenuAnchor(event.currentTarget)}
+            >
+              <MoreHorizIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
+      </Stack>
+
+      <Menu
+        id={actionsMenuId}
+        anchorEl={actionsMenuAnchor}
+        open={Boolean(actionsMenuAnchor)}
+        onClose={() => setActionsMenuAnchor(null)}
+        container={() => document.getElementById('wf-chat-window')}
+        slotProps={{
+          list: { 'aria-label': 'Message actions' },
+          transition: { onExited: () => { if (isEditing) editInputRef.current?.focus(); } },
+        }}
+      >
+        {onCopyPermalink && (
+          <MenuItem onClick={() => { void handleCopyPermalink(); }}>
+            <ListItemIcon><LinkOutlinedIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Copy link to this message</ListItemText>
+          </MenuItem>
+        )}
+        {isUser && isLastUserMessage && !isBusy && (
+          <MenuItem onClick={() => { setActionsMenuAnchor(null); handleEdit(); }}>
+            <ListItemIcon><EditIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Edit message</ListItemText>
+          </MenuItem>
+        )}
+        {!isUser && onSpeak && (
+          <MenuItem
             onClick={() => {
+              setActionsMenuAnchor(null);
               if (isSpeaking) onStopSpeaking?.();
               else void onSpeak(msg.id, msg.rawContent);
             }}
-            aria-label={isSpeaking ? 'Stop reading message aloud' : 'Read message aloud'}
-            aria-pressed={isSpeaking}
           >
-            {isSpeaking ? <StopCircleOutlinedIcon fontSize="small" /> : <VolumeUpOutlinedIcon fontSize="small" />}
-          </IconButton>
-        </Tooltip>
-      )}
-
-      {!isUser && msg.responseId && msg.turnId && onFeedback && (
-        <>
-          <Tooltip title="Helpful">
-            <span>
-              <IconButton
-                size="small"
-                disabled={feedbackPending}
-                color={feedback === 'up' ? 'primary' : 'default'}
-                onClick={() => { void onFeedback(msg.id, 'up'); }}
-                aria-label="Mark response as helpful"
-                aria-pressed={feedback === 'up'}
-              >
-                <ThumbUpOutlinedIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Tooltip title="Not helpful">
-            <span>
-              <IconButton
-                size="small"
-                disabled={feedbackPending}
-                color={feedback === 'down' ? 'primary' : 'default'}
-                onClick={() => setFeedbackDialogOpen(true)}
-                aria-label="Mark response as not helpful"
-                aria-pressed={feedback === 'down'}
-              >
-                <ThumbDownOutlinedIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-        </>
-      )}
-    </Stack>
+            <ListItemIcon>
+              {isSpeaking ? <StopCircleOutlinedIcon fontSize="small" /> : <VolumeUpOutlinedIcon fontSize="small" />}
+            </ListItemIcon>
+            <ListItemText>{isSpeaking ? 'Stop reading aloud' : 'Read aloud'}</ListItemText>
+          </MenuItem>
+        )}
+        {!isUser && msg.responseId && msg.turnId && onFeedback && (
+          <MenuItem
+            role="menuitemradio"
+            aria-checked={feedback === 'up'}
+            disabled={feedbackPending}
+            selected={feedback === 'up'}
+            onClick={() => {
+              setActionsMenuAnchor(null);
+              void onFeedback(msg.id, 'up');
+            }}
+          >
+            <ListItemIcon><ThumbUpOutlinedIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Helpful</ListItemText>
+          </MenuItem>
+        )}
+        {!isUser && msg.responseId && msg.turnId && onFeedback && (
+          <MenuItem
+            role="menuitemradio"
+            aria-checked={feedback === 'down'}
+            disabled={feedbackPending}
+            selected={feedback === 'down'}
+            onClick={() => {
+              setActionsMenuAnchor(null);
+              setFeedbackDialogOpen(true);
+            }}
+          >
+            <ListItemIcon><ThumbDownOutlinedIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Not helpful</ListItemText>
+          </MenuItem>
+        )}
+      </Menu>
+    </>
   );
 
   const editor = (
     <Stack spacing={1} sx={{ width: '100%' }}>
       <TextField
+        inputRef={editInputRef}
         value={editText}
         onChange={(e) => setEditText(e.target.value)}
         multiline
@@ -813,7 +879,7 @@ export const Message = memo<MessageProps>(({
         error={Boolean(editError)}
         helperText={editError || `${editEncoder.encode(editText).byteLength} / ${MAX_EDIT_BYTES} bytes`}
         onKeyDown={(event) => {
-          if (event.key === 'Escape') setIsEditing(false);
+          if (event.key === 'Escape') closeEditorAndRestoreFocus();
           if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) handleEdit();
         }}
       />
@@ -821,7 +887,7 @@ export const Message = memo<MessageProps>(({
         <Button size="small" variant="contained" onClick={handleEdit} startIcon={<CheckIcon />}>
           Save
         </Button>
-        <Button size="small" onClick={() => setIsEditing(false)} startIcon={<CloseIcon />}>
+        <Button size="small" onClick={closeEditorAndRestoreFocus} startIcon={<CloseIcon />}>
           Cancel
         </Button>
       </Stack>
@@ -830,7 +896,15 @@ export const Message = memo<MessageProps>(({
 
   return (
     <>
-    <Box ref={articleRef} component="article" aria-label={`${isUser ? userName : ASSISTANT_NAME} message`} sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
+    <Box
+      ref={articleRef}
+      id={`wf-message-${msg.id}`}
+      component="article"
+      data-wf-message-editing={isEditing ? 'true' : undefined}
+      tabIndex={-1}
+      aria-label={`${isUser ? userName : ASSISTANT_NAME} message`}
+      sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1 }}
+    >
       <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
         {isUser ? (
           /* ---- User: right-aligned blue bubble + avatar ---- */
@@ -843,7 +917,7 @@ export const Message = memo<MessageProps>(({
                   className="wf-user-bubble"
                   sx={{
                     bgcolor: 'primary.main',
-                    color: '#fff',
+                    color: 'primary.contrastText',
                     borderRadius: '16px 4px 16px 16px',
                     px: 2,
                     py: 1.25,
@@ -891,7 +965,7 @@ export const Message = memo<MessageProps>(({
                     </Box>
                   )}
                   {msg.status === 'failed' && (
-                    <Typography component="span" sx={{ display: 'block', mt: 0.75, fontSize: 12, color: '#fff' }}>
+                    <Typography component="span" sx={{ display: 'block', mt: 0.75, fontSize: 12, color: 'primary.contrastText' }}>
                       Not sent — edit or retry
                     </Typography>
                   )}

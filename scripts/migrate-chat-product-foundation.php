@@ -30,9 +30,12 @@ $tables = [
             owner_user_id INT UNSIGNED NOT NULL,
             client_conversation_id VARCHAR(128) NOT NULL,
             revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            metadata_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
             title VARCHAR(255) NOT NULL,
             messages_json MEDIUMTEXT NOT NULL,
             message_count INT UNSIGNED NOT NULL DEFAULT 0,
+            pinned_at_ms BIGINT UNSIGNED NULL,
+            archived_at_ms BIGINT UNSIGNED NULL,
             created_at_ms BIGINT UNSIGNED NOT NULL,
             updated_at_ms BIGINT UNSIGNED NOT NULL,
             PRIMARY KEY (owner_user_id, client_conversation_id),
@@ -169,6 +172,26 @@ $existing = $db->fetchAllColumn("
 ", [$schema]);
 $existing = array_fill_keys(array_map('strval', $existing), true);
 $missing = array_values(array_filter(array_keys($tables), static fn(string $table): bool => !isset($existing[$table])));
+$requiredColumns = [
+    'openai_chatpage_saved_conversations' => [
+        'metadata_revision' => 'ALTER TABLE openai_chatpage_saved_conversations ADD COLUMN metadata_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER revision',
+        'pinned_at_ms' => 'ALTER TABLE openai_chatpage_saved_conversations ADD COLUMN pinned_at_ms BIGINT UNSIGNED NULL AFTER message_count',
+        'archived_at_ms' => 'ALTER TABLE openai_chatpage_saved_conversations ADD COLUMN archived_at_ms BIGINT UNSIGNED NULL AFTER pinned_at_ms',
+    ],
+];
+$missingColumns = [];
+foreach ($requiredColumns as $table => $columns) {
+    if (!isset($existing[$table])) continue;
+    $presentColumns = $db->fetchAllColumn("
+        SELECT COLUMN_NAME
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+    ", [$schema, $table]);
+    $presentColumns = array_fill_keys(array_map('strval', $presentColumns), true);
+    foreach ($columns as $column => $sql) {
+        if (!isset($presentColumns[$column])) $missingColumns["{$table}.{$column}"] = $sql;
+    }
+}
 $requiredIndexes = [
     'openai_chatpage_conversation_tombstones' => [
         'idx_tombstone_expiry' => 'ALTER TABLE openai_chatpage_conversation_tombstones ADD KEY idx_tombstone_expiry (expires_at)',
@@ -205,12 +228,13 @@ $rootReady = is_dir($attachmentRoot)
     && fileowner($attachmentRoot) === (int)$nobodyUser['uid']
     && filegroup($attachmentRoot) === (int)$nobodyGroup['gid'];
 
-if (!$missing && !$missingIndexes && $rootReady) {
+if (!$missing && !$missingColumns && !$missingIndexes && $rootReady) {
     echo "chat product schema and attachment root already current\n";
     exit(0);
 }
 
 $needed = $missing;
+array_push($needed, ...array_keys($missingColumns));
 array_push($needed, ...array_keys($missingIndexes));
 if (!$rootReady) $needed[] = 'prepare private attachment root';
 echo ($apply ? 'apply: ' : 'dry-run: ') . implode(', ', $needed) . "\n";
@@ -234,6 +258,9 @@ if (is_link($attachmentRoot)) {
 
 foreach ($missing as $table) {
     $db->query($tables[$table]);
+}
+foreach ($missingColumns as $sql) {
+    $db->query($sql);
 }
 foreach ($missingIndexes as $sql) {
     $db->query($sql);

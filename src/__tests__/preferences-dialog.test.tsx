@@ -13,6 +13,10 @@ const mocks = vi.hoisted(() => ({
     return vi.fn();
   }),
   prompt: vi.fn().mockResolvedValue('accepted'),
+  notificationPreference: vi.fn(() => 'disabled'),
+  notificationSupported: vi.fn(() => true),
+  requestNotifications: vi.fn().mockResolvedValue('granted'),
+  setNotificationPreference: vi.fn(),
 }));
 
 vi.mock('../services/speech', () => ({
@@ -31,6 +35,13 @@ vi.mock('../services/pwa', () => ({
     subscribe: mocks.subscribe,
     prompt: mocks.prompt,
   },
+}));
+
+vi.mock('../services/completionNotifications', () => ({
+  completionNotificationsSupported: mocks.notificationSupported,
+  getCompletionNotificationPreference: mocks.notificationPreference,
+  requestCompletionNotifications: mocks.requestNotifications,
+  setCompletionNotificationPreference: mocks.setNotificationPreference,
 }));
 
 import { PreferencesDialog } from '../components/PreferencesDialog';
@@ -80,5 +91,18 @@ describe('chat preferences dialog', () => {
       'Ctrl/⌘', 'Enter',
       'Esc',
     ]);
+  });
+
+  it('requests notification permission only from the explicit settings action', async () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <PreferencesDialog open onClose={vi.fn()} voiceEnabled={false} />
+      </ThemeProvider>,
+    );
+
+    expect(mocks.requestNotifications).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on notifications' }));
+    await waitFor(() => expect(mocks.requestNotifications).toHaveBeenCalledOnce());
+    expect(await screen.findByText('Completion notifications are on for this device.')).toBeInTheDocument();
   });
 });

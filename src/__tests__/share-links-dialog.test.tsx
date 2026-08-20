@@ -171,7 +171,7 @@ describe('ShareLinksDialog', () => {
       4,
       { expiresIn: 604_800, signal: expect.any(AbortSignal) },
     ));
-    const expectedURL = 'https://windowsforum.com/pages/ai/?share=token_abcdefghijklmnopqrstuvwxyz123456';
+    const expectedURL = 'https://windowsforum.com/pages/ai/#share=token_abcdefghijklmnopqrstuvwxyz123456';
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expectedURL));
     expect(screen.getByLabelText('New share URL')).toHaveValue(expectedURL);
     expect(screen.getByText(/disclosed only now/i)).toBeInTheDocument();

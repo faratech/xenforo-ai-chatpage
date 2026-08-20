@@ -21,6 +21,73 @@ export interface BeforeInstallPromptEvent extends Event {
 
 export type InstallPromptOutcome = 'accepted' | 'dismissed' | 'unavailable';
 
+type UpdateListener = (available: boolean) => void;
+
+/** Tracks an installed worker that is waiting for an explicit, user-safe reload. */
+export class PWAUpdatePrompt {
+  private waiting: ServiceWorker | null = null;
+  private listeners = new Set<UpdateListener>();
+  private watchedRegistration: ServiceWorkerRegistration | null = null;
+  private observedInstalling: ServiceWorker | null = null;
+
+  private readonly refresh = (registration: ServiceWorkerRegistration): void => {
+    this.waiting = registration.waiting;
+    this.listeners.forEach(listener => listener(this.available));
+  };
+
+  private observeInstalling(registration: ServiceWorkerRegistration): void {
+    const installing = registration.installing;
+    if (!installing || installing === this.observedInstalling) return;
+    this.observedInstalling = installing;
+    const handleState = () => {
+      if (
+        installing.state === 'installed'
+        && 'serviceWorker' in navigator
+        && navigator.serviceWorker.controller
+      ) {
+        this.refresh(registration);
+      }
+    };
+    if (installing.state === 'installed') handleState();
+    else installing.addEventListener('statechange', handleState);
+  }
+
+  watch(registration: ServiceWorkerRegistration): void {
+    if (this.watchedRegistration === registration) {
+      this.refresh(registration);
+      return;
+    }
+    this.watchedRegistration = registration;
+    this.observedInstalling = null;
+    this.refresh(registration);
+    // register() may resolve after updatefound has already fired, so observe
+    // an existing installing worker as well as future replacements.
+    this.observeInstalling(registration);
+    registration.addEventListener('updatefound', () => this.observeInstalling(registration));
+  }
+
+  subscribe(listener: UpdateListener): () => void {
+    this.listeners.add(listener);
+    listener(this.available);
+    return () => this.listeners.delete(listener);
+  }
+
+  get available(): boolean {
+    return this.waiting !== null;
+  }
+
+  activate(): boolean {
+    const worker = this.waiting;
+    if (!worker) return false;
+    this.waiting = null;
+    this.listeners.forEach(listener => listener(false));
+    worker.postMessage({ type: 'SKIP_WAITING' });
+    return true;
+  }
+}
+
+export const pwaUpdatePrompt = new PWAUpdatePrompt();
+
 const isPathWithin = (pathname: string, scope: AppScope): boolean => {
   const withoutTrailingSlash = scope.slice(0, -1);
   return pathname === withoutTrailingSlash || pathname.startsWith(scope);
@@ -72,6 +139,7 @@ export const registerPWA = async (): Promise<ServiceWorkerRegistration | null> =
     scope,
     updateViaCache: 'none',
   });
+  pwaUpdatePrompt.watch(registration);
   ensureManifestLink();
   return registration;
 };

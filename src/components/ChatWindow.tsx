@@ -12,6 +12,7 @@ import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
 import Fade from '@mui/material/Fade';
 import IconButton from '@mui/material/IconButton';
+import ListSubheader from '@mui/material/ListSubheader';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import Popover from '@mui/material/Popover';
@@ -69,11 +70,13 @@ import {
   type FeedbackRating,
   type ChatAttachment,
   type SavedConversation,
+  type SavedConversationSummary,
 } from '../services/api';
 import { AudioService, configureSpeechRecognition } from '../services/speech';
 import {
   enforceConversationCap,
   loadStore,
+  maxConversations,
   mergeStores,
   parseStore,
   saveStore,
@@ -88,6 +91,8 @@ import {
   reportConversationExport,
 } from '../services/telemetry';
 import { loadLazyModule } from '../services/lazyImport';
+import { announceCompletedConversation } from '../services/completionNotifications';
+import { writeClipboardText } from './managementDialogHelpers';
 
 // Management surfaces are not part of the core chat path. Load each only
 // after its menu action so new product capabilities do not tax every session's
@@ -111,6 +116,10 @@ const PreferencesDialog = React.lazy(() => loadLazyModule(async () => {
 const ExportConversationDialog = React.lazy(() => loadLazyModule(async () => {
   const module = await import('./ExportConversationDialog');
   return { default: module.ExportConversationDialog };
+}));
+const ExportConversationCollectionDialog = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./ExportConversationCollectionDialog');
+  return { default: module.ExportConversationCollectionDialog };
 }));
 const AttachmentTray = React.lazy(() => loadLazyModule(async () => {
   const module = await import('./AttachmentTray');
@@ -190,6 +199,7 @@ const starterIcon = (id: typeof STARTER_ACTIONS[number]['id']) => {
 const muteStorageKey = (userId: string): string => `chat_mute:v1:${encodeURIComponent(userId)}`;
 const railStorageKey = (userId: string): string => `chat_rail_collapsed:v1:${encodeURIComponent(userId)}`;
 const cloudBootstrapStorageKey = (userId: string): string => `chat_cloud_bootstrap:v1:${encodeURIComponent(userId)}`;
+const scrollStorageKey = (userId: string): string => `chat_scroll_positions:v1:${encodeURIComponent(userId)}`;
 const utf8Encoder = new TextEncoder();
 const byteLength = (value: string): number => utf8Encoder.encode(value).length;
 
@@ -198,18 +208,67 @@ const safeConversationQuery = (): string | null => {
   return value && /^conv_[A-Za-z0-9_-]{1,123}$/.test(value) ? value : null;
 };
 
-const safeShareQuery = (): string | null => {
-  const value = new URL(window.location.href).searchParams.get('share');
+const safeMessageQuery = (): string | null => {
+  const value = new URL(window.location.href).searchParams.get('message');
+  return value && /^[A-Za-z0-9_-]{1,200}$/.test(value) ? value : null;
+};
+
+const safeShareToken = (): string | null => {
+  const url = new URL(window.location.href);
+  const stateToken = history.state && typeof history.state === 'object'
+    ? (history.state as { wfShareToken?: unknown }).wfShareToken
+    : null;
+  const hashToken = new URLSearchParams(url.hash.replace(/^#/, '')).get('share');
+  // An explicit navigation always wins over the token retained on the current
+  // history entry; otherwise A -> #share=B could continue rendering A.
+  const value = hashToken ?? url.searchParams.get('share') ?? (typeof stateToken === 'string' ? stateToken : null);
   return value && /^[A-Za-z0-9_-]{20,128}$/.test(value) ? value : null;
+};
+
+const retainShareTokenInHistory = (token: string): void => {
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+  if (!url.searchParams.has('share') && !hashParams.has('share')) return;
+  url.searchParams.delete('share');
+  hashParams.delete('share');
+  url.hash = hashParams.toString();
+  const state = history.state && typeof history.state === 'object' ? history.state : {};
+  history.replaceState({ ...state, wfShareToken: token }, '', url);
 };
 
 const writeConversationUrl = (conversationId: string, mode: 'push' | 'replace'): void => {
   const url = new URL(window.location.href);
   url.searchParams.delete('share');
+  url.searchParams.delete('message');
+  url.hash = '';
   url.searchParams.set('conversation', conversationId);
-  const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), conversationId };
+  const previousState = history.state && typeof history.state === 'object' ? history.state as Record<string, unknown> : {};
+  const { wfShareToken: _shareToken, ...rest } = previousState;
+  const state = { ...rest, conversationId };
   if (mode === 'push') history.pushState(state, '', url);
   else history.replaceState(state, '', url);
+};
+
+const parseScrollPositions = (value: string | null): Record<string, number> => {
+  try {
+    const parsed: unknown = JSON.parse(value ?? '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).flatMap(([id, value]) => (
+      /^conv_[A-Za-z0-9_-]{1,123}$/.test(id) && typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? [[id, value]]
+        : []
+    )).slice(-MAX_CLOUD_CONVERSATIONS));
+  } catch {
+    return {};
+  }
+};
+
+const loadScrollPositions = (userId: string): Record<string, number> => {
+  try {
+    return parseScrollPositions(localStorage.getItem(scrollStorageKey(userId)));
+  } catch {
+    return {};
+  }
 };
 
 const cloudSyncable = (conversation: Conversation): boolean => (
@@ -219,6 +278,7 @@ const cloudSyncable = (conversation: Conversation): boolean => (
 const savedConversationToLocal = (
   saved: SavedConversation,
   local?: Conversation,
+  preserveLocalMetadata = false,
 ): Conversation => ({
   id: saved.id,
   title: saved.title,
@@ -230,7 +290,22 @@ const savedConversationToLocal = (
   cloudRevision: saved.revision,
   cloudUpdatedAt: saved.updated_at,
   cloudSyncedLocalUpdatedAt: saved.updated_at,
+  ...(preserveLocalMetadata && local ? {
+    metadataRevision: local.metadataRevision,
+    metadataUpdatedAt: local.metadataUpdatedAt,
+    pinnedAt: local.pinnedAt,
+    archivedAt: local.archivedAt,
+  } : savedMetadata(saved)),
   needsServerResync: true,
+});
+
+const savedMetadata = (saved: SavedConversationSummary): Pick<Conversation,
+  'metadataRevision' | 'metadataUpdatedAt' | 'pinnedAt' | 'archivedAt'
+> => ({
+  metadataRevision: saved.metadata_revision ?? 0,
+  metadataUpdatedAt: Date.now(),
+  pinnedAt: saved.pinned_at ?? undefined,
+  archivedAt: saved.archived_at ?? undefined,
 });
 
 const settleInBatches = async <T,>(
@@ -318,7 +393,7 @@ const telemetryErrorCode = (error: unknown): string => {
   return error instanceof Error ? error.name : 'unknown_error';
 };
 
-const noopEdit = (_id: string, _content: string) => {};
+const noopEdit = (_id: string, _content: string) => false;
 const noopRetry = (_id: string) => {};
 const noopRegenerate = () => {};
 
@@ -609,6 +684,9 @@ const SharedChatView: React.FC<{ token: string }> = ({ token }) => {
   }, []);
 
   useEffect(() => {
+    // replaceState is synchronous, so even a legacy query bearer is gone
+    // before the same-origin API request can emit a Referer.
+    retainShareTokenInHistory(token);
     const controller = new AbortController();
     void ChatAPI.getConversationShare(token, { signal: controller.signal })
       .then(({ share }) => {
@@ -769,6 +847,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [deleteConversationId, setDeleteConversationId] = useState<string | null>(null);
+  const [bulkDeleteConversationIds, setBulkDeleteConversationIds] = useState<readonly string[]>([]);
+  const [clearConversationId, setClearConversationId] = useState<string | null>(null);
   const [cloudReady, setCloudReady] = useState(isGuest);
   const [cloudStatus, setCloudStatus] = useState<'device' | 'loading' | 'saving' | 'synced' | 'offline' | 'error'>(
     isGuest ? 'device' : 'loading'
@@ -788,6 +868,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const [accountDataOpen, setAccountDataOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [exportConversationOpen, setExportConversationOpen] = useState(false);
+  const [exportCollectionIds, setExportCollectionIds] = useState<readonly string[]>([]);
   const [feedbackByMessage, setFeedbackByMessage] = useState<Record<string, FeedbackRating>>({});
   const [feedbackPending, setFeedbackPending] = useState<Record<string, boolean>>({});
   const [showExamples, setShowExamples] = useState(true);
@@ -809,6 +890,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const skipNextAutoFollowRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
+  const scrollPersistTimerRef = useRef<number | null>(null);
+  const scrollPositionsRef = useRef(loadScrollPositions(userId));
+  const pendingMessageTargetRef = useRef(safeMessageQuery());
   const spacerFrameRef = useRef<number | null>(null);
   const textFieldRef = useRef<HTMLDivElement>(null);
   const conversationsRef = useRef(conversations);
@@ -816,6 +900,19 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const tombstonesRef = useRef(initialChatState.tombstones);
   const pendingDeletionsRef = useRef(initialChatState.pendingServerDeletions);
   const pendingDeletionRetryAtRef = useRef<Record<string, number>>({});
+  const metadataRequestGenerationRef = useRef<Record<string, number>>({});
+  const metadataDesiredStateRef = useRef<Record<string, {
+    generation: number;
+    changes: { pinned?: boolean; archived?: boolean };
+    pinned: boolean;
+    archived: boolean;
+  }>>({});
+  const metadataSyncInFlightRef = useRef<Record<string, boolean>>({});
+  const metadataConfirmedStateRef = useRef<Record<string, {
+    pinnedAt?: number;
+    archivedAt?: number;
+    metadataRevision: number;
+  }>>({});
   const storageUnavailableRef = useRef(initialChatState.unavailable);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const pendingCaptchaRef = useRef<PendingCaptchaTurn | null>(null);
@@ -857,6 +954,17 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     mutedRef.current = isMuted;
     AudioService.setMuted(isMuted || !ENV.ENABLE_VOICE);
   }, [isMuted]);
+
+  const persistScrollPositions = useCallback(() => {
+    if (scrollPersistTimerRef.current !== null) {
+      window.clearTimeout(scrollPersistTimerRef.current);
+      scrollPersistTimerRef.current = null;
+    }
+    try {
+      if (Object.keys(scrollPositionsRef.current).length === 0) localStorage.removeItem(scrollStorageKey(userId));
+      else localStorage.setItem(scrollStorageKey(userId), JSON.stringify(scrollPositionsRef.current));
+    } catch { /* Scroll restoration is optional. */ }
+  }, [userId]);
 
   useEffect(() => {
     if (surfaceReadyReportedRef.current) return;
@@ -948,6 +1056,49 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     persistStore();
   }, [conversations, persistStore]);
   useEffect(() => { persistStore(); }, [currentConversationId, persistStore]);
+
+  useEffect(() => {
+    const saveBeforeUpdate = (event: Event) => {
+      const hasStagedAttachments = Object.values(composerAttachmentsRef.current)
+        .some(attachments => attachments.length > 0);
+      const hasOpenDialog = Boolean(document.querySelector(
+        '#wf-chat-window .MuiModal-root:not([aria-hidden="true"]):not(.MuiModal-hidden) [role="dialog"]',
+      ));
+      const hasOpenMessageEditor = Boolean(document.querySelector(
+        '#wf-chat-window [data-wf-message-editing="true"]',
+      ));
+      const hasPendingMetadata = Object.keys(metadataDesiredStateRef.current).length > 0
+        || Object.values(metadataSyncInFlightRef.current).some(Boolean);
+      if (
+        activeTurnRef.current
+        || pendingCaptchaRef.current
+        || isClearingRef.current
+        || attachmentBusyRef.current
+        || hasStagedAttachments
+        || hasOpenDialog
+        || hasOpenMessageEditor
+        || hasPendingMetadata
+      ) {
+        event.preventDefault();
+        setAnnouncement('Finish the current chat action or remove staged attachments before reloading the update.');
+        return;
+      }
+      if (storageUnavailableRef.current) {
+        event.preventDefault();
+        setAnnouncement('This browser cannot safely save the current chat before an update reload.');
+        return;
+      }
+      persistStore();
+      if (storageUnavailableRef.current) {
+        event.preventDefault();
+        setAnnouncement('The current chat could not be saved, so the update reload was cancelled.');
+        return;
+      }
+      persistScrollPositions();
+    };
+    window.addEventListener('wf-chat-save-before-update', saveBeforeUpdate);
+    return () => window.removeEventListener('wf-chat-save-before-update', saveBeforeUpdate);
+  }, [persistScrollPositions, persistStore]);
 
   const enforceCapAndQueueDeletion = useCallback((next: ConversationMap, keepId: string): ConversationMap => {
     const capped = enforceConversationCap(next, keepId);
@@ -1089,16 +1240,19 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
   const recordCloudSave = useCallback((saved: SavedConversation, syncedLocalUpdatedAt: number) => {
     setCloudLastSuccessfulAt(Date.now());
+    const applySave = (current: Conversation): Conversation => ({
+      ...current,
+      cloudRevision: saved.revision,
+      cloudUpdatedAt: saved.updated_at,
+      cloudSyncedLocalUpdatedAt: syncedLocalUpdatedAt,
+      ...(!metadataDesiredStateRef.current[saved.id]
+        && saved.metadata_revision >= (current.metadataRevision ?? 0) ? savedMetadata(saved) : {}),
+    });
     const currentRef = conversationsRef.current[saved.id];
     if (currentRef) {
       conversationsRef.current = {
         ...conversationsRef.current,
-        [saved.id]: {
-          ...currentRef,
-          cloudRevision: saved.revision,
-          cloudUpdatedAt: saved.updated_at,
-          cloudSyncedLocalUpdatedAt: syncedLocalUpdatedAt,
-        },
+        [saved.id]: applySave(currentRef),
       };
     }
     setConversations(previous => {
@@ -1106,12 +1260,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       if (!current) return previous;
       const next = {
         ...previous,
-        [saved.id]: {
-          ...current,
-          cloudRevision: saved.revision,
-          cloudUpdatedAt: saved.updated_at,
-          cloudSyncedLocalUpdatedAt: syncedLocalUpdatedAt,
-        },
+        [saved.id]: applySave(current),
       };
       conversationsRef.current = next;
       return next;
@@ -1120,19 +1269,43 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
   const applyCloudWinner = useCallback((saved: SavedConversation) => {
     setConversations(previous => {
+      if (tombstonesRef.current[saved.id] !== undefined) return previous;
       const local = previous[saved.id];
+      const preserveLocalMetadata = Boolean(local) && (
+        Boolean(metadataDesiredStateRef.current[saved.id])
+        || (local.metadataRevision ?? 0) > saved.metadata_revision
+      );
       const winner = !local || saved.updated_at >= local.updatedAt
-        ? savedConversationToLocal(saved, local)
+        ? savedConversationToLocal(saved, local, preserveLocalMetadata)
         : {
           ...local,
           cloudRevision: saved.revision,
           cloudUpdatedAt: saved.updated_at,
+          ...(!preserveLocalMetadata ? savedMetadata(saved) : {}),
         };
       const next = enforceCapAndQueueDeletion({ ...previous, [saved.id]: winner }, currentConversationIdRef.current);
       conversationsRef.current = next;
       return next;
     });
   }, [enforceCapAndQueueDeletion]);
+
+  const syncMetadataAfterSave = useCallback(async (
+    local: Conversation,
+    saved: SavedConversation,
+    signal: AbortSignal,
+  ): Promise<SavedConversation> => {
+    if (metadataDesiredStateRef.current[local.id]) return saved;
+    // A newer server metadata revision wins. Only project local state onto a
+    // just-created/equally-versioned row; explicit sidebar actions have their
+    // own conflict-aware path below.
+    if ((local.metadataRevision ?? 0) !== saved.metadata_revision) return saved;
+    const changes: { pinned?: boolean; archived?: boolean } = {};
+    if (Boolean(local.pinnedAt) !== Boolean(saved.pinned_at)) changes.pinned = Boolean(local.pinnedAt);
+    if (Boolean(local.archivedAt) !== Boolean(saved.archived_at)) changes.archived = Boolean(local.archivedAt);
+    if (!('pinned' in changes) && !('archived' in changes)) return saved;
+    const result = await ChatAPI.setSavedConversationState(saved.id, saved.metadata_revision, changes, { signal });
+    return { ...saved, ...result.conversation };
+  }, []);
 
   /**
    * A record that once had a cloud revision but is absent from a complete
@@ -1164,6 +1337,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     let selectedId = currentConversationIdRef.current;
     if (!next[selectedId]) {
       selectedId = Object.values(next)
+        .filter(conversation => !conversation.archivedAt)
         .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ?? generateConversationId();
       if (!next[selectedId]) next[selectedId] = createNewConversation(selectedId, welcomeMessage);
       currentConversationIdRef.current = selectedId;
@@ -1210,7 +1384,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     try {
       const result = await upsert(snapshot, snapshot.cloudRevision ?? 0);
       if (cloudSyncPausedRef.current || signal.aborted) return false;
-      recordCloudSave(result.conversation, snapshot.updatedAt);
+      const saved = await syncMetadataAfterSave(snapshot, result.conversation, signal);
+      if (cloudSyncPausedRef.current || signal.aborted) return false;
+      recordCloudSave(saved, snapshot.updatedAt);
       return true;
     } catch (error) {
       if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) return false;
@@ -1231,7 +1407,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           }
           const retried = await upsert(latestLocal, remote.revision);
           if (cloudSyncPausedRef.current || signal.aborted) return false;
-          recordCloudSave(retried.conversation, latestLocal.updatedAt);
+          const saved = await syncMetadataAfterSave(latestLocal, retried.conversation, signal);
+          if (cloudSyncPausedRef.current || signal.aborted) return false;
+          recordCloudSave(saved, latestLocal.updatedAt);
           return true;
         } catch (conflictError) {
           if (conflictError instanceof APIError && conflictError.code === 'not_found') {
@@ -1247,7 +1425,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       reportCloudFailure(telemetryErrorCode(error));
       return false;
     }
-  }, [applyCloudWinner, isGuest, recordCloudSave, removeRemotelyDeletedConversation, reportCloudFailure]);
+  }, [applyCloudWinner, isGuest, recordCloudSave, removeRemotelyDeletedConversation, reportCloudFailure, syncMetadataAfterSave]);
 
   const deleteCloudConversation = useCallback(async (conversation: Conversation) => {
     if (isGuest || !conversation.cloudRevision) return;
@@ -1437,6 +1615,195 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     });
   }, [abortActiveTurn, cancelPendingCaptcha, stopListening]);
 
+  const applyConversationMetadata = useCallback((
+    conversationId: string,
+    changes: { pinned?: boolean; archived?: boolean },
+    serverState?: SavedConversationSummary,
+  ) => {
+    setConversations(previous => {
+      const conversation = previous[conversationId];
+      if (!conversation) return previous;
+      const nextConversation: Conversation = {
+        ...conversation,
+        metadataUpdatedAt: Date.now(),
+        ...(serverState ? savedMetadata(serverState) : {}),
+        ...('pinned' in changes ? {
+          pinnedAt: changes.pinned ? (serverState?.pinned_at ?? conversation.pinnedAt ?? Date.now()) : undefined,
+        } : {}),
+        ...('archived' in changes ? {
+          archivedAt: changes.archived ? (serverState?.archived_at ?? conversation.archivedAt ?? Date.now()) : undefined,
+        } : {}),
+      };
+      const next = { ...previous, [conversationId]: nextConversation };
+      conversationsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const updateConversationLibraryState = useCallback(async (
+    conversationId: string,
+    changes: { pinned?: boolean; archived?: boolean },
+  ) => {
+    const before = conversationsRef.current[conversationId];
+    if (!before) return;
+    if (activeTurnRef.current?.conversationId === conversationId) {
+      setAnnouncement('Stop the current response before moving this chat.');
+      return;
+    }
+
+    const generation = (metadataRequestGenerationRef.current[conversationId] ?? 0) + 1;
+    metadataRequestGenerationRef.current[conversationId] = generation;
+    const pending = metadataDesiredStateRef.current[conversationId];
+    metadataDesiredStateRef.current[conversationId] = {
+      generation,
+      changes: { ...(pending?.changes ?? {}), ...changes },
+      pinned: changes.pinned ?? pending?.pinned ?? Boolean(before.pinnedAt),
+      archived: changes.archived ?? pending?.archived ?? Boolean(before.archivedAt),
+    };
+    applyConversationMetadata(conversationId, changes);
+
+    if (changes.archived && conversationId === currentConversationIdRef.current) {
+      const nextActive = Object.values(conversationsRef.current)
+        .filter(conversation => conversation.id !== conversationId && !conversation.archivedAt)
+        .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+      if (nextActive) handleSelectConversation(nextActive.id);
+      else if (Object.keys(conversationsRef.current).length < maxConversations()) createAndSelectConversation();
+      // At the cap, keep the newly archived chat selected. Creating a fresh
+      // replacement here would silently evict and queue deletion of a real
+      // archived chat merely because the user organized their history.
+    }
+
+    if (isGuest || before.cloudRevision === undefined) {
+      delete metadataDesiredStateRef.current[conversationId];
+      setAnnouncement(changes.archived === true ? 'Chat archived on this device.'
+        : changes.archived === false ? 'Chat restored.'
+          : changes.pinned ? 'Chat pinned.' : 'Chat unpinned.');
+      return;
+    }
+
+    if (!metadataConfirmedStateRef.current[conversationId]) {
+      metadataConfirmedStateRef.current[conversationId] = {
+        pinnedAt: before.pinnedAt,
+        archivedAt: before.archivedAt,
+        metadataRevision: before.metadataRevision ?? 0,
+      };
+    }
+    // One worker owns a conversation's metadata revision. Later pin/archive
+    // clicks only update the aggregate desired state; the worker loops until
+    // the server reflects that complete state, so cross-field actions cannot
+    // race each other at the same revision.
+    if (metadataSyncInFlightRef.current[conversationId]) return;
+    metadataSyncInFlightRef.current[conversationId] = true;
+
+    try {
+      while (metadataDesiredStateRef.current[conversationId]) {
+        const target = metadataDesiredStateRef.current[conversationId]!;
+        const current = conversationsRef.current[conversationId];
+        if (!current || current.cloudRevision === undefined) {
+          delete metadataDesiredStateRef.current[conversationId];
+          break;
+        }
+
+        let result;
+        try {
+          result = await ChatAPI.setSavedConversationState(
+            conversationId,
+            current.metadataRevision ?? 0,
+            target.changes,
+          );
+        } catch (error) {
+          if (!(error instanceof APIError) || error.code !== 'metadata_revision_conflict') throw error;
+          const latest = await ChatAPI.getSavedConversation(conversationId);
+          metadataConfirmedStateRef.current[conversationId] = {
+            pinnedAt: latest.conversation.pinned_at ?? undefined,
+            archivedAt: latest.conversation.archived_at ?? undefined,
+            metadataRevision: latest.conversation.metadata_revision,
+          };
+          const latestDesired = metadataDesiredStateRef.current[conversationId];
+          applyConversationMetadata(
+            conversationId,
+            latestDesired?.changes ?? {},
+            latest.conversation,
+          );
+          // A newer click that arrived during conflict hydration owns the
+          // next write. Do not commit the stale target before looping to it.
+          if (!latestDesired || latestDesired.generation !== target.generation) continue;
+          result = await ChatAPI.setSavedConversationState(
+            conversationId,
+            latest.conversation.metadata_revision,
+            target.changes,
+          );
+        }
+
+        metadataConfirmedStateRef.current[conversationId] = {
+          pinnedAt: result.conversation.pinned_at ?? undefined,
+          archivedAt: result.conversation.archived_at ?? undefined,
+          metadataRevision: result.conversation.metadata_revision,
+        };
+        const latestDesired = metadataDesiredStateRef.current[conversationId];
+        applyConversationMetadata(
+          conversationId,
+          latestDesired?.changes ?? {},
+          result.conversation,
+        );
+
+        if (!latestDesired || latestDesired.generation !== target.generation) continue;
+        delete metadataDesiredStateRef.current[conversationId];
+        delete metadataConfirmedStateRef.current[conversationId];
+        setAnnouncement('archived' in target.changes
+          ? target.archived ? 'Chat archived and synced.' : 'Chat restored and synced.'
+          : target.pinned ? 'Chat pinned and synced.' : 'Chat unpinned and synced.');
+      }
+    } catch (error) {
+      const confirmed = metadataConfirmedStateRef.current[conversationId];
+      delete metadataDesiredStateRef.current[conversationId];
+      delete metadataConfirmedStateRef.current[conversationId];
+      setConversations(previous => {
+        const current = previous[conversationId];
+        if (!current || !confirmed) return previous;
+        const restored = {
+          ...current,
+          pinnedAt: confirmed.pinnedAt,
+          archivedAt: confirmed.archivedAt,
+          metadataRevision: confirmed.metadataRevision,
+          metadataUpdatedAt: Date.now(),
+        };
+        const next = { ...previous, [conversationId]: restored };
+        conversationsRef.current = next;
+        return next;
+      });
+      setErrorMessage(error instanceof APIError && error.code === 'not_found'
+        ? 'That saved chat no longer exists on your account. Refresh history to reconcile this device.'
+        : 'The history change could not be synced. Check your connection and try again.');
+    } finally {
+      metadataSyncInFlightRef.current[conversationId] = false;
+    }
+  }, [applyConversationMetadata, createAndSelectConversation, handleSelectConversation, isGuest]);
+
+  const handlePinConversation = useCallback((conversationId: string, pinned: boolean) => {
+    void updateConversationLibraryState(conversationId, { pinned });
+  }, [updateConversationLibraryState]);
+
+  const handleArchiveConversation = useCallback((conversationId: string, archived: boolean) => {
+    void updateConversationLibraryState(conversationId, { archived });
+  }, [updateConversationLibraryState]);
+
+  const handleBulkArchive = useCallback((conversationIds: readonly string[]) => {
+    void settleInBatches(conversationIds.map(id => () => updateConversationLibraryState(id, { archived: true })));
+  }, [updateConversationLibraryState]);
+
+  const handleBulkRestore = useCallback((conversationIds: readonly string[]) => {
+    void settleInBatches(conversationIds.map(id => () => updateConversationLibraryState(id, { archived: false })));
+  }, [updateConversationLibraryState]);
+
+  const requestBulkDelete = useCallback((conversationIds: readonly string[]) => {
+    setBulkDeleteConversationIds([...conversationIds]);
+  }, []);
+
+  const requestBulkExport = useCallback((conversationIds: readonly string[]) => {
+    setExportCollectionIds([...conversationIds]);
+  }, []);
+
   const retryPendingDeletions = useCallback(() => {
     for (const conversationId of Object.keys(pendingDeletionsRef.current)) {
       if ((pendingDeletionRetryAtRef.current[conversationId] ?? 0) > Date.now()) continue;
@@ -1493,6 +1860,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     // tab writes this conversation again before seeing our update.
     tombstonesRef.current = { ...tombstonesRef.current, [conversationId]: Date.now() };
     pendingDeletionsRef.current = { ...pendingDeletionsRef.current, [conversationId]: Date.now() };
+    if (scrollPositionsRef.current[conversationId] !== undefined) {
+      const nextScrollPositions = { ...scrollPositionsRef.current };
+      delete nextScrollPositions[conversationId];
+      scrollPositionsRef.current = nextScrollPositions;
+      persistScrollPositions();
+    }
     setConversations(previous => {
       const next = { ...previous };
       delete next[conversationId];
@@ -1518,7 +1891,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       console.error('Failed to delete server conversation; will retry:', error);
     });
     if (conversationId === currentConversationIdRef.current) createAndSelectConversation();
-  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, deleteCloudConversation, persistStore]);
+  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, deleteCloudConversation, persistScrollPositions, persistStore]);
 
   const requestRenameConversation = useCallback((conversationId: string) => {
     const conversation = conversationsRef.current[conversationId];
@@ -1557,6 +1930,16 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     setAnnouncement('Conversation deleted.');
     reportClientEvent('conversation_deleted', { outcome: 'single' });
   }, [deleteConversationId, handleDeleteConversation]);
+
+  const confirmBulkDelete = useCallback(() => {
+    const ids = bulkDeleteConversationIds.filter(id => conversationsRef.current[id]);
+    ids.forEach(handleDeleteConversation);
+    setBulkDeleteConversationIds([]);
+    if (ids.length) {
+      setAnnouncement(`${ids.length} ${ids.length === 1 ? 'conversation' : 'conversations'} deleted.`);
+      reportClientEvent('conversation_deleted', { outcome: 'bulk', value: ids.length });
+    }
+  }, [bulkDeleteConversationIds, handleDeleteConversation]);
 
   const quiesceCloudSync = useCallback(() => {
     cloudSyncPausedRef.current = true;
@@ -1638,6 +2021,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     inputRef.current = '';
     composerAttachmentsRef.current = {};
     attachmentBusyRef.current = false;
+    scrollPositionsRef.current = {};
 
     setConversations(nextConversations);
     setCurrentConversationId(conversationId);
@@ -1679,6 +2063,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       localStorage.removeItem(keys.legacyConversations);
       localStorage.removeItem(keys.legacyCurrent);
       localStorage.removeItem(cloudBootstrapStorageKey(userId));
+      localStorage.removeItem(scrollStorageKey(userId));
     } catch {
       throw new Error('Browser storage could not be cleared.');
     }
@@ -1724,6 +2109,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           const page = await ChatAPI.listSavedConversations({
             limit: Math.min(50, MAX_CLOUD_CONVERSATIONS - summaries.length),
             ...(cursor ? { cursor } : {}),
+            includeArchived: true,
             signal: controller.signal,
           });
           summaries.push(...page.conversations);
@@ -1761,7 +2147,18 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
         const visibleSummaries = summaries.filter(summary => (
           tombstonesRef.current[summary.id] === undefined
-          && (initialHydration || conversationsRef.current[summary.id]?.cloudRevision !== summary.revision)
+          && (initialHydration
+            || conversationsRef.current[summary.id]?.cloudRevision !== summary.revision
+            || (conversationsRef.current[summary.id]?.metadataRevision ?? 0) !== (summary.metadata_revision ?? 0)
+            // Optimistic metadata is persisted so the UI remains stable while
+            // a request settles. After a reload there is no in-flight marker;
+            // an equal-revision mismatch means the request never committed,
+            // so hydrate the authoritative server state instead of retaining
+            // a phantom local pin/archive indefinitely.
+            || (!metadataDesiredStateRef.current[summary.id] && (
+              Boolean(conversationsRef.current[summary.id]?.pinnedAt) !== Boolean(summary.pinned_at)
+              || Boolean(conversationsRef.current[summary.id]?.archivedAt) !== Boolean(summary.archived_at)
+            )))
         ));
         const settled = await settleInBatches(
           visibleSummaries.map(summary => () => ChatAPI.getSavedConversation(summary.id, { signal: controller.signal }))
@@ -1798,21 +2195,29 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         // created a new one while cloud details were in flight.
         const applyInitialSelection = initialHydration && !cloudInitialSelectionResolvedRef.current;
         let merged = { ...conversationsRef.current };
-        if (applyInitialSelection && initialChatState.createdFallback && saved.length && !cloudSyncable(merged[initialChatState.currentId])) {
+        const hasActiveCloudChat = saved.some(conversation => !conversation.archived_at);
+        if (applyInitialSelection && initialChatState.createdFallback && hasActiveCloudChat && !cloudSyncable(merged[initialChatState.currentId])) {
           delete merged[initialChatState.currentId];
         }
         for (const remote of saved) {
+          if (tombstonesRef.current[remote.id] !== undefined) continue;
           const local = merged[remote.id];
+          const preserveLocalMetadata = Boolean(local) && (
+            Boolean(metadataDesiredStateRef.current[remote.id])
+            || (local.metadataRevision ?? 0) > remote.metadata_revision
+          );
           merged[remote.id] = !local || remote.updated_at >= local.updatedAt
-            ? savedConversationToLocal(remote, local)
+            ? savedConversationToLocal(remote, local, preserveLocalMetadata)
             : {
               ...local,
               cloudRevision: remote.revision,
               cloudUpdatedAt: remote.updated_at,
+              ...(!preserveLocalMetadata ? savedMetadata(remote) : {}),
             };
         }
 
         const newestCloudId = saved
+          .filter(conversation => !conversation.archived_at)
           .slice()
           .sort((left, right) => right.updated_at - left.updated_at)[0]?.id;
         const selectedBeforeRefresh = currentConversationIdRef.current;
@@ -1840,7 +2245,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           setShowExamples((merged[selectedId]?.messages.length ?? 0) <= 1);
           writeConversationUrl(selectedId, 'replace');
         }
-        if (!detailReadFailed) cloudInitialSelectionResolvedRef.current = true;
+        if (applyInitialSelection) cloudInitialSelectionResolvedRef.current = true;
 
         let bootstrapSucceeded = !tombstoneDeleteFailed && !detailReadFailed;
         let alreadyUploaded = false;
@@ -1947,7 +2352,19 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     if (isGuest) writeConversationUrl(currentConversationIdRef.current, 'replace');
     const handlePopState = () => {
       const conversationId = safeConversationQuery();
-      if (!conversationId || conversationId === currentConversationIdRef.current) return;
+      pendingMessageTargetRef.current = safeMessageQuery();
+      if (!conversationId) return;
+      if (conversationId === currentConversationIdRef.current) {
+        const targetMessageId = pendingMessageTargetRef.current;
+        const pane = messagesContainerRef.current;
+        const target = targetMessageId ? document.getElementById(`wf-message-${targetMessageId}`) : null;
+        if (pane && target) {
+          pendingMessageTargetRef.current = null;
+          pane.scrollTop = Math.max(0, pane.scrollTop + target.getBoundingClientRect().top - pane.getBoundingClientRect().top - 16);
+          target.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (conversationsRef.current[conversationId]) {
         handleSelectConversation(conversationId, false);
       } else {
@@ -1963,6 +2380,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   useEffect(() => {
     const keys = storageKeys(userId);
     const handleStorage = (event: StorageEvent) => {
+      if (event.key === scrollStorageKey(userId)) {
+        // A delete-all in another tab must also erase this tab's in-memory
+        // positions, or its next scroll/unmount could resurrect old chat ids.
+        scrollPositionsRef.current = parseScrollPositions(event.newValue);
+        return;
+      }
       if (event.key !== keys.store || !event.newValue) return;
       const remote = parseStore(event.newValue);
       if (!remote) return;
@@ -2120,29 +2543,43 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
   /** Transactionally resets the current conversation after the server confirms. */
   const handleClearCommand = useCallback(async (conversationId: string) => {
-    inputRef.current = '';
-    setInput('');
-    setConversationDraft(conversationId, '');
     setIsClearing(true);
     setErrorMessage('');
     try {
       await ChatAPI.clearConversation(conversationId);
       updateConversationById(conversationId, () => ({
-        title: 'New Chat',
         messages: [createWelcomeMessage(welcomeMessage)],
         draft: '',
         draftUpdatedAt: Date.now(),
         needsServerResync: false,
       }));
-      setShowExamples(true);
-      setAutoFollow(true);
+      if (currentConversationIdRef.current === conversationId) {
+        inputRef.current = '';
+        setInput('');
+        setShowExamples(true);
+        setAutoFollow(true);
+      }
+      setAnnouncement('Chat messages cleared. The chat remains in history.');
     } catch (error) {
       console.error('Failed to clear conversation:', error);
-      setErrorMessage('The server could not clear this conversation, so nothing was reset. Please retry.');
+      if (currentConversationIdRef.current === conversationId) {
+        setErrorMessage('The server could not clear this conversation, so nothing was reset. Please retry.');
+      }
     } finally {
       setIsClearing(false);
     }
-  }, [setConversationDraft, updateConversationById, welcomeMessage]);
+  }, [updateConversationById, welcomeMessage]);
+
+  const requestClearConversation = useCallback((conversationId: string) => {
+    if (conversationsRef.current[conversationId]) setClearConversationId(conversationId);
+  }, []);
+
+  const confirmClearConversation = useCallback(() => {
+    if (!clearConversationId) return;
+    const conversationId = clearConversationId;
+    setClearConversationId(null);
+    void handleClearCommand(conversationId);
+  }, [clearConversationId, handleClearCommand]);
 
   /**
    * Runs one chat turn transactionally: nothing is mutated until validation
@@ -2188,7 +2625,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     setAutoFollow(true);
 
     if (params.kind === 'send' && content.toLowerCase() === '/clear') {
-      await handleClearCommand(conversationId);
+      requestClearConversation(conversationId);
       return;
     }
 
@@ -2373,6 +2810,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         needsServerResync: false,
       }));
       setAnnouncement(assistantCompletionAnnouncement(result.text));
+      announceCompletedConversation();
       clearSentAttachments(conversationId, turnAttachments);
       // Hand the steps to the answer before clearActiveTurn drops them, so the
       // trail does not blink out at the moment the answer lands.
@@ -2492,8 +2930,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     clearSentAttachments,
     enforceCapAndQueueDeletion,
     getErrorText,
-    handleClearCommand,
     handleUsageCommand,
+    requestClearConversation,
     setConversationDraft,
     stopListening,
     updateConversationById,
@@ -2627,10 +3065,14 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   }, [branchGuard, enforceCapAndQueueDeletion]);
 
   const handleEditMessage = useCallback((id: string, newContent: string) => {
+    if (!isOnlineRef.current) {
+      setErrorMessage('You are offline. Reconnect before saving this edit.');
+      return false;
+    }
     const conversation = branchGuard();
-    if (!conversation) return;
+    if (!conversation) return false;
     const index = conversation.messages.findIndex(message => message.id === id);
-    if (index < 0) return;
+    if (index < 0) return false;
     const sourceMessage = conversation.messages[index];
     void runTurn({
       conversationId: conversation.id,
@@ -2642,6 +3084,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       forceReset: true,
       attachments: sourceMessage.attachments?.map(attachment => ({ ...attachment })),
     });
+    // Editing replaces the source row with a newly keyed message. The row's
+    // local action button cannot receive restored focus after it unmounts, so
+    // move focus to the stable transcript host after React commits the edit.
+    requestAnimationFrame(() => messagesContainerRef.current?.focus());
+    return true;
   }, [branchGuard, runTurn]);
 
   const handleRegenerateMessage = useCallback(() => {
@@ -2775,6 +3222,24 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     reportConversationExport(outcome.format, outcome.delivery, outcome.messageCount);
   }, []);
 
+  const handleCollectionExportCompleted = useCallback((outcome: {
+    format: 'markdown' | 'json';
+    conversationCount: number;
+  }) => {
+    const messageCount = exportCollectionIds.reduce((total, id) => (
+      total + (conversationsRef.current[id]?.messages.length ?? 0)
+    ), 0);
+    reportConversationExport(outcome.format, 'download', messageCount);
+    setAnnouncement(`${outcome.conversationCount} ${outcome.conversationCount === 1 ? 'chat' : 'chats'} exported.`);
+  }, [exportCollectionIds]);
+
+  const handleCopyMessagePermalink = useCallback(async (targetMessageId: string) => {
+    const url = new URL('/pages/ai/', window.location.origin);
+    url.searchParams.set('conversation', currentConversationIdRef.current);
+    url.searchParams.set('message', targetMessageId);
+    await writeClipboardText(url.href);
+  }, []);
+
   const handlePrintConversation = useCallback(() => {
     setChatMenuAnchor(null);
     requestAnimationFrame(() => window.print());
@@ -2821,8 +3286,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
   const handleMenuClear = useCallback(() => {
     setChatMenuAnchor(null);
-    void handleClearCommand(currentConversationIdRef.current);
-  }, [handleClearCommand]);
+    requestClearConversation(currentConversationIdRef.current);
+  }, [requestClearConversation]);
 
   // Stable identities: InputArea and ConversationSidebar are memoized, and a
   // fresh arrow here would defeat that on every streaming frame.
@@ -2886,7 +3351,14 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     // and flicker on every use.
     if (programmaticScrollRef.current) return;
     syncAutoFollow(element);
-  }, [syncAutoFollow]);
+    scrollPositionsRef.current = {
+      ...scrollPositionsRef.current,
+      [currentConversationIdRef.current]: Math.max(0, Math.round(element.scrollTop)),
+    };
+    if (scrollPersistTimerRef.current === null) {
+      scrollPersistTimerRef.current = window.setTimeout(persistScrollPositions, 250);
+    }
+  }, [persistScrollPositions, syncAutoFollow]);
 
   /** Ends the programmatic-scroll guard, preferring `scrollend` to the timer. */
   const armProgrammaticScrollGuard = useCallback((element: HTMLElement) => {
@@ -2999,9 +3471,48 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       anchoredConversationRef.current = currentConversationId;
       lastAnchoredMessageIdRef.current = lastUserMessageId ?? null;
       if (tailSpacerRef.current) tailSpacerRef.current.style.height = '0px';
-      pane.scrollTop = pane.scrollHeight;
-      setAutoFollow(true);
+      const targetMessageId = pendingMessageTargetRef.current;
+      const target = targetMessageId
+        ? document.getElementById(`wf-message-${targetMessageId}`)
+        : null;
+      if (target) {
+        pendingMessageTargetRef.current = null;
+        const top = pane.scrollTop + (target.getBoundingClientRect().top - pane.getBoundingClientRect().top) - 16;
+        pane.scrollTop = Math.max(0, top);
+        target.classList.add('wf-message-permalink-target');
+        target.focus({ preventScroll: true });
+        window.setTimeout(() => target.classList.remove('wf-message-permalink-target'), 2200);
+        skipNextAutoFollowRef.current = true;
+        setAutoFollow(false);
+        return;
+      }
+      const restored = scrollPositionsRef.current[currentConversationId];
+      if (restored !== undefined) {
+        pane.scrollTop = restored;
+        const following = pane.scrollHeight - pane.scrollTop - pane.clientHeight < TAIL_FOLLOW_SLACK_PX;
+        skipNextAutoFollowRef.current = !following;
+        setAutoFollow(following);
+      } else {
+        pane.scrollTop = pane.scrollHeight;
+        setAutoFollow(true);
+      }
       return;
+    }
+
+    const pendingMessageId = pendingMessageTargetRef.current;
+    if (pendingMessageId) {
+      const target = document.getElementById(`wf-message-${pendingMessageId}`);
+      if (target) {
+        pendingMessageTargetRef.current = null;
+        const top = pane.scrollTop + (target.getBoundingClientRect().top - pane.getBoundingClientRect().top) - 16;
+        pane.scrollTop = Math.max(0, top);
+        target.classList.add('wf-message-permalink-target');
+        target.focus({ preventScroll: true });
+        window.setTimeout(() => target.classList.remove('wf-message-permalink-target'), 2200);
+        skipNextAutoFollowRef.current = true;
+        setAutoFollow(false);
+        return;
+      }
     }
 
     if (!lastUserMessageId || showCaptcha) return;
@@ -3029,6 +3540,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   }, [
     armProgrammaticScrollGuard,
     currentConversationId,
+    currentConversation.messages.length,
     lastUserMessageId,
     measureTailSpacer,
     reduceMotion,
@@ -3083,6 +3595,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     if (programmaticScrollTimerRef.current !== null) {
       window.clearTimeout(programmaticScrollTimerRef.current);
     }
+    persistScrollPositions();
     if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
       // Unmount (navigation/account switch) interrupted a turn; persist the
       // resync marker directly since no further renders will run. A branch
@@ -3110,7 +3623,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
     cleanupTurnstileWidget();
     AudioService.stop();
-  }, [cleanupTurnstileWidget, userId]);
+  }, [cleanupTurnstileWidget, persistScrollPositions, userId]);
 
   const sortedConversations = useMemo(
     () => Object.values(conversations).sort((a, b) => b.updatedAt - a.updatedAt),
@@ -3185,6 +3698,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     : visibleCloudStatus === 'synced' ? 'This chat is saved to your account.'
       : 'Changes remain available on this device.');
   const deleteConversation = deleteConversationId ? conversations[deleteConversationId] : undefined;
+  const clearConversation = clearConversationId ? conversations[clearConversationId] : undefined;
+  const exportCollectionConversations = useMemo(() => exportCollectionIds.flatMap(id => (
+    conversations[id] ? [conversations[id]] : []
+  )), [conversations, exportCollectionIds]);
   const retryableFailedMessage = useMemo(() => {
     for (let index = currentConversation.messages.length - 1; index >= 0; index -= 1) {
       const message = currentConversation.messages[index];
@@ -3225,6 +3742,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           onDeleteConversation={requestDeleteConversation}
           onNewConversation={handleNewConversation}
           onRenameConversation={requestRenameConversation}
+          onPinConversation={handlePinConversation}
+          onArchiveConversation={handleArchiveConversation}
+          onBulkArchive={handleBulkArchive}
+          onBulkRestore={handleBulkRestore}
+          onBulkDelete={requestBulkDelete}
+          onBulkExport={requestBulkExport}
           onSearchUsed={handleHistorySearchUsed}
           onSearchResultOpened={handleHistoryResultOpened}
           desktopCollapsed={desktopRailCollapsed}
@@ -3265,9 +3788,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             >
               {visibleCloudStatus === 'loading' || visibleCloudStatus === 'saving'
                 ? <CircularProgress size={12} />
-                : visibleCloudStatus === 'offline' || visibleCloudStatus === 'error'
-                  ? <CloudOffOutlinedIcon sx={{ fontSize: 15 }} />
-                  : <CloudDoneOutlinedIcon sx={{ fontSize: 15 }} />}
+                : visibleCloudStatus === 'synced'
+                  ? <CloudDoneOutlinedIcon sx={{ fontSize: 15 }} />
+                  : <CloudOffOutlinedIcon sx={{ fontSize: 15 }} />}
               <Typography component="span" sx={{ display: { xs: 'none', sm: 'block' }, fontSize: 11.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>{cloudStatusLabel}</Typography>
             </ButtonBase>
           </Tooltip>
@@ -3368,7 +3891,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           open={Boolean(chatMenuAnchor)}
           onClose={() => setChatMenuAnchor(null)}
           container={() => document.getElementById('wf-chat-window')}
+          slotProps={{ list: { 'aria-label': 'Chat actions' } }}
         >
+          <ListSubheader disableSticky component="div">Conversation</ListSubheader>
           <MenuItem disabled={isLoading} onClick={() => {
             setChatMenuAnchor(null);
             requestRenameConversation(currentConversationIdRef.current);
@@ -3384,6 +3909,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
               <LinkOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Share links
             </MenuItem>
           )}
+          <Divider />
+          <ListSubheader disableSticky component="div">Tools</ListSubheader>
           {!isGuest && (
             <MenuItem onClick={() => {
               setChatMenuAnchor(null);
@@ -3392,16 +3919,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
               <SupportAgentIcon fontSize="small" sx={{ mr: 1.25 }} />Support cases
             </MenuItem>
           )}
-          <Divider />
           <MenuItem onClick={handleExportConversation}>
             <DownloadOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Export conversation
           </MenuItem>
           <MenuItem onClick={handlePrintConversation}>
             <PrintOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Print
-          </MenuItem>
-          <Divider />
-          <MenuItem disabled={isLoading || !isOnline} onClick={handleMenuClear}>
-            <RestartAltIcon fontSize="small" sx={{ mr: 1.25 }} />Clear chat
           </MenuItem>
           <MenuItem disabled={isLoading || !isOnline} onClick={handleMenuUsage}>
             <DataUsageOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Usage
@@ -3420,6 +3942,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
               <ManageAccountsOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Account data
             </MenuItem>
           )}
+          <Divider />
+          <ListSubheader disableSticky component="div">Manage</ListSubheader>
+          <MenuItem disabled={isLoading || !isOnline} onClick={handleMenuClear}>
+            <RestartAltIcon fontSize="small" sx={{ mr: 1.25 }} />Clear messages
+          </MenuItem>
           <MenuItem disabled={isLoading} sx={{ color: 'error.main' }} onClick={() => {
             setChatMenuAnchor(null);
             requestDeleteConversation(currentConversationIdRef.current);
@@ -3475,6 +4002,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
                       feedback={feedbackByMessage[message.id]}
                       feedbackPending={Boolean(feedbackPending[message.id])}
                       onFeedback={handleSubmitFeedback}
+                      onCopyPermalink={handleCopyMessagePermalink}
                     />
                   </React.Fragment>
                 );
@@ -3538,7 +4066,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
                   <Typography sx={{ display: 'flex', alignItems: 'center', gap: 0.75, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'text.secondary', mb: 1.5 }}>
                     <LightbulbIcon sx={{ fontSize: 16 }} /> Start with a task
                   </Typography>
-                  <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: { xs: 0.75, sm: 1.25 } }}>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: { xs: 0.75, sm: 1.25 } }}>
                     {STARTER_ACTIONS.map(starter => (
                       <Box
                         key={starter.id}
@@ -3714,6 +4242,42 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         </DialogActions>
       </Dialog>
 
+      <Dialog
+        open={Boolean(clearConversationId)}
+        onClose={() => setClearConversationId(null)}
+        aria-labelledby="wf-clear-chat-title"
+        container={() => document.getElementById('wf-chat-window')}
+      >
+        <DialogTitle id="wf-clear-chat-title">Clear messages?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            All messages in “{clearConversation?.title ?? 'this chat'}” will be removed. The chat and its title will remain in history. This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setClearConversationId(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={confirmClearConversation}>Clear messages</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={bulkDeleteConversationIds.length > 0}
+        onClose={() => setBulkDeleteConversationIds([])}
+        aria-labelledby="wf-bulk-delete-chat-title"
+        container={() => document.getElementById('wf-chat-window')}
+      >
+        <DialogTitle id="wf-bulk-delete-chat-title">Delete selected chats?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {bulkDeleteConversationIds.length} selected {bulkDeleteConversationIds.length === 1 ? 'chat' : 'chats'} will be removed from this device and queued for secure server deletion. This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBulkDeleteConversationIds([])}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={confirmBulkDelete}>Delete selected</Button>
+        </DialogActions>
+      </Dialog>
+
       {!isGuest && shareLinksOpen && (
         <React.Suspense fallback={null}>
           <ShareLinksDialog
@@ -3749,7 +4313,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             signedIn
             onDeleteAllStarting={quiesceCloudSync}
             onDeleteAllSucceeded={handleDeleteAllSavedDataSucceeded}
-            onDeleteAllFinished={resumeCloudSync}
+            onDeleteAllFinished={({ serverDeleted, localResetSucceeded }) => {
+              // If the irreversible server deletion succeeded but the local
+              // reset failed, keep syncing paused. Resuming here could upload
+              // an unsynced in-memory conversation and recreate account data.
+              if (!serverDeleted || localResetSucceeded) resumeCloudSync();
+            }}
             onExportDownloaded={() => setAnnouncement('Your saved AI chat data export was downloaded.')}
           />
         </React.Suspense>
@@ -3775,16 +4344,35 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           />
         </React.Suspense>
       )}
+
+      {exportCollectionIds.length > 0 && (
+        <React.Suspense fallback={null}>
+          <ExportConversationCollectionDialog
+            open
+            onClose={() => setExportCollectionIds([])}
+            conversations={exportCollectionConversations}
+            onCompleted={handleCollectionExportCompleted}
+          />
+        </React.Suspense>
+      )}
     </Box>
   );
 };
 
 export const ChatWindow: React.FC<ChatWindowProps> = (props) => {
-  const [shareToken, setShareToken] = useState(safeShareQuery);
+  const [shareToken, setShareToken] = useState(safeShareToken);
   useEffect(() => {
-    const handlePopState = () => setShareToken(safeShareQuery());
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    const handleNavigation = () => {
+      const token = safeShareToken();
+      if (token) retainShareTokenInHistory(token);
+      setShareToken(token);
+    };
+    window.addEventListener('popstate', handleNavigation);
+    window.addEventListener('hashchange', handleNavigation);
+    return () => {
+      window.removeEventListener('popstate', handleNavigation);
+      window.removeEventListener('hashchange', handleNavigation);
+    };
   }, []);
   return shareToken ? <SharedChatView key={shareToken} token={shareToken} /> : <InteractiveChatWindow {...props} />;
 };

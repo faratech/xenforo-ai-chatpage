@@ -220,6 +220,22 @@ const normalizeConversation = (id: string, value: unknown): Conversation | null 
   if (typeof value.cloudSyncedLocalUpdatedAt === 'number' && Number.isFinite(value.cloudSyncedLocalUpdatedAt)) {
     conversation.cloudSyncedLocalUpdatedAt = value.cloudSyncedLocalUpdatedAt;
   }
+  if (typeof value.pinnedAt === 'number' && Number.isFinite(value.pinnedAt) && value.pinnedAt > 0) {
+    conversation.pinnedAt = value.pinnedAt;
+  }
+  if (typeof value.archivedAt === 'number' && Number.isFinite(value.archivedAt) && value.archivedAt > 0) {
+    conversation.archivedAt = value.archivedAt;
+  }
+  if (
+    typeof value.metadataRevision === 'number'
+    && Number.isSafeInteger(value.metadataRevision)
+    && value.metadataRevision >= 0
+  ) {
+    conversation.metadataRevision = value.metadataRevision;
+  }
+  if (typeof value.metadataUpdatedAt === 'number' && Number.isFinite(value.metadataUpdatedAt)) {
+    conversation.metadataUpdatedAt = value.metadataUpdatedAt;
+  }
   if (value.needsServerResync === true) conversation.needsServerResync = true;
   return conversation;
 };
@@ -324,26 +340,39 @@ export const applyTombstones = (store: ChatStoreV4): ChatStoreV4 => {
 };
 
 /**
- * Enforces the configured cap exactly: the current conversation always
- * survives; the remaining slots go to the most recently updated others.
+ * Enforces the configured cap exactly. The current conversation survives
+ * first, followed by pinned conversations, then the most recently updated
+ * remaining conversations. Stable id ordering resolves otherwise-equal rows
+ * so tabs converge on the same retained set.
  */
 export const enforceConversationCap = (
   conversations: ConversationMap,
   keepConversationId: string,
 ): ConversationMap => {
   const max = maxConversations();
-  const entries = Object.entries(conversations)
-    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
+  const entries = Object.entries(conversations).sort(([idA, a], [idB, b]) => {
+    const currentDifference = Number(idB === keepConversationId) - Number(idA === keepConversationId);
+    if (currentDifference !== 0) return currentDifference;
+    const pinnedDifference = Number(Boolean(b.pinnedAt)) - Number(Boolean(a.pinnedAt));
+    if (pinnedDifference !== 0) return pinnedDifference;
+    const updatedDifference = b.updatedAt - a.updatedAt;
+    return updatedDifference !== 0 ? updatedDifference : idA.localeCompare(idB);
+  });
   const result: ConversationMap = {};
-  if (conversations[keepConversationId]) result[keepConversationId] = conversations[keepConversationId];
   for (const [id, conversation] of entries) {
     if (Object.keys(result).length >= max) break;
-    if (!result[id]) result[id] = conversation;
+    result[id] = conversation;
   }
   return result;
 };
 
-/** Newest-updatedAt wins per conversation; tombstones union with max timestamp. */
+const selectMetadataWinner = (local: Conversation, remote: Conversation): Conversation => {
+  const revisionDifference = (remote.metadataRevision ?? 0) - (local.metadataRevision ?? 0);
+  if (revisionDifference !== 0) return revisionDifference > 0 ? remote : local;
+  return (remote.metadataUpdatedAt ?? 0) > (local.metadataUpdatedAt ?? 0) ? remote : local;
+};
+
+/** Content, draft, cloud, and library metadata clocks merge independently per conversation. */
 export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV4 => {
   const conversations: ConversationMap = { ...local.conversations };
   for (const [id, conversation] of Object.entries(remote.conversations)) {
@@ -359,6 +388,7 @@ export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV
     const cloudWinner = (conversation.cloudRevision ?? 0) > (existing.cloudRevision ?? 0)
       ? conversation
       : existing;
+    const metadataWinner = selectMetadataWinner(existing, conversation);
     conversations[id] = {
       ...contentWinner,
       draft: draftWinner.draft,
@@ -366,6 +396,10 @@ export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV
       cloudRevision: cloudWinner.cloudRevision,
       cloudUpdatedAt: cloudWinner.cloudUpdatedAt,
       cloudSyncedLocalUpdatedAt: cloudWinner.cloudSyncedLocalUpdatedAt,
+      pinnedAt: metadataWinner.pinnedAt,
+      archivedAt: metadataWinner.archivedAt,
+      metadataRevision: metadataWinner.metadataRevision,
+      metadataUpdatedAt: metadataWinner.metadataUpdatedAt,
     };
   }
   const tombstones: Record<string, number> = { ...local.tombstones };
@@ -489,8 +523,8 @@ export interface SaveResult {
 
 /**
  * Persists the store: merges the latest on-disk envelope before every write,
- * enforces the cap exactly, and on quota pressure evicts the oldest
- * non-current conversations until the write fits. Deletion markers are not
+ * enforces the cap exactly, and on quota pressure evicts unpinned conversations
+ * before pinned ones (oldest first within each group). Deletion markers are not
  * aged out locally: an offline tab can return long after a fixed TTL, and an
  * unconfirmed server deletion must still defeat that stale transcript.
  */
@@ -550,7 +584,10 @@ export const saveStore = (
       }
       const evictable = Object.values(prepared.conversations)
         .filter(conversation => conversation.id !== currentId)
-        .sort((a, b) => a.updatedAt - b.updatedAt);
+        .sort((a, b) => {
+          const pinnedDifference = Number(Boolean(a.pinnedAt)) - Number(Boolean(b.pinnedAt));
+          return pinnedDifference !== 0 ? pinnedDifference : a.updatedAt - b.updatedAt;
+        });
       if (!evictable.length) {
         return { persisted: false, evictedIds, store: prepared };
       }

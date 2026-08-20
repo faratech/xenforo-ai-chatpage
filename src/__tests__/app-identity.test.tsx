@@ -8,6 +8,12 @@ const identityMocks = vi.hoisted(() => ({
   setCsrfToken: vi.fn(),
 }));
 
+const pwaMocks = vi.hoisted(() => ({
+  available: false,
+  activate: vi.fn(),
+  subscribe: vi.fn(),
+}));
+
 vi.mock('../services/api', async importOriginal => {
   const actual = await importOriginal<typeof import('../services/api')>();
   return {
@@ -36,10 +42,20 @@ vi.mock('../components/ChatWindow', () => ({
   ),
 }));
 
+vi.mock('../services/pwa', () => ({
+  pwaUpdatePrompt: {
+    get available() { return pwaMocks.available; },
+    activate: pwaMocks.activate,
+    subscribe: pwaMocks.subscribe,
+  },
+}));
+
 import { APIError } from '../services/api';
 import App, { IDENTITY_FRESHNESS_MS } from '../App';
 
 let now = 10_000;
+const serviceWorkerAddEventListener = vi.fn();
+const serviceWorkerRemoveEventListener = vi.fn();
 
 beforeAll(() => {
   Object.defineProperty(window, 'matchMedia', {
@@ -55,6 +71,13 @@ beforeAll(() => {
       dispatchEvent: vi.fn(),
     })),
   });
+  Object.defineProperty(navigator, 'serviceWorker', {
+    configurable: true,
+    value: {
+      addEventListener: serviceWorkerAddEventListener,
+      removeEventListener: serviceWorkerRemoveEventListener,
+    },
+  });
 });
 
 beforeEach(() => {
@@ -62,6 +85,14 @@ beforeEach(() => {
   identityMocks.getUserData.mockReset();
   identityMocks.setExpectedIdentityId.mockReset();
   identityMocks.setCsrfToken.mockReset();
+  pwaMocks.available = false;
+  pwaMocks.activate.mockReset().mockReturnValue(true);
+  pwaMocks.subscribe.mockReset().mockImplementation((listener: (available: boolean) => void) => {
+    listener(pwaMocks.available);
+    return () => undefined;
+  });
+  serviceWorkerAddEventListener.mockReset();
+  serviceWorkerRemoveEventListener.mockReset();
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -89,6 +120,24 @@ const dispatchPageShow = (persisted: boolean) => {
 };
 
 describe('identity lifecycle', () => {
+  it('leaves a waiting PWA update untouched when the chat vetoes the pre-reload save event', async () => {
+    pwaMocks.available = true;
+    identityMocks.getUserData.mockResolvedValue(user(42));
+    const vetoActiveTurn = vi.fn((event: Event) => event.preventDefault());
+    window.addEventListener('wf-chat-save-before-update', vetoActiveTurn);
+
+    render(<App />);
+    await screen.findByText('chat-user-42');
+    fireEvent.click(screen.getByRole('button', { name: 'Reload update' }));
+
+    expect(vetoActiveTurn).toHaveBeenCalledWith(expect.objectContaining({ cancelable: true }));
+    expect(pwaMocks.activate).not.toHaveBeenCalled();
+    expect(serviceWorkerAddEventListener).not.toHaveBeenCalled();
+    expect(screen.getByText('A new chat version is ready.')).toBeInTheDocument();
+
+    window.removeEventListener('wf-chat-save-before-update', vetoActiveTurn);
+  });
+
   it('consumes the early bootstrap promise without issuing a second identity request', async () => {
     render(<App initialIdentityPromise={Promise.resolve(user(42))} />);
     expect(await screen.findByText('chat-user-42')).toBeInTheDocument();

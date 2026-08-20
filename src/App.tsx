@@ -6,6 +6,8 @@ import CircularProgress from '@mui/material/CircularProgress';
 import { APIError, ChatAPI } from './services/api';
 import { installClientTelemetry } from './services/telemetry';
 import { loadLazyModule } from './services/lazyImport';
+import { installCompletionAttentionListeners } from './services/completionNotifications';
+import { pwaUpdatePrompt } from './services/pwa';
 import { ENV } from './config/env';
 import type { UserData } from './types';
 import './App.css';
@@ -51,6 +53,7 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
   const [revalidationNotice, setRevalidationNotice] = useState('');
   const [identityLocked, setIdentityLocked] = useState(false);
   const [identityVerificationGeneration, setIdentityVerificationGeneration] = useState(0);
+  const [updateAvailable, setUpdateAvailable] = useState(pwaUpdatePrompt.available);
   const identityRequestRef = useRef<Promise<void> | null>(null);
   const initialIdentityRequestRef = useRef(initialIdentityPromise);
   const identityRef = useRef<ChatIdentity | null>(null);
@@ -185,6 +188,28 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
   }, [fetchIdentity]);
 
   useEffect(() => installClientTelemetry(), []);
+  useEffect(() => installCompletionAttentionListeners(), []);
+  useEffect(() => pwaUpdatePrompt.subscribe(setUpdateAvailable), []);
+
+  const activateUpdate = useCallback(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const saveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    // Active turns veto the reload synchronously. The waiting worker stays
+    // available so the user can retry after the response finishes or stops.
+    if (!window.dispatchEvent(saveEvent)) return;
+    let reloaded = false;
+    const reload = () => {
+      if (reloaded) return;
+      reloaded = true;
+      window.location.reload();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', reload, { once: true });
+    if (!pwaUpdatePrompt.activate()) {
+      navigator.serviceWorker.removeEventListener('controllerchange', reload);
+      return;
+    }
+    window.setTimeout(reload, 2_000);
+  }, []);
 
   useEffect(() => {
     const onActivation = () => {
@@ -246,6 +271,25 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
 
   return (
     <Box className="wf-app" sx={{ position: 'relative' }} aria-busy={revalidating || identityLocked}>
+      {updateAvailable && (
+        <Alert
+          severity="info"
+          role="status"
+          action={<Button color="inherit" size="small" onClick={activateUpdate}>Reload update</Button>}
+          sx={{
+            position: 'absolute',
+            zIndex: (t) => t.zIndex.modal + 1,
+            top: 8,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 'max-content',
+            maxWidth: 'calc(100% - 16px)',
+            boxShadow: 3,
+          }}
+        >
+          A new chat version is ready.
+        </Alert>
+      )}
       {(revalidating || identityLocked) && (
         <Box
           aria-label="Rechecking chat identity"

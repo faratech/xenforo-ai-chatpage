@@ -123,6 +123,10 @@ describe('storage migrations', () => {
       cloudRevision: 7,
       cloudUpdatedAt: 1_400,
       cloudSyncedLocalUpdatedAt: 1_000,
+      pinnedAt: 1_600,
+      archivedAt: 1_700,
+      metadataRevision: 3,
+      metadataUpdatedAt: 1_800,
       messages: [{
         id: 'msg_ai',
         role: 'ai',
@@ -144,6 +148,10 @@ describe('storage migrations', () => {
       cloudRevision: 7,
       cloudUpdatedAt: 1_400,
       cloudSyncedLocalUpdatedAt: 1_000,
+      pinnedAt: 1_600,
+      archivedAt: 1_700,
+      metadataRevision: 3,
+      metadataUpdatedAt: 1_800,
     });
     expect(reloaded.messages[0]).toMatchObject({
       responseId: 'resp_1',
@@ -203,6 +211,26 @@ describe('storage migrations', () => {
     expect(parseStore('{"version":2,"conversations":{}}')).toBeNull();
     expect(parseStore('not json')).toBeNull();
     expect(parseStore(null)).toBeNull();
+  });
+
+  it('drops malformed library metadata without rejecting the conversation', () => {
+    const malformed: Record<string, unknown> = {
+      ...conversation('conv_1', 1_000),
+      pinnedAt: -1,
+      archivedAt: 'yesterday',
+      metadataRevision: 1.5,
+      metadataUpdatedAt: Number.POSITIVE_INFINITY,
+    };
+
+    const parsed = parseStore(JSON.stringify({
+      ...emptyStore(),
+      conversations: { conv_1: malformed },
+    }));
+
+    expect(parsed?.conversations.conv_1).not.toHaveProperty('pinnedAt');
+    expect(parsed?.conversations.conv_1).not.toHaveProperty('archivedAt');
+    expect(parsed?.conversations.conv_1).not.toHaveProperty('metadataRevision');
+    expect(parsed?.conversations.conv_1).not.toHaveProperty('metadataUpdatedAt');
   });
 });
 
@@ -324,6 +352,58 @@ describe('tombstones', () => {
       cloudSyncedLocalUpdatedAt: 1_000,
     });
   });
+
+  it('merges library metadata independently, preferring revision before its local clock', () => {
+    const merged = mergeStores(
+      {
+        ...emptyStore(),
+        conversations: {
+          conv_a: conversation('conv_a', 4_000, {
+            title: 'newer transcript',
+            pinnedAt: 3_000,
+            metadataRevision: 4,
+            metadataUpdatedAt: 9_000,
+          }),
+          conv_b: conversation('conv_b', 1_000, {
+            archivedAt: 2_000,
+            metadataRevision: 7,
+            metadataUpdatedAt: 2_000,
+          }),
+        },
+      },
+      {
+        ...emptyStore(),
+        conversations: {
+          conv_a: conversation('conv_a', 2_000, {
+            title: 'older transcript',
+            archivedAt: 3_500,
+            metadataRevision: 5,
+            metadataUpdatedAt: 3_500,
+          }),
+          conv_b: conversation('conv_b', 3_000, {
+            pinnedAt: 4_000,
+            metadataRevision: 7,
+            metadataUpdatedAt: 4_000,
+          }),
+        },
+      },
+    );
+
+    expect(merged.conversations.conv_a).toMatchObject({
+      title: 'newer transcript',
+      archivedAt: 3_500,
+      metadataRevision: 5,
+      metadataUpdatedAt: 3_500,
+    });
+    expect(merged.conversations.conv_a.pinnedAt).toBeUndefined();
+    expect(merged.conversations.conv_b).toMatchObject({
+      title: 'Conversation conv_b',
+      pinnedAt: 4_000,
+      metadataRevision: 7,
+      metadataUpdatedAt: 4_000,
+    });
+    expect(merged.conversations.conv_b.archivedAt).toBeUndefined();
+  });
 });
 
 describe('conversation cap', () => {
@@ -339,6 +419,24 @@ describe('conversation cap', () => {
     // The newest 49 others survive; conv_1 .. conv_5 (oldest) do not.
     expect(capped.conv_5).toBeUndefined();
     expect(capped.conv_54).toBeDefined();
+  });
+
+  it('keeps pinned conversations ahead of newer unpinned history', () => {
+    const map: Record<string, Conversation> = {};
+    for (let index = 0; index < 55; index += 1) {
+      map[`conv_${index}`] = conversation(`conv_${index}`, index);
+    }
+    map.conv_1 = { ...map.conv_1, pinnedAt: 10_000 };
+    map.conv_2 = { ...map.conv_2, pinnedAt: 11_000 };
+
+    const capped = enforceConversationCap(map, 'conv_0');
+
+    expect(Object.keys(capped)).toHaveLength(50);
+    expect(capped.conv_0).toBeDefined();
+    expect(capped.conv_1).toBeDefined();
+    expect(capped.conv_2).toBeDefined();
+    expect(capped.conv_7).toBeUndefined();
+    expect(capped.conv_8).toBeDefined();
   });
 });
 
@@ -363,6 +461,25 @@ describe('quota pressure', () => {
     expect(result.evictedIds).toEqual(['conv_old', 'conv_mid']);
     const persisted = parseStore(storage.getItem(keys.store));
     expect(Object.keys(persisted?.conversations ?? {}).sort()).toEqual(['conv_current', 'conv_new']);
+  });
+
+  it('evicts unpinned history before older pinned conversations under quota pressure', () => {
+    const keys = storageKeys('42');
+    const store: ChatStoreV4 = {
+      ...emptyStore(),
+      conversations: {
+        conv_pinned: conversation('conv_pinned', 1_000, { pinnedAt: 4_000 }),
+        conv_unpinned: conversation('conv_unpinned', 2_000),
+        conv_current: conversation('conv_current', 3_000),
+      },
+    };
+    storage.failWrites(keys.store, 1);
+
+    const result = saveStore('42', store, 'conv_current');
+
+    expect(result.persisted).toBe(true);
+    expect(result.evictedIds).toEqual(['conv_unpinned']);
+    expect(parseStore(storage.getItem(keys.store))?.conversations.conv_pinned).toBeDefined();
   });
 
   it('reports failure when nothing evictable remains', () => {

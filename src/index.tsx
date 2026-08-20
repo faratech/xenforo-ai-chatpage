@@ -26,15 +26,19 @@ const WF = {
   },
   dark: {
     page: '#1f2021', paper: '#292929', alt: '#383a3a', border: '#44474a', text: '#ffffff', muted: '#cfcfcf', error: '#ff6b8a',
+    primary: '#75b6e7', primaryHover: '#8ac7f0', onPrimary: '#102a43',
   },
 };
 
-const makeTheme = (mode: ColorMode) => {
+export const makeTheme = (mode: ColorMode) => {
   const colors = mode === 'dark' ? WF.dark : WF.light;
+  const primary = mode === 'dark'
+    ? { main: WF.dark.primary, dark: WF.dark.primaryHover, contrastText: WF.dark.onPrimary }
+    : { main: WF.primary, dark: WF.primaryHover, contrastText: '#ffffff' };
   return createTheme({
     palette: {
       mode,
-      primary: { main: WF.primary, dark: WF.primaryHover, contrastText: '#ffffff' },
+      primary,
       secondary: { main: WF.accent, contrastText: '#ffffff' },
       background: { default: colors.page, paper: colors.paper },
       text: { primary: colors.text, secondary: colors.muted },
@@ -91,7 +95,12 @@ const ThemedApp = ({ initialIdentityPromise }: { initialIdentityPromise?: Promis
       <ScopedCssBaseline
         id="react-chat-container"
         data-wf-theme={mode}
-        sx={{ backgroundColor: 'background.default', color: 'text.primary' }}
+        sx={{
+          '--wf-focus-ring': theme.palette.primary.main,
+          '--wf-on-primary': theme.palette.primary.contrastText,
+          backgroundColor: 'background.default',
+          color: 'text.primary',
+        }}
       >
         <App initialIdentityPromise={initialIdentityPromise} />
       </ScopedCssBaseline>

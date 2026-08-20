@@ -34,6 +34,7 @@ import type {
   SavedConversationDraft,
   SavedConversationListResponse,
   SavedConversationResponse,
+  SavedConversationStateResponse,
   SupportCaseDraft,
   SupportCaseListResponse,
   SupportCaseResponse,
@@ -1162,7 +1163,7 @@ export class ChatAPI {
   }
 
   static async listSavedConversations(
-    options: CursorPageOptions = {},
+    options: CursorPageOptions & { includeArchived?: boolean } = {},
   ): Promise<SavedConversationListResponse> {
     return fetchAPI<SavedConversationListResponse>(ENV.ENDPOINTS.CHAT, {
       method: 'POST',
@@ -1171,6 +1172,7 @@ export class ChatAPI {
         action: 'listSavedConversations',
         ...(options.limit === undefined ? {} : { limit: options.limit }),
         ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.includeArchived === undefined ? {} : { include_archived: options.includeArchived }),
       })),
     });
   }
@@ -1217,6 +1219,25 @@ export class ChatAPI {
         action: 'deleteSavedConversation',
         client_conversation_id: conversationId,
         expected_revision: expectedRevision,
+      })),
+    });
+  }
+
+  static async setSavedConversationState(
+    conversationId: string,
+    expectedMetadataRevision: number,
+    changes: { pinned?: boolean | null; archived?: boolean | null },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SavedConversationStateResponse> {
+    return fetchAPI<SavedConversationStateResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify(this.protectedPayload({
+        action: 'setSavedConversationState',
+        client_conversation_id: conversationId,
+        expected_metadata_revision: expectedMetadataRevision,
+        ...('pinned' in changes ? { pinned: changes.pinned } : {}),
+        ...('archived' in changes ? { archived: changes.archived } : {}),
       })),
     });
   }

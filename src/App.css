@@ -10,6 +10,8 @@
   --wf-primary-hover: #0c5aa0;
   --wf-accent: #115ea3;
   --wf-pressed: #07426f;
+  --wf-focus-ring: #0f6cbd;
+  --wf-on-primary: #ffffff;
 
   --wf-page: #eff5f6;
   --wf-paper: #ffffff;
@@ -29,6 +31,8 @@
 #react-chat-container[data-wf-theme='dark'] {
   --wf-primary: #75b6e7;
   --wf-primary-hover: #8ac7f0;
+  --wf-focus-ring: #75b6e7;
+  --wf-on-primary: #102a43;
   --wf-page: #1f2021;
   --wf-paper: #292929;
   --wf-alt: #383a3a;
@@ -350,9 +354,9 @@
 
 /* User bubbles render on brand blue — force readable link/code colors */
 #react-chat-container .wf-user-bubble .message-content,
-#react-chat-container .wf-user-bubble .message-content p { color: #fff; }
-#react-chat-container .wf-user-bubble .message-content a { color: #fff; text-decoration: underline; }
-#react-chat-container .wf-user-bubble .message-content code { background: rgba(255, 255, 255, 0.18); color: #fff; }
+#react-chat-container .wf-user-bubble .message-content p { color: var(--wf-on-primary); }
+#react-chat-container .wf-user-bubble .message-content a { color: var(--wf-on-primary); text-decoration: underline; }
+#react-chat-container .wf-user-bubble .message-content code { background: color-mix(in srgb, var(--wf-on-primary) 15%, transparent); color: var(--wf-on-primary); }
 
 /* ===== Scrollbars ===== */
 #react-chat-container ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -383,8 +387,16 @@
 #react-chat-container .wf-answer-image:focus-visible,
 #react-chat-container .wf-sync-status:focus-visible,
 #react-chat-container .delete-btn:focus-visible {
-  outline: 3px solid var(--wf-primary);
+  outline: 3px solid var(--wf-focus-ring);
   outline-offset: 2px;
+}
+
+#react-chat-container .wf-message-permalink-target {
+  border-radius: 12px;
+  outline: 2px solid var(--wf-focus-ring);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--wf-focus-ring) 8%, transparent);
+  transition: background-color 180ms ease, outline-color 180ms ease;
 }
 
 /* ===== Streaming cursor + typing dots ===== */
@@ -417,13 +429,70 @@
   #react-chat-container .message-content { font-size: 14px; }
 }
 
+@media (max-width: 360px) {
+  #react-chat-container .wf-chat-header {
+    min-width: 0;
+  }
+
+  #react-chat-container .wf-assistant-bubble,
+  #react-chat-container .wf-user-bubble {
+    max-width: 100%;
+  }
+
+  #react-chat-container .wf-code-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  #react-chat-container .wf-code-actions {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+
+  #react-chat-container .MuiDialog-paper:has(#turnstile-container) {
+    width: calc(100% - 16px);
+    margin: 8px;
+  }
+
+  #react-chat-container .MuiDialogContent-root:has(> #turnstile-container) {
+    padding-right: 2px;
+    padding-left: 2px;
+  }
+}
+
 /* ===== Print ===== */
 @media print {
   #react-chat-container .MuiDrawer-root,
   #react-chat-container .wf-chat-header,
   #react-chat-container .message-actions,
-  #react-chat-container .wf-input-area { display: none !important; }
-  #react-chat-container .message-content { page-break-inside: avoid; }
+  #react-chat-container .wf-input-area,
+  #react-chat-container .wf-chat-ad { display: none !important; }
+  #react-chat-container,
+  #react-chat-container .wf-app,
+  #react-chat-container .wf-app-view,
+  #react-chat-container .wf-chat-window,
+  #react-chat-container .chat-messages-container {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+  #react-chat-container .wf-assistant-bubble,
+  #react-chat-container .wf-user-bubble {
+    color: #000 !important;
+    background: #fff !important;
+    border: 1px solid #bbb !important;
+    box-shadow: none !important;
+  }
+  #react-chat-container .wf-user-bubble .message-content,
+  #react-chat-container .wf-user-bubble .message-content p,
+  #react-chat-container .wf-user-bubble .message-content a,
+  #react-chat-container .wf-user-bubble .message-content code {
+    color: #000 !important;
+  }
+  #react-chat-container .message-content,
+  #react-chat-container .wf-assistant-bubble { break-inside: auto; }
+  #react-chat-container .wf-user-bubble { break-inside: avoid-page; }
   #react-chat-container .message-file-sources [data-source-collapsed="true"] {
     display: list-item !important;
   }
@@ -452,5 +521,7 @@
   /* Turnstile's normal widget size, reserved before the iframe arrives so its
      async injection resizes nothing. */
   min-width: 300px;
+  max-width: 100%;
   min-height: 65px;
+  overflow: hidden;
 }

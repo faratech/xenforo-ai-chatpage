@@ -11,19 +11,17 @@ export interface SavedConversationSummary {
   id: string;
   title: string;
   revision: number;
+  /** Independent optimistic lock for sidebar-only metadata changes. */
+  metadata_revision: number;
+  pinned_at: number | null;
+  archived_at: number | null;
   created_at: number;
   updated_at: number;
   message_count: number;
 }
 
-export interface SavedConversation {
-  id: string;
-  title: string;
+export interface SavedConversation extends SavedConversationSummary {
   messages: Message[];
-  revision: number;
-  created_at: number;
-  updated_at: number;
-  message_count: number;
 }
 
 export interface SavedConversationDraft {
@@ -42,6 +40,11 @@ export interface SavedConversationListResponse {
 export interface SavedConversationResponse {
   success: true;
   conversation: SavedConversation;
+}
+
+export interface SavedConversationStateResponse {
+  success: true;
+  conversation: SavedConversationSummary;
 }
 
 export type FeedbackRating = 'up' | 'down';

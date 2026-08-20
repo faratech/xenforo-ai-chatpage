@@ -23,6 +23,25 @@ export interface PrivateShareOptions extends ConversationExportOptions {
   document?: Document;
 }
 
+interface ConversationJSONRecord {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  messages: Array<{
+    id: string;
+    role: Message['role'];
+    raw_content: string;
+    timestamp: number;
+    status?: Message['status'];
+    annotations?: Annotation[];
+    response_id?: string;
+    turn_id?: string;
+    activities?: Message['activities'];
+    attachments?: Message['attachments'];
+  }>;
+}
+
 const isoDate = (timestamp: number): string => new Date(timestamp).toISOString();
 
 const filenamePart = (title: string): string => {
@@ -254,6 +273,29 @@ export const conversationToMarkdown = (
   return `${lines.join('\n').trim()}\n`;
 };
 
+/**
+ * Shared JSON projection for single and collection exports. Keeping this in
+ * one place prevents the two formats from silently retaining different data.
+ */
+const conversationToJSONRecord = (conversation: Conversation): ConversationJSONRecord => ({
+  id: conversation.id,
+  title: conversation.title,
+  created_at: conversation.createdAt,
+  updated_at: conversation.updatedAt,
+  messages: conversation.messages.map(message => ({
+    id: message.id,
+    role: message.role,
+    raw_content: message.rawContent,
+    timestamp: message.timestamp,
+    ...(message.status ? { status: message.status } : {}),
+    ...(message.annotations?.length ? { annotations: message.annotations } : {}),
+    ...(message.responseId ? { response_id: message.responseId } : {}),
+    ...(message.turnId ? { turn_id: message.turnId } : {}),
+    ...(message.activities?.length ? { activities: message.activities } : {}),
+    ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+  })),
+});
+
 /** JSON retains only conversation data needed for a future local import. */
 export const conversationToJSON = (
   conversation: Conversation,
@@ -262,24 +304,7 @@ export const conversationToJSON = (
   schema: 'windowsforum-ai-conversation',
   version: 1,
   exported_at: options.exportedAt ?? Date.now(),
-  conversation: {
-    id: conversation.id,
-    title: conversation.title,
-    created_at: conversation.createdAt,
-    updated_at: conversation.updatedAt,
-    messages: conversation.messages.map(message => ({
-      id: message.id,
-      role: message.role,
-      raw_content: message.rawContent,
-      timestamp: message.timestamp,
-      ...(message.status ? { status: message.status } : {}),
-      ...(message.annotations?.length ? { annotations: message.annotations } : {}),
-      ...(message.responseId ? { response_id: message.responseId } : {}),
-      ...(message.turnId ? { turn_id: message.turnId } : {}),
-      ...(message.activities?.length ? { activities: message.activities } : {}),
-      ...(message.attachments?.length ? { attachments: message.attachments } : {}),
-    })),
-  },
+  conversation: conversationToJSONRecord(conversation),
 }, null, 2) + '\n';
 
 export const createConversationExport = (
@@ -301,6 +326,36 @@ export const createConversationExport = (
   return {
     format,
     filename: `${filenamePart(conversation.title)}-${date}.${extension}`,
+    mimeType,
+    content,
+    blob: new Blob([content], { type: mimeType }),
+  };
+};
+
+export const createConversationCollectionExport = (
+  conversations: readonly Conversation[],
+  format: ConversationExportFormat,
+  options: ConversationExportOptions = {},
+): ConversationExportArtifact => {
+  const exportedAt = options.exportedAt ?? Date.now();
+  const date = isoDate(exportedAt).slice(0, 10);
+  const markdownDocuments = conversations.map(conversation => (
+    conversationToMarkdown(conversation, { exportedAt }).trim()
+  ));
+  const content = format === 'markdown'
+    ? (markdownDocuments.length ? `${markdownDocuments.join('\n\n---\n\n')}\n` : '')
+    : `${JSON.stringify({
+      schema: 'windowsforum-ai-conversation-collection',
+      version: 1,
+      exported_at: exportedAt,
+      conversations: conversations.map(conversationToJSONRecord),
+    }, null, 2)}\n`;
+  const mimeType = format === 'markdown'
+    ? 'text/markdown;charset=utf-8'
+    : 'application/json;charset=utf-8';
+  return {
+    format,
+    filename: `windowsforum-ai-chats-${date}.${format === 'markdown' ? 'md' : 'json'}`,
     mimeType,
     content,
     blob: new Blob([content], { type: mimeType }),

@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
   listSavedConversations: vi.fn(),
   getSavedConversation: vi.fn(),
   upsertSavedConversation: vi.fn(),
+  setSavedConversationState: vi.fn(),
   deleteSavedConversation: vi.fn(),
   submitChatFeedback: vi.fn(),
   createConversationShare: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock('../services/api', async importOriginal => {
       listSavedConversations: apiMocks.listSavedConversations,
       getSavedConversation: apiMocks.getSavedConversation,
       upsertSavedConversation: apiMocks.upsertSavedConversation,
+      setSavedConversationState: apiMocks.setSavedConversationState,
       deleteSavedConversation: apiMocks.deleteSavedConversation,
       submitChatFeedback: apiMocks.submitChatFeedback,
       createConversationShare: apiMocks.createConversationShare,
@@ -165,10 +167,14 @@ beforeEach(() => {
     conversation: {
       ...conversation,
       revision: revision + 1,
+      metadata_revision: conversation.metadata_revision ?? 0,
+      pinned_at: conversation.pinned_at ?? null,
+      archived_at: conversation.archived_at ?? null,
       created_at: conversation.created_at ?? Date.now(),
       updated_at: Date.now(),
     },
   }));
+  apiMocks.setSavedConversationState.mockReset();
   apiMocks.deleteSavedConversation.mockReset().mockResolvedValue({ success: true });
   apiMocks.submitChatFeedback.mockReset().mockResolvedValue({ success: true, feedback: {} });
   apiMocks.createConversationShare.mockReset().mockResolvedValue({
@@ -197,6 +203,180 @@ afterEach(() => {
 });
 
 describe('ChatWindow state ownership', () => {
+  it('vetoes a cancelable update reload while a turn is still pending', async () => {
+    apiMocks.sendMessage.mockImplementation((_message: string, options: { signal: AbortSignal }) => (
+      new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          reject(new StreamCancelledError('cancelled', ''));
+        }, { once: true });
+      })
+    ));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_update" />);
+
+    fireEvent.change(await screen.findByLabelText('Type your message'), {
+      target: { value: 'Keep this pending turn safe' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByRole('button', { name: 'Stop generation' });
+
+    const saveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    let reloadAccepted = true;
+    act(() => { reloadAccepted = window.dispatchEvent(saveEvent); });
+    expect(reloadAccepted).toBe(false);
+    expect(saveEvent.defaultPrevented).toBe(true);
+    expect(await screen.findByText('Finish the current chat action or remove staged attachments before reloading the update.'))
+      .toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }));
+  });
+
+  it('vetoes an update reload while a message edit is still open', async () => {
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Editor-safe answer', annotations: [] });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_editor_update" />);
+    fireEvent.change(await screen.findByLabelText('Type your message'), {
+      target: { value: 'Keep this inline edit' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByText('Editor-safe answer');
+
+    const userMessage = screen.getByRole('article', { name: 'Guest message' });
+    fireEvent.click(within(userMessage).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit message' }));
+    expect(screen.getByLabelText('Edit message')).toHaveValue('Keep this inline edit');
+
+    const saveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    let reloadAccepted = true;
+    act(() => { reloadAccepted = window.dispatchEvent(saveEvent); });
+
+    expect(reloadAccepted).toBe(false);
+    expect(saveEvent.defaultPrevented).toBe(true);
+    expect(screen.getByLabelText('Edit message')).toHaveValue('Keep this inline edit');
+  });
+
+  it('replaces an edited message key and restores focus to the stable transcript host', async () => {
+    apiMocks.sendMessage
+      .mockResolvedValueOnce({ text: 'Original edit answer', annotations: [] })
+      .mockImplementationOnce((_message: string, options: { signal: AbortSignal }) => (
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            reject(new StreamCancelledError('cancelled', ''));
+          }, { once: true });
+        })
+      ));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_edit_focus" />);
+    fireEvent.change(await screen.findByLabelText('Type your message'), {
+      target: { value: 'Original editable question' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByText('Original edit answer');
+
+    const originalArticle = screen.getByRole('article', { name: 'Guest message' });
+    const originalMessageId = originalArticle.id;
+    fireEvent.click(within(originalArticle).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit message' }));
+    const editor = screen.getByLabelText('Edit message');
+    fireEvent.change(editor, { target: { value: 'Edited question with a new key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      const editedArticle = screen.getByRole('article', { name: 'Guest message' });
+      expect(within(editedArticle).getByText('Edited question with a new key')).toBeInTheDocument();
+      expect(document.getElementById(originalMessageId)).toBeNull();
+    });
+    const replacementArticle = screen.getByRole('article', { name: 'Guest message' });
+    expect(replacementArticle.id).not.toBe(originalMessageId);
+    expect(apiMocks.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      'Edited question with a new key',
+      expect.objectContaining({ resetConversation: true }),
+    );
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Chat messages' })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }));
+  });
+
+  it('keeps an edited draft open when Save is rejected after another operation begins', async () => {
+    apiMocks.sendMessage
+      .mockResolvedValueOnce({ text: 'Original guard answer', annotations: [] })
+      .mockImplementationOnce((_message: string, options: { signal: AbortSignal }) => (
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            reject(new StreamCancelledError('cancelled', ''));
+          }, { once: true });
+        })
+      ));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_edit_guard" />);
+    fireEvent.change(await screen.findByLabelText('Type your message'), {
+      target: { value: 'Original guarded question' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByText('Original guard answer');
+
+    const originalArticle = screen.getByRole('article', { name: 'Guest message' });
+    fireEvent.click(within(originalArticle).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit message' }));
+    const editor = screen.getByLabelText('Edit message');
+    fireEvent.change(editor, { target: { value: 'Preserve this rejected edit' } });
+
+    fireEvent.change(screen.getByLabelText('Type your message'), {
+      target: { value: 'Start a different operation' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByRole('button', { name: 'Stop generation' });
+
+    fireEvent.click(within(originalArticle).getByRole('button', { name: 'Save' }));
+
+    expect(screen.getByLabelText('Edit message')).toHaveValue('Preserve this rejected edit');
+    expect(await screen.findByText(
+      'This edit cannot be sent yet. Reconnect or finish the current chat action, then try again.',
+    )).toBeInTheDocument();
+    expect(apiMocks.sendMessage).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }));
+  });
+
+  it('keeps an edited draft offline and lets the same Save succeed after reconnecting', async () => {
+    apiMocks.sendMessage
+      .mockResolvedValueOnce({ text: 'Original online answer', annotations: [] })
+      .mockResolvedValueOnce({ text: 'Updated online answer', annotations: [] });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_offline_edit" />);
+    fireEvent.change(await screen.findByLabelText('Type your message'), {
+      target: { value: 'Original online question' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByText('Original online answer');
+
+    const originalArticle = screen.getByRole('article', { name: 'Guest message' });
+    fireEvent.click(within(originalArticle).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit message' }));
+    fireEvent.change(screen.getByLabelText('Edit message'), {
+      target: { value: 'Keep this edit through reconnect' },
+    });
+
+    act(() => { window.dispatchEvent(new Event('offline')); });
+    await screen.findByText('You are offline. Drafts stay saved on this device; reconnect to send.');
+    fireEvent.click(within(originalArticle).getByRole('button', { name: 'Save' }));
+
+    expect(screen.getByLabelText('Edit message')).toHaveValue('Keep this edit through reconnect');
+    expect(apiMocks.sendMessage).toHaveBeenCalledTimes(1);
+
+    act(() => { window.dispatchEvent(new Event('online')); });
+    await waitFor(() => expect(screen.queryByText(
+      'You are offline. Drafts stay saved on this device; reconnect to send.',
+    )).not.toBeInTheDocument());
+    fireEvent.click(within(originalArticle).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(screen.queryByLabelText('Edit message')).not.toBeInTheDocument());
+    expect(apiMocks.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      'Keep this edit through reconnect',
+      expect.objectContaining({ resetConversation: true }),
+    );
+    const replacementArticle = screen.getByRole('article', { name: 'Guest message' });
+    expect(within(replacementArticle).getByText('Keep this edit through reconnect')).toBeInTheDocument();
+    expect(await screen.findByText('Updated online answer')).toBeInTheDocument();
+  });
+
   it('announces the finalized answer once and emits content-free lifecycle telemetry', async () => {
     apiMocks.sendMessage.mockImplementationOnce((_message: string, options: {
       onChunk?: (text: string, annotations: []) => void;
@@ -282,6 +462,117 @@ describe('ChatWindow state ownership', () => {
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
     expect(await screen.findByLabelText('Type your message')).toHaveValue('Keep this unfinished question');
+  });
+
+  it('keeps chat B and its draft selected when an in-flight clear of chat A completes', async () => {
+    window.localStorage.setItem('chat_store:v4:guest_clear_switch', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_clear_a: {
+          id: 'conv_clear_a',
+          title: 'Chat A',
+          createdAt: 1_000,
+          updatedAt: 3_000,
+          messages: [{ id: 'a_ai', role: 'ai', rawContent: 'Answer in chat A', timestamp: 3_000 }],
+        },
+        conv_clear_b: {
+          id: 'conv_clear_b',
+          title: 'Chat B',
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          draft: 'Draft that belongs to chat B',
+          draftUpdatedAt: 2_500,
+          messages: [{ id: 'b_ai', role: 'ai', rawContent: 'Answer in chat B', timestamp: 2_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_clear_switch', 'conv_clear_a');
+    let resolveClear: ((value: { success: true }) => void) | undefined;
+    apiMocks.clearConversation.mockImplementationOnce(() => (
+      new Promise(resolve => { resolveClear = resolve; })
+    ));
+
+    renderThemed(
+      <ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_clear_switch" />,
+    );
+    await screen.findByText('Answer in chat A');
+    fireEvent.click(screen.getByLabelText('Chat actions'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clear messages' }));
+    const clearDialog = await screen.findByRole('dialog', { name: 'Clear messages?' });
+    fireEvent.click(within(clearDialog).getByRole('button', { name: 'Clear messages' }));
+    await waitFor(() => expect(apiMocks.clearConversation).toHaveBeenCalledWith('conv_clear_a'));
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /^Chat B Draft saved$/ }))[0]);
+    expect(await screen.findByText('Answer in chat B')).toBeInTheDocument();
+    expect(screen.getByLabelText('Type your message')).toHaveValue('Draft that belongs to chat B');
+
+    await act(async () => { resolveClear?.({ success: true }); });
+
+    expect(screen.getByText('Answer in chat B')).toBeInTheDocument();
+    expect(screen.getByLabelText('Type your message')).toHaveValue('Draft that belongs to chat B');
+    expect(window.localStorage.getItem('current_conversation_id:v4:guest_clear_switch')).toBe('conv_clear_b');
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_clear_switch') ?? '{}') as {
+        conversations: Record<string, { draft?: string; messages: Array<{ rawContent: string }> }>;
+      };
+      expect(stored.conversations.conv_clear_b.draft).toBe('Draft that belongs to chat B');
+      expect(stored.conversations.conv_clear_b.messages).toContainEqual(
+        expect.objectContaining({ rawContent: 'Answer in chat B' }),
+      );
+      expect(stored.conversations.conv_clear_a.messages).toHaveLength(1);
+    });
+  });
+
+  it('archives the sole active chat at the conversation cap without evicting archived history', async () => {
+    const archived = Object.fromEntries(Array.from({ length: 49 }, (_, index) => {
+      const id = `conv_archived_${index}`;
+      return [id, {
+        id,
+        title: `Archived ${index}`,
+        createdAt: 1_000 + index,
+        updatedAt: 2_000 + index,
+        archivedAt: 3_000 + index,
+        messages: [{ id: `archived_ai_${index}`, role: 'ai', rawContent: `Archived answer ${index}`, timestamp: 2_000 + index }],
+      }];
+    }));
+    window.localStorage.setItem('chat_store:v4:guest_cap', JSON.stringify({
+      version: 4,
+      conversations: {
+        ...archived,
+        conv_active: {
+          id: 'conv_active',
+          title: 'Only active chat',
+          createdAt: 10_000,
+          updatedAt: 20_000,
+          messages: [{ id: 'active_ai', role: 'ai', rawContent: 'Only active answer', timestamp: 20_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_cap', 'conv_active');
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_cap" />);
+    await screen.findByText('Only active answer');
+    fireEvent.click((await screen.findAllByLabelText('Actions for Only active chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }));
+
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_cap') ?? '{}') as {
+        conversations: Record<string, { archivedAt?: number }>;
+        tombstones: Record<string, number>;
+        pendingServerDeletions: Record<string, number>;
+      };
+      expect(Object.keys(stored.conversations)).toHaveLength(50);
+      expect(stored.conversations.conv_active.archivedAt).toEqual(expect.any(Number));
+      expect(Object.keys(stored.tombstones)).toHaveLength(0);
+      expect(Object.keys(stored.pendingServerDeletions)).toHaveLength(0);
+      for (const id of Object.keys(archived)) expect(stored.conversations[id]).toBeDefined();
+    });
+    expect(apiMocks.deleteConversation).not.toHaveBeenCalled();
+    expect(apiMocks.deleteSavedConversation).not.toHaveBeenCalled();
   });
 
   it('uses capability-led starters and records only the selected action id', async () => {
@@ -451,6 +742,34 @@ describe('ChatWindow state ownership', () => {
     expect(apiMocks.sendMessage.mock.calls[1][1]).toMatchObject({ attachmentIds: [], resetConversation: true });
   });
 
+  it('vetoes an update reload while an uploaded attachment is staged in the composer', async () => {
+    const uploaded = {
+      id: 'att_updateupdateupdateupdateupdate12',
+      name: 'staged-update.txt',
+      mime: 'text/plain',
+      size: 6,
+      expires_at: Date.now() + 60_000,
+    };
+    apiMocks.uploadChatAttachment.mockResolvedValueOnce({ success: true, attachment: uploaded });
+    const { container } = renderThemed(
+      <ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />,
+    );
+    await screen.findByRole('region', { name: 'File attachment drop zone' });
+    fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+      target: { files: [new File(['staged'], uploaded.name, { type: uploaded.mime })] },
+    });
+    expect(await screen.findByText(/staged-update\.txt · 6 B/)).toBeInTheDocument();
+
+    const saveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    let reloadAccepted = true;
+    act(() => { reloadAccepted = window.dispatchEvent(saveEvent); });
+
+    expect(reloadAccepted).toBe(false);
+    expect(saveEvent.defaultPrevented).toBe(true);
+    expect(screen.getByText('Finish the current chat action or remove staged attachments before reloading the update.'))
+      .toBeInTheDocument();
+  });
+
   it('retains a handle after failure and clears it after an explicit retry succeeds', async () => {
     const uploaded = {
       id: 'att_abcdefabcdefabcdefabcdefabcdefab',
@@ -618,11 +937,20 @@ describe('ChatWindow state ownership', () => {
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
 
-    fireEvent.click(await screen.findByLabelText('History status: Sync paused'));
-    expect(await screen.findByText(/Browser storage is unavailable/)).toBeInTheDocument();
+    const historyStatus = await screen.findByLabelText('History status: Sync paused');
     expect(telemetryMocks.reportClientEvent).toHaveBeenCalledWith('sync_failed', expect.objectContaining({
       outcome: 'memory_only',
     }));
+
+    const saveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    let reloadAccepted = true;
+    act(() => { reloadAccepted = window.dispatchEvent(saveEvent); });
+    expect(reloadAccepted).toBe(false);
+    expect(saveEvent.defaultPrevented).toBe(true);
+    expect(screen.getByText('This browser cannot safely save the current chat before an update reload.'))
+      .toBeInTheDocument();
+    fireEvent.click(historyStatus);
+    expect(await screen.findByText(/Browser storage is unavailable/)).toBeInTheDocument();
   });
 
   it('binds a Turnstile token to the pending turn and submits it only once', async () => {
@@ -665,6 +993,9 @@ describe('authenticated history, feedback, and sharing', () => {
     id: 'conv_cloud',
     title: 'Cloud chat',
     revision: 3,
+    metadata_revision: 7,
+    pinned_at: null,
+    archived_at: null,
     created_at: 1_000,
     updated_at: 3_000,
     messages: [
@@ -681,6 +1012,9 @@ describe('authenticated history, feedback, and sharing', () => {
         id: conversation.id,
         title: conversation.title,
         revision: conversation.revision,
+        metadata_revision: conversation.metadata_revision,
+        pinned_at: conversation.pinned_at,
+        archived_at: conversation.archived_at,
         created_at: conversation.created_at,
         updated_at: conversation.updated_at,
         message_count: conversation.messages.length,
@@ -818,6 +1152,9 @@ describe('authenticated history, feedback, and sharing', () => {
         id: remote.id,
         title: remote.title,
         revision: remote.revision,
+        metadata_revision: remote.metadata_revision,
+        pinned_at: remote.pinned_at,
+        archived_at: remote.archived_at,
         created_at: remote.created_at,
         updated_at: remote.updated_at,
         message_count: remote.messages.length,
@@ -870,7 +1207,7 @@ describe('authenticated history, feedback, and sharing', () => {
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
 
     expect(await screen.findByText('Cloud answer')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /^Local scratch Draft saved$/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Local scratch Draft saved$/ }));
     expect(await screen.findByDisplayValue('keep this draft')).toBeInTheDocument();
     expect(new URL(window.location.href).searchParams.get('conversation')).toBe('conv_scratch');
 
@@ -969,6 +1306,9 @@ describe('authenticated history, feedback, and sharing', () => {
         id: remote.id,
         title: remote.title,
         revision: remote.revision,
+        metadata_revision: remote.metadata_revision,
+        pinned_at: remote.pinned_at,
+        archived_at: remote.archived_at,
         created_at: remote.created_at,
         updated_at: remote.updated_at,
         message_count: remote.messages.length,
@@ -1010,6 +1350,9 @@ describe('authenticated history, feedback, and sharing', () => {
           id: available.id,
           title: available.title,
           revision: available.revision,
+          metadata_revision: available.metadata_revision,
+          pinned_at: available.pinned_at,
+          archived_at: available.archived_at,
           created_at: available.created_at,
           updated_at: available.updated_at,
           message_count: available.messages.length,
@@ -1018,6 +1361,9 @@ describe('authenticated history, feedback, and sharing', () => {
           id: 'conv_unavailable',
           title: 'Temporarily unavailable',
           revision: 1,
+          metadata_revision: 0,
+          pinned_at: null,
+          archived_at: null,
           created_at: 2_000,
           updated_at: 2_500,
           message_count: 2,
@@ -1123,6 +1469,538 @@ describe('authenticated history, feedback, and sharing', () => {
     ), { timeout: 3_000 });
   });
 
+  it('restores sidebar search focus after Rename is cancelled or saved', async () => {
+    mockCloudList();
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    const search = screen.getByRole('searchbox', { name: 'Search chat history' });
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }));
+    const cancelledDialog = await screen.findByRole('dialog', { name: 'Rename chat' });
+    fireEvent.click(within(cancelledDialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename chat' })).not.toBeInTheDocument());
+    await waitFor(() => expect(search).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }));
+    const savedDialog = await screen.findByRole('dialog', { name: 'Rename chat' });
+    const nameInput = within(savedDialog).getByLabelText('Chat name');
+    fireEvent.change(nameInput, { target: { value: 'Keyboard-safe title' } });
+    fireEvent.keyDown(nameInput, { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename chat' })).not.toBeInTheDocument());
+    await waitFor(() => expect(search).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+    expect((await screen.findAllByRole('button', { name: /Keyboard-safe title/ })).length).toBeGreaterThan(0);
+  });
+
+  it('pins, archives, and restores a synced chat with independent metadata revisions', async () => {
+    const remote = savedConversation();
+    const stateSummary = (
+      metadataRevision: number,
+      pinnedAt: number | null,
+      archivedAt: number | null,
+    ) => ({
+      id: remote.id,
+      title: remote.title,
+      revision: remote.revision,
+      metadata_revision: metadataRevision,
+      pinned_at: pinnedAt,
+      archived_at: archivedAt,
+      created_at: remote.created_at,
+      updated_at: remote.updated_at,
+      message_count: remote.messages.length,
+    });
+    mockCloudList(remote);
+    apiMocks.setSavedConversationState
+      .mockResolvedValueOnce({ success: true, conversation: stateSummary(8, 4_000, null) })
+      .mockResolvedValueOnce({ success: true, conversation: stateSummary(9, 4_000, 5_000) })
+      .mockResolvedValueOnce({ success: true, conversation: stateSummary(10, 4_000, null) });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      1,
+      'conv_cloud',
+      7,
+      { pinned: true },
+    ));
+
+    fireEvent.click(screen.getAllByLabelText('Pinned chats')[0]);
+    expect((await screen.findAllByRole('button', { name: /Cloud chat/ })).length).toBeGreaterThan(0);
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      2,
+      'conv_cloud',
+      8,
+      { archived: true },
+    ));
+
+    fireEvent.click(screen.getAllByLabelText('Archived chats')[0]);
+    expect((await screen.findAllByRole('button', { name: /Cloud chat/ })).length).toBeGreaterThan(0);
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Restore' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      3,
+      'conv_cloud',
+      9,
+      { archived: false },
+    ));
+
+    fireEvent.click(screen.getAllByLabelText('All chats')[0]);
+    expect((await screen.findAllByRole('button', { name: /Cloud chat/ })).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+        conversations: Record<string, {
+          pinnedAt?: number;
+          archivedAt?: number;
+          metadataRevision?: number;
+        }>;
+      };
+      expect(stored.conversations.conv_cloud).toMatchObject({
+        pinnedAt: 4_000,
+        metadataRevision: 10,
+      });
+      expect(stored.conversations.conv_cloud.archivedAt).toBeUndefined();
+    });
+  });
+
+  it('serializes a rapid pin then unpin and commits only the final desired state', async () => {
+    const remote = savedConversation();
+    mockCloudList(remote);
+    let resolvePin: ((value: { success: true; conversation: Record<string, unknown> }) => void) | undefined;
+    apiMocks.setSavedConversationState
+      .mockImplementationOnce(() => new Promise(resolve => { resolvePin = resolve; }))
+      .mockResolvedValueOnce({
+        success: true,
+        conversation: {
+          id: remote.id,
+          title: remote.title,
+          revision: remote.revision,
+          metadata_revision: 9,
+          pinned_at: null,
+          archived_at: null,
+          created_at: remote.created_at,
+          updated_at: remote.updated_at,
+          message_count: remote.messages.length,
+        },
+      });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      1,
+      'conv_cloud',
+      7,
+      { pinned: true },
+    ));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Unpin' }));
+    expect(apiMocks.setSavedConversationState).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePin?.({
+        success: true,
+        conversation: {
+          id: remote.id,
+          title: remote.title,
+          revision: remote.revision,
+          metadata_revision: 8,
+          pinned_at: 4_000,
+          archived_at: null,
+          created_at: remote.created_at,
+          updated_at: remote.updated_at,
+          message_count: remote.messages.length,
+        },
+      });
+    });
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      2,
+      'conv_cloud',
+      8,
+      { pinned: false },
+    ));
+
+    expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1);
+    expect(apiMocks.setSavedConversationState).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+        conversations: Record<string, { pinnedAt?: number; metadataRevision?: number }>;
+      };
+      expect(stored.conversations.conv_cloud.metadataRevision).toBe(9);
+      expect(stored.conversations.conv_cloud.pinnedAt).toBeUndefined();
+    });
+  });
+
+  it('preserves another device archive when retrying a local pin after a metadata conflict', async () => {
+    const remote = savedConversation();
+    const archivedRemote = savedConversation({
+      metadata_revision: 8,
+      pinned_at: null,
+      archived_at: 5_000,
+    });
+    mockCloudList(remote);
+    apiMocks.getSavedConversation
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, conversation: remote })
+      .mockResolvedValueOnce({ success: true, conversation: archivedRemote });
+    apiMocks.setSavedConversationState
+      .mockRejectedValueOnce(new APIError('changed', {
+        status: 409,
+        code: 'metadata_revision_conflict',
+      }))
+      .mockResolvedValueOnce({
+        success: true,
+        conversation: {
+          id: remote.id,
+          title: remote.title,
+          revision: remote.revision,
+          metadata_revision: 9,
+          pinned_at: 4_000,
+          archived_at: 5_000,
+          created_at: remote.created_at,
+          updated_at: remote.updated_at,
+          message_count: remote.messages.length,
+        },
+      });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      1,
+      'conv_cloud',
+      7,
+      { pinned: true },
+    ));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      2,
+      'conv_cloud',
+      8,
+      { pinned: true },
+    ));
+    expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+        conversations: Record<string, { pinnedAt?: number; archivedAt?: number; metadataRevision?: number }>;
+      };
+      expect(stored.conversations.conv_cloud).toMatchObject({
+        pinnedAt: 4_000,
+        archivedAt: 5_000,
+        metadataRevision: 9,
+      });
+    });
+  });
+
+  it('does not let a deferred stale bootstrap detail overwrite a successful local pin', async () => {
+    const remote = savedConversation({ metadata_revision: 7, pinned_at: null });
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud',
+          title: 'Cloud chat',
+          createdAt: 1_000,
+          updatedAt: 3_000,
+          cloudRevision: 3,
+          cloudUpdatedAt: 3_000,
+          cloudSyncedLocalUpdatedAt: 3_000,
+          metadataRevision: 7,
+          metadataUpdatedAt: 3_000,
+          messages: [
+            { id: 'cloud_user', role: 'user', rawContent: 'Cloud question', timestamp: 2_000, status: 'complete' },
+            { id: 'cloud_ai', role: 'ai', rawContent: 'Cloud answer', timestamp: 3_000, status: 'complete' },
+          ],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    mockCloudList(remote);
+    let resolveBootstrapDetail: ((value: { success: true; conversation: typeof remote }) => void) | undefined;
+    apiMocks.getSavedConversation
+      .mockReset()
+      .mockImplementationOnce(() => new Promise(resolve => { resolveBootstrapDetail = resolve; }));
+    apiMocks.setSavedConversationState.mockResolvedValueOnce({
+      success: true,
+      conversation: {
+        id: remote.id,
+        title: remote.title,
+        revision: remote.revision,
+        metadata_revision: 8,
+        pinned_at: 4_000,
+        archived_at: null,
+        created_at: remote.created_at,
+        updated_at: remote.updated_at,
+        message_count: remote.messages.length,
+      },
+    });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenCalledWith(
+      'conv_cloud',
+      7,
+      { pinned: true },
+    ));
+    await screen.findByText('Chat pinned and synced.');
+
+    await act(async () => {
+      resolveBootstrapDetail?.({ success: true, conversation: remote });
+    });
+    await screen.findByLabelText('History status: Synced');
+
+    const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      conversations: Record<string, { pinnedAt?: number; metadataRevision?: number }>;
+    };
+    expect(stored.conversations.conv_cloud).toMatchObject({
+      pinnedAt: 4_000,
+      metadataRevision: 8,
+    });
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    expect(await screen.findByRole('menuitem', { name: 'Unpin' })).toBeInTheDocument();
+  });
+
+  it('skips a stale conflict retry when an opposite pin intent arrives during hydration', async () => {
+    const remote = savedConversation();
+    const latestRemote = savedConversation({ metadata_revision: 8 });
+    mockCloudList(remote);
+    let resolveConflictGet: ((value: { success: true; conversation: typeof latestRemote }) => void) | undefined;
+    apiMocks.getSavedConversation
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, conversation: remote })
+      .mockImplementationOnce(() => new Promise(resolve => { resolveConflictGet = resolve; }));
+    apiMocks.setSavedConversationState
+      .mockRejectedValueOnce(new APIError('changed', {
+        status: 409,
+        code: 'metadata_revision_conflict',
+      }))
+      .mockResolvedValueOnce({
+        success: true,
+        conversation: {
+          id: remote.id,
+          title: remote.title,
+          revision: remote.revision,
+          metadata_revision: 9,
+          pinned_at: null,
+          archived_at: null,
+          created_at: remote.created_at,
+          updated_at: remote.updated_at,
+          message_count: remote.messages.length,
+        },
+      });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(2));
+    expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      1,
+      'conv_cloud',
+      7,
+      { pinned: true },
+    );
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Unpin' }));
+    expect(apiMocks.setSavedConversationState).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveConflictGet?.({ success: true, conversation: latestRemote });
+    });
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      2,
+      'conv_cloud',
+      8,
+      { pinned: false },
+    ));
+    expect(apiMocks.setSavedConversationState.mock.calls.map(call => call[2])).toEqual([
+      { pinned: true },
+      { pinned: false },
+    ]);
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+        conversations: Record<string, { pinnedAt?: number; metadataRevision?: number }>;
+      };
+      expect(stored.conversations.conv_cloud.metadataRevision).toBe(9);
+      expect(stored.conversations.conv_cloud.pinnedAt).toBeUndefined();
+    });
+  });
+
+  it('vetoes an update reload while a metadata mutation is pending', async () => {
+    const remote = savedConversation();
+    mockCloudList(remote);
+    let resolvePin: ((value: { success: true; conversation: Record<string, unknown> }) => void) | undefined;
+    apiMocks.setSavedConversationState.mockImplementationOnce(() => new Promise(resolve => { resolvePin = resolve; }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenCalledWith(
+      'conv_cloud',
+      7,
+      { pinned: true },
+    ));
+
+    const pendingSaveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    let pendingReloadAccepted = true;
+    act(() => { pendingReloadAccepted = window.dispatchEvent(pendingSaveEvent); });
+    expect(pendingReloadAccepted).toBe(false);
+    expect(pendingSaveEvent.defaultPrevented).toBe(true);
+
+    await act(async () => {
+      resolvePin?.({
+        success: true,
+        conversation: {
+          id: remote.id,
+          title: remote.title,
+          revision: remote.revision,
+          metadata_revision: 8,
+          pinned_at: 4_000,
+          archived_at: null,
+          created_at: remote.created_at,
+          updated_at: remote.updated_at,
+          message_count: remote.messages.length,
+        },
+      });
+    });
+    await screen.findByText('Chat pinned and synced.');
+
+    const settledSaveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    let settledReloadAccepted = false;
+    act(() => { settledReloadAccepted = window.dispatchEvent(settledSaveEvent); });
+    expect(settledReloadAccepted).toBe(true);
+    expect(settledSaveEvent.defaultPrevented).toBe(false);
+  });
+
+  it('serializes pin then archive into an aggregate metadata write that preserves both intents', async () => {
+    const remote = savedConversation();
+    const summary = (metadataRevision: number, pinnedAt: number | null, archivedAt: number | null) => ({
+      id: remote.id,
+      title: remote.title,
+      revision: remote.revision,
+      metadata_revision: metadataRevision,
+      pinned_at: pinnedAt,
+      archived_at: archivedAt,
+      created_at: remote.created_at,
+      updated_at: remote.updated_at,
+      message_count: remote.messages.length,
+    });
+    mockCloudList(remote);
+    let resolvePin: ((value: { success: true; conversation: ReturnType<typeof summary> }) => void) | undefined;
+    apiMocks.setSavedConversationState
+      .mockImplementationOnce(() => new Promise(resolve => { resolvePin = resolve; }))
+      .mockResolvedValueOnce({ success: true, conversation: summary(9, 4_000, 5_000) });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      1,
+      'conv_cloud',
+      7,
+      { pinned: true },
+    ));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }));
+    expect(apiMocks.setSavedConversationState).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePin?.({ success: true, conversation: summary(8, 4_000, null) });
+    });
+    await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
+      2,
+      'conv_cloud',
+      8,
+      { pinned: true, archived: true },
+    ));
+
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+        conversations: Record<string, { pinnedAt?: number; archivedAt?: number; metadataRevision?: number }>;
+      };
+      expect(stored.conversations.conv_cloud).toMatchObject({
+        pinnedAt: 4_000,
+        archivedAt: 5_000,
+        metadataRevision: 9,
+      });
+    });
+    expect(apiMocks.setSavedConversationState).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles an equal-revision optimistic metadata mismatch to authoritative server state after reboot', async () => {
+    const remote = savedConversation({ pinned_at: null, archived_at: null, metadata_revision: 7 });
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud',
+          title: 'Cloud chat',
+          createdAt: 1_000,
+          updatedAt: 4_000,
+          cloudRevision: 3,
+          cloudUpdatedAt: 3_000,
+          cloudSyncedLocalUpdatedAt: 4_000,
+          metadataRevision: 7,
+          metadataUpdatedAt: 4_500,
+          pinnedAt: 4_500,
+          messages: [
+            { id: 'cloud_user', role: 'user', rawContent: 'Cloud question', timestamp: 2_000, status: 'complete' },
+            { id: 'cloud_ai', role: 'ai', rawContent: 'Cloud answer', timestamp: 3_000, status: 'complete' },
+          ],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    mockCloudList(remote);
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledWith(
+      'conv_cloud',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+        conversations: Record<string, { pinnedAt?: number; archivedAt?: number; metadataRevision?: number }>;
+      };
+      expect(stored.conversations.conv_cloud.metadataRevision).toBe(7);
+      expect(stored.conversations.conv_cloud.pinnedAt).toBeUndefined();
+      expect(stored.conversations.conv_cloud.archivedAt).toBeUndefined();
+    });
+    expect(apiMocks.setSavedConversationState).not.toHaveBeenCalled();
+  });
+
   it('submits response feedback with its response and turn identifiers', async () => {
     apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Answer with ids', annotations: [], responseId: 'resp_1' });
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
@@ -1130,7 +2008,10 @@ describe('authenticated history, feedback, and sharing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
     await screen.findByText('Answer with ids');
 
-    fireEvent.click(screen.getByLabelText('Mark response as not helpful'));
+    const answerArticle = screen.getByText('Answer with ids').closest('article');
+    expect(answerArticle).not.toBeNull();
+    fireEvent.click(within(answerArticle as HTMLElement).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Not helpful' }));
     fireEvent.change(await screen.findByLabelText('Reason (optional)'), { target: { value: 'Missed the key step' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send feedback' }));
 
@@ -1148,6 +2029,22 @@ describe('authenticated history, feedback, and sharing', () => {
     });
   });
 
+  it('copies a stable link to an individual message in the current chat', async () => {
+    mockCloudList();
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    const answer = await screen.findByText('Cloud answer');
+    const answerArticle = answer.closest('article');
+    expect(answerArticle).not.toBeNull();
+    fireEvent.click(within(answerArticle as HTMLElement).getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Copy link to this message' }));
+
+    await waitFor(() => expect(clipboardWriteMock).toHaveBeenCalledWith(
+      'https://windowsforum.com/pages/ai/?conversation=conv_cloud&message=cloud_ai',
+    ));
+    expect(screen.getByText('Link to message copied.')).toBeInTheDocument();
+  });
+
   it('creates and one-time discloses a canonical public link only for a synced member chat', async () => {
     mockCloudList();
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
@@ -1159,7 +2056,7 @@ describe('authenticated history, feedback, and sharing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create link' }));
 
     await waitFor(() => expect(clipboardWriteMock).toHaveBeenCalledWith(
-      'https://windowsforum.com/pages/ai/?share=share_token_12345678901234567890'
+      'https://windowsforum.com/pages/ai/#share=share_token_12345678901234567890'
     ));
     expect(await screen.findByText(/This URL is disclosed only now/)).toBeInTheDocument();
     expect(apiMocks.createConversationShare).toHaveBeenCalledWith(
@@ -1167,6 +2064,34 @@ describe('authenticated history, feedback, and sharing', () => {
       3,
       expect.objectContaining({ expiresIn: 604_800, signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('preserves an unsent draft when clearing is cancelled or the server rejects it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    apiMocks.clearConversation.mockRejectedValueOnce(new APIError('down', {
+      status: 503,
+      retryable: true,
+    }));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_clear" />);
+
+    const composer = await screen.findByLabelText('Type your message');
+    fireEvent.change(composer, { target: { value: 'Do not discard this draft' } });
+    fireEvent.click(screen.getByLabelText('Chat actions'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clear messages' }));
+    const cancelledDialog = await screen.findByRole('dialog', { name: 'Clear messages?' });
+    fireEvent.click(within(cancelledDialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Clear messages?' })).not.toBeInTheDocument());
+    expect(composer).toHaveValue('Do not discard this draft');
+    expect(apiMocks.clearConversation).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByLabelText('Chat actions'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clear messages' }));
+    const failedDialog = await screen.findByRole('dialog', { name: 'Clear messages?' });
+    fireEvent.click(within(failedDialog).getByRole('button', { name: 'Clear messages' }));
+
+    expect(await screen.findByText(/could not clear this conversation/)).toBeInTheDocument();
+    expect(composer).toHaveValue('Do not discard this draft');
   });
 
   it('clears the local member store only after delete-all succeeds and leaves provider cleanup separate', async () => {
@@ -1188,6 +2113,7 @@ describe('authenticated history, feedback, and sharing', () => {
       pendingServerDeletions: {},
     }));
     window.localStorage.setItem('current_conversation_id:v4:42', 'conv_old');
+    window.localStorage.setItem('chat_scroll_positions:v1:42', JSON.stringify({ conv_old: 375 }));
     apiMocks.deleteAllSavedChatData.mockResolvedValue({
       success: true,
       deleted_scope: 'saved_chat_product_data',
@@ -1198,7 +2124,7 @@ describe('authenticated history, feedback, and sharing', () => {
       deletion_guard_max_retention_days: 365,
     });
 
-    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    const view = renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
     expect(await screen.findByText('Old private answer')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Chat actions'));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Account data' }));
@@ -1226,9 +2152,12 @@ describe('authenticated history, feedback, and sharing', () => {
       expect(store.pendingServerDeletions).toEqual({});
       expect(window.localStorage.getItem('current_conversation_id:v4:42')).not.toBe('conv_old');
       expect(window.localStorage.getItem('chat_cloud_bootstrap:v1:42')).toBeNull();
+      expect(window.localStorage.getItem('chat_scroll_positions:v1:42')).toBeNull();
     });
     expect(apiMocks.deleteConversation).not.toHaveBeenCalled();
     expect(screen.queryByText('Old private answer')).not.toBeInTheDocument();
+    view.unmount();
+    expect(window.localStorage.getItem('chat_scroll_positions:v1:42')).toBeNull();
   });
 
   it('aborts cloud persistence before starting delete-all and resumes after the reset', async () => {
@@ -1282,8 +2211,53 @@ describe('authenticated history, feedback, and sharing', () => {
     await waitFor(() => expect(screen.queryByText('Pending private question')).not.toBeInTheDocument());
   });
 
+  it('keeps cloud sync paused after server deletion succeeds but browser cleanup fails', async () => {
+    mockCloudList();
+    apiMocks.deleteAllSavedChatData.mockResolvedValue({
+      success: true,
+      deleted_scope: 'saved_chat_product_data',
+      attachment_files_deleted: 0,
+      attachment_files_deferred: 0,
+      deletion_guards_retained: 1,
+      deletion_guard_expires_at: 1_818_659_200_000,
+      deletion_guard_max_retention_days: 365,
+    });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await screen.findByLabelText('History status: Synced');
+    const historyReadsBeforeDelete = apiMocks.listSavedConversations.mock.calls.length;
+    const historyWritesBeforeDelete = apiMocks.upsertSavedConversation.mock.calls.length;
+
+    fireEvent.click(screen.getByLabelText('Chat actions'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Account data' }));
+    const accountDialog = await screen.findByRole('dialog', { name: /Your AI chat data/ });
+    const originalRemoveItem = window.localStorage.removeItem.bind(window.localStorage);
+    vi.spyOn(window.localStorage, 'removeItem').mockImplementation(key => {
+      if (key === 'chat_scroll_positions:v1:42') {
+        throw new DOMException('Browser storage is locked.', 'InvalidStateError');
+      }
+      originalRemoveItem(key);
+    });
+
+    fireEvent.click(within(accountDialog).getByRole('button', { name: 'Delete all data' }));
+    const confirmation = screen.getByRole('dialog', { name: 'Permanently delete saved chat data?' });
+    fireEvent.change(within(confirmation).getByLabelText('Confirmation phrase'), {
+      target: { value: 'DELETE SAVED CHAT DATA' },
+    });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Delete saved data' }));
+
+    expect(await within(confirmation).findByText(/Saved server data was deleted, but this browser could not clear/))
+      .toBeInTheDocument();
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 100));
+    });
+    expect(apiMocks.listSavedConversations).toHaveBeenCalledTimes(historyReadsBeforeDelete);
+    expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(historyWritesBeforeDelete);
+  });
+
   it('renders a public share as a read-only snapshot without local history or a composer', async () => {
-    window.history.replaceState(null, '', '/pages/ai/?share=share_token_12345678901234567890');
+    window.history.replaceState(null, '', '/pages/ai/#share=share_token_12345678901234567890');
     apiMocks.getConversationShare.mockResolvedValue({
       success: true,
       share: {
@@ -1298,6 +2272,18 @@ describe('authenticated history, feedback, and sharing', () => {
     expect(screen.getByText(/Read-only snapshot/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Type your message')).not.toBeInTheDocument();
     expect(apiMocks.listSavedConversations).not.toHaveBeenCalled();
+    expect(apiMocks.getConversationShare).toHaveBeenCalledWith(
+      'share_token_12345678901234567890',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    await waitFor(() => {
+      const url = new URL(window.location.href);
+      expect(url.hash).toBe('');
+      expect(url.searchParams.get('share')).toBeNull();
+      expect(window.history.state).toMatchObject({
+        wfShareToken: 'share_token_12345678901234567890',
+      });
+    });
     expect(document.head.querySelector('meta[name="robots"]')).toHaveAttribute(
       'content',
       'noindex,nofollow,noarchive',
@@ -1307,20 +2293,77 @@ describe('authenticated history, feedback, and sharing', () => {
     expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
   });
 
-  it('restores an existing robots directive after leaving a public share', () => {
+  it('keeps legacy query share links compatible and scrubs their bearer token', async () => {
     window.history.replaceState(null, '', '/pages/ai/?share=share_token_12345678901234567890');
     const robots = document.createElement('meta');
     robots.name = 'robots';
     robots.content = 'index,follow';
     document.head.appendChild(robots);
-    apiMocks.getConversationShare.mockReturnValue(new Promise(() => {}));
+    let locationAtShareFetch = '';
+    let historyStateAtShareFetch: unknown;
+    apiMocks.getConversationShare.mockImplementation(() => {
+      locationAtShareFetch = window.location.href;
+      historyStateAtShareFetch = window.history.state;
+      return new Promise(() => {});
+    });
 
     const view = renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_public" />);
     expect(robots).toHaveAttribute('content', 'noindex,nofollow,noarchive');
+    await waitFor(() => expect(apiMocks.getConversationShare).toHaveBeenCalledTimes(1));
+    expect(new URL(locationAtShareFetch).searchParams.get('share')).toBeNull();
+    expect(historyStateAtShareFetch).toMatchObject({
+      wfShareToken: 'share_token_12345678901234567890',
+    });
+    await waitFor(() => {
+      const url = new URL(window.location.href);
+      expect(url.searchParams.get('share')).toBeNull();
+      expect(url.hash).toBe('');
+      expect(window.history.state).toMatchObject({
+        wfShareToken: 'share_token_12345678901234567890',
+      });
+    });
 
     view.unmount();
     expect(robots).toHaveAttribute('content', 'index,follow');
     robots.remove();
+  });
+
+  it('replaces a retained share when an explicit hash navigates from token A to token B', async () => {
+    const tokenA = 'share_token_A_12345678901234567890';
+    const tokenB = 'share_token_B_12345678901234567890';
+    window.history.replaceState(null, '', `/pages/ai/#share=${tokenA}`);
+    apiMocks.getConversationShare.mockImplementation(async (token: string) => ({
+      success: true,
+      share: {
+        id: token === tokenA ? 'share_a' : 'share_b',
+        title: token === tokenA ? 'Shared A' : 'Shared B',
+        created_at: 1_000,
+        expires_at: Date.now() + 86_400_000,
+        messages: [{
+          role: 'assistant',
+          content: token === tokenA ? 'Answer from share A' : 'Answer from share B',
+          createdAt: 1_000,
+        }],
+      },
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_public" />);
+    expect(await screen.findByText('Answer from share A')).toBeInTheDocument();
+    expect(window.history.state).toMatchObject({ wfShareToken: tokenA });
+
+    act(() => {
+      window.history.pushState(window.history.state, '', `/pages/ai/#share=${tokenB}`);
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    expect(await screen.findByText('Answer from share B')).toBeInTheDocument();
+    expect(screen.queryByText('Answer from share A')).not.toBeInTheDocument();
+    expect(apiMocks.getConversationShare).toHaveBeenLastCalledWith(
+      tokenB,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(new URL(window.location.href).hash).toBe('');
+    expect(window.history.state).toMatchObject({ wfShareToken: tokenB });
   });
 
   it('deletes the synced cloud record after local confirmation', async () => {
@@ -1337,6 +2380,204 @@ describe('authenticated history, feedback, and sharing', () => {
       3,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
+  });
+
+  it('restores sidebar search focus after Delete is cancelled or confirmed', async () => {
+    mockCloudList();
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    const search = screen.getByRole('searchbox', { name: 'Search chat history' });
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const cancelledDialog = await screen.findByRole('dialog', { name: 'Delete chat?' });
+    fireEvent.click(within(cancelledDialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete chat?' })).not.toBeInTheDocument());
+    await waitFor(() => expect(search).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const confirmedDialog = await screen.findByRole('dialog', { name: 'Delete chat?' });
+    fireEvent.click(within(confirmedDialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete chat?' })).not.toBeInTheDocument());
+    await waitFor(() => expect(search).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.queryByText('Cloud answer')).not.toBeInTheDocument();
+  });
+
+  it('restores the persistent Select control after cancelling bulk Delete', async () => {
+    mockCloudList();
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Cloud chat' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected chats' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete selected chats?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete selected chats?' })).not.toBeInTheDocument());
+    const select = screen.getByRole('button', { name: 'Select' });
+    await waitFor(() => expect(select).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByText('Cloud answer')).toBeInTheDocument();
+  });
+
+  it('restores the persistent Select control after closing bulk Export', async () => {
+    mockCloudList();
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Cloud chat' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Export selected chats' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export selected chats' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Export selected chats' })).not.toBeInTheDocument());
+    const select = screen.getByRole('button', { name: 'Select' });
+    await waitFor(() => expect(select).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByText('Cloud answer')).toBeInTheDocument();
+  });
+
+  it('does not resurrect or upload a locally deleted chat when its stale bootstrap detail resolves', async () => {
+    const remote = savedConversation();
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud',
+          title: 'Cloud chat',
+          createdAt: 1_000,
+          updatedAt: 3_000,
+          cloudRevision: 3,
+          cloudUpdatedAt: 3_000,
+          cloudSyncedLocalUpdatedAt: 3_000,
+          metadataRevision: 7,
+          metadataUpdatedAt: 3_000,
+          messages: [
+            { id: 'cloud_user', role: 'user', rawContent: 'Cloud question', timestamp: 2_000, status: 'complete' },
+            { id: 'cloud_ai', role: 'ai', rawContent: 'Cloud answer', timestamp: 3_000, status: 'complete' },
+          ],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    mockCloudList(remote);
+    let resolveBootstrapDetail: ((value: { success: true; conversation: typeof remote }) => void) | undefined;
+    apiMocks.getSavedConversation
+      .mockReset()
+      .mockImplementationOnce(() => new Promise(resolve => { resolveBootstrapDetail = resolve; }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Cloud answer');
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const confirmation = await screen.findByRole('dialog', { name: 'Delete chat?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByText('Cloud answer')).not.toBeInTheDocument());
+
+    await act(async () => {
+      resolveBootstrapDetail?.({ success: true, conversation: remote });
+    });
+    await screen.findByLabelText('History status: Synced');
+
+    expect(screen.queryByText('Cloud answer')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Actions for Cloud chat')).not.toBeInTheDocument();
+    expect(apiMocks.upsertSavedConversation).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'conv_cloud' }),
+      expect.anything(),
+      expect.anything(),
+    );
+    const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      conversations: Record<string, unknown>;
+      tombstones: Record<string, number>;
+    };
+    expect(stored.conversations.conv_cloud).toBeUndefined();
+    expect(stored.tombstones.conv_cloud).toEqual(expect.any(Number));
+  });
+
+  it('does not apply a stale revision-conflict winner after the local chat is deleted', async () => {
+    const initialRemote = savedConversation({ updated_at: 3_000 });
+    const conflictRemote = savedConversation({
+      revision: 4,
+      updated_at: 5_000,
+      messages: [{
+        id: 'remote_user',
+        role: 'user',
+        rawContent: 'Stale conflict winner',
+        timestamp: 5_000,
+        status: 'complete',
+      }],
+    });
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud',
+          title: 'Dirty local chat',
+          createdAt: 1_000,
+          updatedAt: 4_000,
+          cloudRevision: 3,
+          cloudUpdatedAt: 3_000,
+          cloudSyncedLocalUpdatedAt: 3_000,
+          metadataRevision: 7,
+          metadataUpdatedAt: 3_000,
+          messages: [{
+            id: 'local_user',
+            role: 'user',
+            rawContent: 'Dirty local message',
+            timestamp: 4_000,
+            status: 'complete',
+          }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    mockCloudList(initialRemote);
+    let resolveConflictDetail: ((value: { success: true; conversation: typeof conflictRemote }) => void) | undefined;
+    apiMocks.getSavedConversation
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, conversation: initialRemote })
+      .mockImplementationOnce(() => new Promise(resolve => { resolveConflictDetail = resolve; }));
+    apiMocks.upsertSavedConversation.mockRejectedValueOnce(new APIError('changed', {
+      status: 409,
+      code: 'revision_conflict',
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Dirty local message');
+    await waitFor(() => expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(2));
+
+    fireEvent.click((await screen.findAllByLabelText('Actions for Dirty local chat'))[0]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const confirmation = await screen.findByRole('dialog', { name: 'Delete chat?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByText('Dirty local message')).not.toBeInTheDocument());
+
+    await act(async () => {
+      resolveConflictDetail?.({ success: true, conversation: conflictRemote });
+    });
+    await screen.findByLabelText('History status: Synced');
+
+    expect(screen.queryByText('Stale conflict winner')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Actions for Dirty local chat')).not.toBeInTheDocument();
+    expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(1);
+    const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      conversations: Record<string, unknown>;
+      tombstones: Record<string, number>;
+    };
+    expect(stored.conversations.conv_cloud).toBeUndefined();
+    expect(stored.tombstones.conv_cloud).toEqual(expect.any(Number));
   });
 });
 
@@ -1380,6 +2621,83 @@ describe('message scrolling', () => {
   };
 
   beforeEach(stubBoundingRects);
+
+  it('restores an independent transcript position when returning to a chat', async () => {
+    window.localStorage.setItem('chat_store:v4:guest_scroll', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_first: {
+          id: 'conv_first',
+          title: 'First chat',
+          createdAt: 1_000,
+          updatedAt: 3_000,
+          messages: [{ id: 'first_ai', role: 'ai', rawContent: 'First answer', timestamp: 3_000 }],
+        },
+        conv_second: {
+          id: 'conv_second',
+          title: 'Second chat',
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          messages: [{ id: 'second_ai', role: 'ai', rawContent: 'Second answer', timestamp: 2_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_scroll', 'conv_first');
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_scroll" />);
+    expect(await screen.findByText('First answer')).toBeInTheDocument();
+    const pane = await findPane();
+    pane.scrollTop = 420;
+    fireEvent.scroll(pane);
+    await waitFor(() => expect(window.localStorage.getItem('chat_scroll_positions:v1:guest_scroll'))
+      .toContain('"conv_first":420'));
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /^Second chat/ }))[0]);
+    expect(await screen.findByText('Second answer')).toBeInTheDocument();
+    await waitFor(() => expect(pane.scrollTop).toBe(1_200));
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /^First chat/ }))[0]);
+    expect(await screen.findByText('First answer')).toBeInTheDocument();
+    await waitFor(() => expect(pane.scrollTop).toBe(420));
+  });
+
+  it('does not resurrect scroll ids removed by another tab when this stale tab unmounts', async () => {
+    const scrollKey = 'chat_scroll_positions:v1:guest_scroll_event';
+    window.localStorage.setItem('chat_store:v4:guest_scroll_event', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_old: {
+          id: 'conv_old',
+          title: 'Old scrolled chat',
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          messages: [{ id: 'old_ai', role: 'ai', rawContent: 'Old scroll answer', timestamp: 2_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_scroll_event', 'conv_old');
+    window.localStorage.setItem(scrollKey, JSON.stringify({ conv_old: 510 }));
+    const setItemSpy = vi.spyOn(window.localStorage, 'setItem');
+
+    const view = renderThemed(
+      <ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_scroll_event" />,
+    );
+    expect(await screen.findByText('Old scroll answer')).toBeInTheDocument();
+    setItemSpy.mockClear();
+
+    window.localStorage.removeItem(scrollKey);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: scrollKey, newValue: null }));
+    });
+    view.unmount();
+
+    expect(window.localStorage.getItem(scrollKey)).toBeNull();
+    expect(setItemSpy).not.toHaveBeenCalledWith(scrollKey, expect.any(String));
+  });
 
   it('never scrolls the window, whatever happens in a turn', async () => {
     apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Contained answer', annotations: [] });
@@ -1706,7 +3024,8 @@ describe('composer and message integrity', () => {
       />
     );
 
-    fireEvent.click(screen.getByLabelText('Edit message'));
+    fireEvent.click(screen.getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit message' }));
     expect(screen.getByRole('textbox')).toHaveValue('**bold** [example](https://example.com)');
   });
 
@@ -1738,7 +3057,8 @@ describe('composer and message integrity', () => {
     expect(wrap).toHaveAttribute('aria-pressed', 'true');
     expect(wrap.closest('.wf-code-block')).toHaveClass('is-wrapped');
 
-    fireEvent.click(screen.getByLabelText('Read message aloud'));
+    fireEvent.click(screen.getByRole('button', { name: 'Message actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Read aloud' }));
     expect(onSpeak).toHaveBeenCalledWith('ai-1', '```ts\nconst answer = 42;\n```');
   });
 });

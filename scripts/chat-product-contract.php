@@ -113,6 +113,16 @@ function wfChatProductExpectedRevision($value, bool $allowZero = true): ?int
     return $revision;
 }
 
+function wfChatProductNullableBooleanChange(array $input, string $key, bool &$present, ?bool &$value): bool
+{
+    $present = array_key_exists($key, $input);
+    $value = null;
+    if (!$present || $input[$key] === null) return true;
+    if (!is_bool($input[$key])) return false;
+    $value = $input[$key];
+    return true;
+}
+
 function wfChatProductTimestampMs($value, ?int $fallback = null): ?int
 {
     if (is_int($value)) $timestamp = $value;

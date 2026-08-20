@@ -104,6 +104,35 @@ describe('member cloud-history contract', () => {
     });
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it('lists archived chats explicitly and sends independent metadata revisions', async () => {
+    const summary = {
+      id: 'conv_1', title: 'Saved', revision: 3, metadata_revision: 7,
+      pinned_at: 100, archived_at: null, created_at: 10, updated_at: 20, message_count: 2,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ success: true, conversations: [summary], next_cursor: null }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, conversation: { ...summary, archived_at: 200, metadata_revision: 8 } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await ChatAPI.listSavedConversations({ includeArchived: true });
+    expect(lastJSONBody()).toEqual({
+      action: 'listSavedConversations',
+      include_archived: true,
+      expected_identity_id: 'identity_test',
+      _xfToken: 'csrf_test',
+    });
+
+    await ChatAPI.setSavedConversationState('conv_1', 7, { archived: true });
+    expect(lastJSONBody()).toEqual({
+      action: 'setSavedConversationState',
+      client_conversation_id: 'conv_1',
+      expected_metadata_revision: 7,
+      archived: true,
+      expected_identity_id: 'identity_test',
+      _xfToken: 'csrf_test',
+    });
+  });
 });
 
 describe('product capability contracts', () => {

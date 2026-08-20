@@ -155,7 +155,10 @@ describe('AccountDataDialog', () => {
 
     resolveDelete?.(deleteResult);
     await waitFor(() => expect(onDeleteAllSucceeded).toHaveBeenCalledWith(deleteResult));
-    await waitFor(() => expect(onDeleteAllFinished).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(onDeleteAllFinished).toHaveBeenCalledWith({
+      serverDeleted: true,
+      localResetSucceeded: true,
+    }));
     expect(order).toEqual(['pause', 'server', 'local-reset', 'resume']);
     expect(await screen.findByRole('status')).toHaveTextContent('deleted from the server and this browser');
   });
@@ -175,7 +178,10 @@ describe('AccountDataDialog', () => {
 
     expect(await within(confirmationDialog).findByText('Deletion service unavailable.')).toBeInTheDocument();
     expect(onDeleteAllSucceeded).not.toHaveBeenCalled();
-    expect(onDeleteAllFinished).toHaveBeenCalledWith(false);
+    expect(onDeleteAllFinished).toHaveBeenCalledWith({
+      serverDeleted: false,
+      localResetSucceeded: false,
+    });
   });
 
   it('distinguishes a post-success local cleanup failure from a server failure', async () => {
@@ -184,7 +190,8 @@ describe('AccountDataDialog', () => {
       attachment_files_deferred: 1,
     });
     const onDeleteAllSucceeded = vi.fn().mockRejectedValue(new Error('Browser storage is locked.'));
-    renderDialog({ onDeleteAllSucceeded });
+    const onDeleteAllFinished = vi.fn();
+    renderDialog({ onDeleteAllSucceeded, onDeleteAllFinished });
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete all data' }));
     const confirmationDialog = screen.getByRole('dialog', { name: 'Permanently delete saved chat data?' });
@@ -194,6 +201,10 @@ describe('AccountDataDialog', () => {
     fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Delete saved data' }));
 
     await waitFor(() => expect(onDeleteAllSucceeded).toHaveBeenCalledTimes(1));
+    expect(onDeleteAllFinished).toHaveBeenCalledWith({
+      serverDeleted: true,
+      localResetSucceeded: false,
+    });
     expect(within(confirmationDialog).getByText(/Saved server data was deleted/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete saved data' })).toBeDisabled();
   });
@@ -218,7 +229,7 @@ describe('AccountDataDialog', () => {
     expect(artifact.filename).toBe('windowsforum-ai-data-2026-08-19.json');
     expect(JSON.parse(artifact.content)).toEqual(exportPayload);
     expect(canonicalConversationShareUrl('token_value', 'https://windowsforum.com')).toBe(
-      'https://windowsforum.com/pages/ai/?share=token_value',
+      'https://windowsforum.com/pages/ai/#share=token_value',
     );
   });
 
