@@ -92,6 +92,11 @@ readonly DEPLOY_ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
 readonly DEPLOY_SINGLE_NODE="${DEPLOY_SINGLE_NODE:-1}"
 readonly DEPLOY_RETRY_DELAY="${DEPLOY_RETRY_DELAY:-2}"
 readonly DEPLOY_PUBLIC_RETRY_DELAY="${DEPLOY_PUBLIC_RETRY_DELAY:-5}"
+readonly DEPLOY_PUBLIC_RETRY_ATTEMPTS="${DEPLOY_PUBLIC_RETRY_ATTEMPTS:-6}"
+# A successful Cloudflare purge can be acknowledged before every edge has
+# dropped the just-failed release. Give rollback restoration a longer, bounded
+# exact-hash convergence window before recording manual intervention as needed.
+readonly DEPLOY_ROLLBACK_PUBLIC_RETRY_ATTEMPTS="${DEPLOY_ROLLBACK_PUBLIC_RETRY_ATTEMPTS:-13}"
 readonly DEPLOY_SSH_CONNECT_TIMEOUT="${DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
 readonly DEPLOY_PROBE_ATTEMPTS="${DEPLOY_PROBE_ATTEMPTS:-3}"
 readonly INVENTORY_NAME="RELEASE-INVENTORY.sha256"
@@ -614,7 +619,7 @@ restore_after_failure() {
     verify_root="$PREVIOUS_TARGET"
   fi
   if [[ -n "$verify_root" ]] && ((${#notes[@]} == 0)); then
-    if verify_live_release "$verify_root" 0; then
+    if verify_live_release "$verify_root" 0 "$DEPLOY_ROLLBACK_PUBLIC_RETRY_ATTEMPTS"; then
       log "Re-verified the restored release on both origins."
     else
       notes+=("reverify-failed")
@@ -940,16 +945,18 @@ assert_origin_hash() {
 }
 
 assert_public_hash() {
-  local relative="$1" expected_file="$2"
+  local relative="$1" expected_file="$2" max_attempts="${3:-$DEPLOY_PUBLIC_RETRY_ATTEMPTS}"
   local expected_hash actual_hash download attempt
 
+  [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] \
+    || { fail "Public retry attempts must be a positive integer"; return 1; }
   expected_hash="$(sha256sum -- "$expected_file" | awk '{print $1}')" \
     || { fail "Cannot hash $expected_file"; return 1; }
   [[ -n "$PUBLIC_EDGE_IP" ]] || { fail "Cannot resolve the public Cloudflare edge"; return 1; }
   download="$(mktemp)" || return 1
   TEMP_FILES+=("$download")
 
-  for attempt in 1 2 3 4 5 6; do
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     if curl --fail --silent --show-error \
       --resolve "windowsforum.com:443:$PUBLIC_EDGE_IP" \
       "$LIVE_ORIGIN/chatpage/$relative?v=2" --output "$download"; then
@@ -958,7 +965,7 @@ assert_public_hash() {
         return 0
       fi
     fi
-    if ((attempt < 6)); then
+    if ((attempt < max_attempts)); then
       sleep "$DEPLOY_PUBLIC_RETRY_DELAY"
     fi
   done
@@ -1046,7 +1053,9 @@ assert_chat_page_markup() {
 }
 
 verify_live_release() {
-  local release="$1" require_chat_contract="${2:-1}" relative file basename
+  local release="$1" require_chat_contract="${2:-1}"
+  local public_retry_attempts="${3:-$DEPLOY_PUBLIC_RETRY_ATTEMPTS}"
+  local relative file basename
   local no_cache='cache-control:.*no-cache.*must-revalidate'
   local immutable='cache-control:.*max-age=31536000.*immutable'
   local -a stable_artifacts=()
@@ -1091,7 +1100,7 @@ verify_live_release() {
     if [[ "$relative" == index.html || "$relative" == offline.html ]]; then
       assert_public_html_contract "$relative" || return 1
     else
-      assert_public_hash "$relative" "$file" || return 1
+      assert_public_hash "$relative" "$file" "$public_retry_attempts" || return 1
     fi
   done
 

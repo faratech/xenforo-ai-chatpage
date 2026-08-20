@@ -18,7 +18,8 @@ const CHAT_DESCRIPTION = 'No cache on chat';
 const MEDIA_DESCRIPTION = 'Cache XenForo media attachments';
 const CHAT_CLAUSE = '(http.request.uri.path contains "/chatpage")';
 const CHAT_ASSET_CLAUSE = '((http.request.uri.path contains "/chatpage") and not ((http.request.uri.path in {"/chatpage/" "/chatpage/index.html" "/chatpage/manifest.json" "/chatpage/bot-avatar.webp"}) or starts_with(http.request.uri.path, "/chatpage/static/")))';
-const AVATAR_EXCLUSION = ' and not ((http.host eq "windowsforum.com") and (http.request.uri.path eq "/chatpage/bot-avatar.webp"))';
+const LEGACY_AVATAR_EXCLUSION = ' and not ((http.host eq "windowsforum.com") and (http.request.uri.path eq "/chatpage/bot-avatar.webp"))';
+const STABLE_CHAT_MEDIA_EXCLUSION = ' and not ((http.host eq "windowsforum.com") and (http.request.uri.path in {"/chatpage/bot-avatar.webp" "/chatpage/pwa-icon-192.png" "/chatpage/pwa-icon-512.png"}))';
 const MUTABLE_FIELDS = [
   'action',
   'action_parameters',
@@ -47,8 +48,11 @@ export const proposedChatExpression = expression => {
 };
 
 export const proposedMediaExpression = expression => {
-  if (expression.endsWith(AVATAR_EXCLUSION)) return expression;
-  return `(${expression})${AVATAR_EXCLUSION}`;
+  if (expression.endsWith(STABLE_CHAT_MEDIA_EXCLUSION)) return expression;
+  if (expression.endsWith(LEGACY_AVATAR_EXCLUSION)) {
+    return `${expression.slice(0, -LEGACY_AVATAR_EXCLUSION.length)}${STABLE_CHAT_MEDIA_EXCLUSION}`;
+  }
+  return `(${expression})${STABLE_CHAT_MEDIA_EXCLUSION}`;
 };
 
 const parseArgs = args => {
