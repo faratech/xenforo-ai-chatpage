@@ -85,6 +85,7 @@ describe('client telemetry lifecycle', () => {
   it('emits only bounded, low-cardinality chat/source/export metadata', async () => {
     const {
       reportChatLifecycle,
+      reportClientEvent,
       reportConversationExport,
       reportSourceOpened,
     } = await import('../services/telemetry');
@@ -97,7 +98,9 @@ describe('client telemetry lifecycle', () => {
     });
     reportSourceOpened('url', 3, 'turn:abc');
     reportConversationExport('markdown', 'web-share-file', 5_000, 'export:one');
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    reportConversationExport('text', 'clipboard', 7, 'export:two');
+    reportClientEvent('history_search', { outcome: 'no_results', value: 0 });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(5));
 
     const payloads = vi.mocked(fetch).mock.calls.map(([, init]) => (
       JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -119,6 +122,16 @@ describe('client telemetry lifecycle', () => {
       event: 'conversation_exported',
       outcome: 'markdown_web-share-file',
       value: 1_000,
+    });
+    expect(payloads[3]).toMatchObject({
+      event: 'conversation_exported',
+      outcome: 'text_clipboard',
+      value: 7,
+    });
+    expect(payloads[4]).toMatchObject({
+      event: 'history_search',
+      outcome: 'no_results',
+      value: 0,
     });
     for (const payload of payloads) {
       expect(payload).not.toHaveProperty('message');

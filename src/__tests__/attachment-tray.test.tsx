@@ -27,6 +27,7 @@ const theme = createTheme();
 interface HarnessProps {
   initial?: ChatAttachment[];
   signedIn?: boolean;
+  compact?: boolean;
   onBusyChange?: (busy: boolean) => void;
   onRemoveAttachment?: (attachment: ChatAttachment) => void | Promise<void>;
 }
@@ -34,20 +35,25 @@ interface HarnessProps {
 const Harness = ({
   initial = [],
   signedIn = true,
+  compact = false,
   onBusyChange,
   onRemoveAttachment,
 }: HarnessProps) => {
   const [attachments, setAttachments] = useState(initial);
   return (
     <ThemeProvider theme={theme}>
-      <AttachmentTray
-        signedIn={signedIn}
-        conversationId="conv_current"
-        attachments={attachments}
-        onChange={setAttachments}
-        onBusyChange={onBusyChange}
-        onRemoveAttachment={onRemoveAttachment}
-      />
+      <div className={compact ? 'wf-composer-shell' : undefined}>
+        <AttachmentTray
+          compact={compact}
+          signedIn={signedIn}
+          conversationId="conv_current"
+          attachments={attachments}
+          onChange={setAttachments}
+          onBusyChange={onBusyChange}
+          onRemoveAttachment={onRemoveAttachment}
+        />
+        {compact && <textarea aria-label="Composer text" />}
+      </div>
     </ThemeProvider>
   );
 };
@@ -178,5 +184,46 @@ describe('AttachmentTray', () => {
     render(<Harness signedIn={false} />);
     expect(screen.getByRole('alert')).toHaveTextContent('Sign in to attach');
     expect(screen.queryByRole('button', { name: 'Add files' })).not.toBeInTheDocument();
+  });
+
+  it('accepts paste and drop anywhere in the compact composer', async () => {
+    apiMocks.uploadChatAttachment
+      .mockResolvedValueOnce({ success: true, attachment: attachment({ name: 'pasted.png', mime: 'image/png' }) })
+      .mockResolvedValueOnce({ success: true, attachment: attachment({ id: 'att_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', name: 'dropped.txt' }) });
+    const { container } = render(<Harness compact />);
+    const composer = container.querySelector<HTMLElement>('.wf-composer-shell')!;
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' });
+
+    const pasted = new File(['image'], 'pasted.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: { items: [{ kind: 'file', getAsFile: () => pasted }] },
+    });
+    textarea.dispatchEvent(pasteEvent);
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledWith(
+      pasted,
+      expect.objectContaining({ conversationId: 'conv_current' }),
+    ));
+    expect(await screen.findByLabelText('Attached files')).toHaveTextContent('pasted.png');
+
+    const dropped = new File(['log'], 'dropped.txt', { type: 'text/plain' });
+    const dropEvent = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(dropEvent, 'dataTransfer', { value: { files: [dropped] } });
+    composer.dispatchEvent(dropEvent);
+    expect(await screen.findByLabelText('Attached files')).toHaveTextContent('dropped.txt');
+    expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the maximum compact attachment set in one horizontally scrollable row', () => {
+    const attachments = Array.from({ length: 8 }, (_, index) => attachment({
+      id: `att_${String(index).padStart(32, 'a')}`,
+      name: `long-diagnostic-file-${index}.txt`,
+    }));
+    render(<Harness compact initial={attachments} />);
+
+    const row = screen.getByLabelText('Attached files');
+    expect(row.children).toHaveLength(8);
+    expect(window.getComputedStyle(row).flexWrap).toBe('nowrap');
+    expect(window.getComputedStyle(row).overflowX).toBe('auto');
   });
 });

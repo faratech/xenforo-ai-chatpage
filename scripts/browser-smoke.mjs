@@ -212,6 +212,7 @@ const createPage = async (
     failChatChunk = false,
     failPreferencesChunkOnce = false,
     blockServiceWorkers = false,
+    viewport,
   } = {},
 ) => {
   const state = {
@@ -227,6 +228,7 @@ const createPage = async (
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
     serviceWorkers: blockServiceWorkers ? 'block' : 'allow',
+    ...(viewport ? { viewport } : {}),
   });
   const page = await context.newPage();
   const routeApi = async route => {
@@ -330,7 +332,10 @@ try {
   }
 
   {
-    const { context, page, state } = await createPage('cold-mobile', 'completion');
+    const mobileViewport = { width: 390, height: 844 };
+    const { context, page, state } = await createPage('cold-mobile', 'completion', {
+      viewport: mobileViewport,
+    });
     await page.addInitScript(() => {
       globalThis.__wfSmokeVitals = { cls: 0, lcp: 0 };
       try {
@@ -376,9 +381,61 @@ try {
     assert(vitals.fcp > 0 && vitals.fcp < 6_000, `cold mobile FCP was ${vitals.fcp} ms (budget 6000)`);
     assert(vitals.lcp > 0 && vitals.lcp < 8_000, `cold mobile LCP was ${vitals.lcp} ms (budget 8000)`);
     assert(vitals.cls <= 0.05, `cold mobile CLS was ${vitals.cls} (budget 0.05)`);
+
+    const openHistory = page.getByRole('button', { name: 'Open chat history' });
+    await openHistory.click();
+    const closeHistory = page.getByRole('button', { name: 'Close chat history' });
+    await closeHistory.waitFor();
+    const drawer = page.locator('.MuiDrawer-paper').filter({ has: closeHistory });
+    await page.waitForFunction(() => {
+      const close = globalThis.document.querySelector('[aria-label="Close chat history"]');
+      const paper = close?.closest('.MuiDrawer-paper');
+      if (!paper) return false;
+      const bounds = paper.getBoundingClientRect();
+      return bounds.left >= -1 && bounds.right <= globalThis.innerWidth + 1;
+    });
+    const drawerBox = await drawer.boundingBox();
+    assert(drawerBox, 'mobile history drawer must have a visible paper');
+    assert(
+      drawerBox.width >= mobileViewport.width * 0.85,
+      `mobile history drawer is too narrow: ${drawerBox.width}px at ${mobileViewport.width}px`,
+    );
+    assert(
+      drawerBox.width <= 361,
+      `mobile history drawer exceeded its 360px cap: ${drawerBox.width}px`,
+    );
+    assert(
+      drawerBox.x >= -1 && drawerBox.x + drawerBox.width <= mobileViewport.width + 1,
+      `mobile history drawer escaped the viewport: ${JSON.stringify(drawerBox)}`,
+    );
+
+    const assertNoHorizontalOverflow = async label => {
+      const widths = await page.evaluate(() => ({
+        viewport: globalThis.document.documentElement.clientWidth,
+        document: globalThis.document.documentElement.scrollWidth,
+        body: globalThis.document.body.scrollWidth,
+        chat: globalThis.document.getElementById('wf-chat-window')?.scrollWidth ?? 0,
+      }));
+      assert(
+        widths.document <= widths.viewport + 1
+          && widths.body <= widths.viewport + 1
+          && widths.chat <= widths.viewport + 1,
+        `${label} overflowed horizontally: ${JSON.stringify(widths)}`,
+      );
+    };
+    await assertNoHorizontalOverflow('open mobile history');
+
+    await closeHistory.click();
+    await closeHistory.waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => (
+      globalThis.document.activeElement?.getAttribute('aria-label') === 'Open chat history'
+    ));
+    await assertNoHorizontalOverflow('closed mobile history');
+
     process.stdout.write(
       `cold mobile smoke: composer=${composerReadyMs}ms fcp=${Math.round(vitals.fcp)}ms `
-      + `lcp=${Math.round(vitals.lcp)}ms cls=${vitals.cls.toFixed(4)}\n`,
+      + `lcp=${Math.round(vitals.lcp)}ms cls=${vitals.cls.toFixed(4)} `
+      + `drawer=${Math.round(drawerBox.width)}px viewport=${mobileViewport.width}px\n`,
     );
     await context.close();
   }

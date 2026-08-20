@@ -3,6 +3,7 @@ import Avatar from '@mui/material/Avatar';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import ButtonBase from '@mui/material/ButtonBase';
 import CircularProgress from '@mui/material/CircularProgress';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
@@ -13,6 +14,7 @@ import Fade from '@mui/material/Fade';
 import IconButton from '@mui/material/IconButton';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
+import Popover from '@mui/material/Popover';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
@@ -36,6 +38,10 @@ import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 import SupportAgentIcon from '@mui/icons-material/SupportAgent';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import ManageAccountsOutlinedIcon from '@mui/icons-material/ManageAccountsOutlined';
+import AttachFileOutlinedIcon from '@mui/icons-material/AttachFileOutlined';
+import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
+import SearchOutlinedIcon from '@mui/icons-material/SearchOutlined';
+import TroubleshootOutlinedIcon from '@mui/icons-material/TroubleshootOutlined';
 
 import type {
   Annotation,
@@ -51,7 +57,7 @@ import type {
 } from '../types';
 import { Message as MessageComponent } from './Message';
 import { InputArea } from './InputArea';
-import { EXAMPLE_PROMPTS } from '../utils/helpers';
+import type { ConversationExportOutcome } from './ExportConversationDialog';
 import { generateConversationId, generateTurnId } from '../utils/ids';
 import {
   APIError,
@@ -102,6 +108,10 @@ const PreferencesDialog = React.lazy(() => loadLazyModule(async () => {
   const module = await import('./PreferencesDialog');
   return { default: module.PreferencesDialog };
 }));
+const ExportConversationDialog = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./ExportConversationDialog');
+  return { default: module.ExportConversationDialog };
+}));
 const AttachmentTray = React.lazy(() => loadLazyModule(async () => {
   const module = await import('./AttachmentTray');
   return { default: module.AttachmentTray };
@@ -138,6 +148,39 @@ const ELAPSED_TICK_MS = 1_000;
 const CLOUD_SYNC_DEBOUNCE_MS = 1_200;
 const MAX_CLOUD_CONVERSATIONS = 50;
 const CLOUD_FETCH_CONCURRENCY = 5;
+const STARTER_ACTIONS = [
+  {
+    id: 'troubleshoot',
+    title: 'Troubleshoot a Windows problem',
+    description: 'Work from the symptom to the safest next check.',
+    prompt: 'Help me troubleshoot a Windows problem. Start by asking for the most useful missing details.',
+  },
+  {
+    id: 'analyze_file',
+    title: 'Diagnose an error',
+    description: 'Paste the exact message or relevant log details.',
+    prompt: 'Help me diagnose a Windows error. I will paste the exact message or relevant log details next.',
+  },
+  {
+    id: 'find_guidance',
+    title: 'Find trusted guidance',
+    description: 'Search WindowsForum and current Microsoft sources.',
+    prompt: 'Find relevant WindowsForum threads and current Microsoft guidance for this issue: ',
+  },
+  {
+    id: 'support_post',
+    title: 'Prepare a support post',
+    description: 'Turn the details into a clear forum-ready question.',
+    prompt: 'Help me prepare a clear WindowsForum support post. Ask for the missing system details first.',
+  },
+] as const;
+
+const starterIcon = (id: typeof STARTER_ACTIONS[number]['id']) => {
+  if (id === 'troubleshoot') return <TroubleshootOutlinedIcon sx={{ fontSize: 18 }} />;
+  if (id === 'analyze_file') return <AttachFileOutlinedIcon sx={{ fontSize: 18 }} />;
+  if (id === 'find_guidance') return <SearchOutlinedIcon sx={{ fontSize: 18 }} />;
+  return <ForumOutlinedIcon sx={{ fontSize: 18 }} />;
+};
 
 /**
  * Read-aloud preference, scoped per account like every other stored key. It
@@ -280,6 +323,10 @@ const noopRetry = (_id: string) => {};
 const noopRegenerate = () => {};
 
 const formatDuration = (ms: number): string => `${Math.max(1, Math.round(ms / 1000))}s`;
+const formatSyncTime = (timestamp: number): string => new Date(timestamp).toLocaleTimeString([], {
+  hour: 'numeric',
+  minute: '2-digit',
+});
 
 /**
  * The steps of the turn that just landed, kept in memory so the trail does not
@@ -648,7 +695,12 @@ const SharedChatView: React.FC<{ token: string }> = ({ token }) => {
   );
 };
 
-const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName, userId }) => {
+const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
+  userAvatar,
+  userName,
+  userId,
+  identityVerificationGeneration = 0,
+}) => {
   const theme = useTheme();
   const isGuest = userId.startsWith('guest_');
   const welcomeMessage = useMemo(() => isGuest
@@ -722,14 +774,20 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
     isGuest ? 'device' : 'loading'
   );
   const [cloudError, setCloudError] = useState('');
+  const [cloudErrorAction, setCloudErrorAction] = useState<'retry' | 'reload' | null>(null);
   const [cloudSyncGeneration, setCloudSyncGeneration] = useState(0);
+  const [cloudRefreshGeneration, setCloudRefreshGeneration] = useState(0);
   const [cloudSyncPaused, setCloudSyncPaused] = useState(false);
+  const [cloudLastSuccessfulAt, setCloudLastSuccessfulAt] = useState<number | null>(null);
+  const [syncStatusAnchor, setSyncStatusAnchor] = useState<HTMLElement | null>(null);
+  const [storageUnavailable, setStorageUnavailable] = useState(initialChatState.unavailable);
   const [composerAttachments, setComposerAttachments] = useState<Record<string, ChatAttachment[]>>({});
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [supportCasesOpen, setSupportCasesOpen] = useState(false);
   const [shareLinksOpen, setShareLinksOpen] = useState(false);
   const [accountDataOpen, setAccountDataOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [exportConversationOpen, setExportConversationOpen] = useState(false);
   const [feedbackByMessage, setFeedbackByMessage] = useState<Record<string, FeedbackRating>>({});
   const [feedbackPending, setFeedbackPending] = useState<Record<string, boolean>>({});
   const [showExamples, setShowExamples] = useState(true);
@@ -768,11 +826,16 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   const isClearingRef = useRef(false);
   const isOnlineRef = useRef(isOnline);
   const requestedConversationIdRef = useRef(initialChatState.requestedId);
+  const cloudInitialSelectionResolvedRef = useRef(false);
+  const lastIdentityVerificationGenerationRef = useRef(identityVerificationGeneration);
   const cloudBootstrapAbortRef = useRef<AbortController | null>(null);
   const cloudSyncAbortRef = useRef<AbortController | null>(null);
   const cloudSyncTimerRef = useRef<number | null>(null);
   const cloudSyncLoopRef = useRef(false);
   const cloudSyncPausedRef = useRef(false);
+  const cloudFailureStartedAtRef = useRef<number | null>(null);
+  const cloudTelemetryStateRef = useRef<'healthy' | 'failed'>('healthy');
+  const surfaceReadyReportedRef = useRef(false);
   const composerAttachmentsRef = useRef(composerAttachments);
   const attachmentBusyRef = useRef(attachmentBusy);
   const keepListeningRef = useRef(false);
@@ -796,6 +859,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   }, [isMuted]);
 
   useEffect(() => {
+    if (surfaceReadyReportedRef.current) return;
+    surfaceReadyReportedRef.current = true;
+    reportClientEvent('surface_ready', { outcome: isGuest ? 'guest' : 'member' });
+  }, [isGuest]);
+
+  useEffect(() => {
     const goOnline = () => {
       setIsOnline(true);
       setErrorMessage(previous => previous.startsWith('You are offline.') ? '' : previous);
@@ -808,6 +877,13 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
       window.removeEventListener('offline', goOffline);
     };
   }, []);
+
+  useEffect(() => {
+    if (identityVerificationGeneration === lastIdentityVerificationGenerationRef.current) return;
+    lastIdentityVerificationGenerationRef.current = identityVerificationGeneration;
+    if (isGuest || !isOnlineRef.current || cloudSyncPausedRef.current) return;
+    setCloudRefreshGeneration(value => value + 1);
+  }, [identityVerificationGeneration, isGuest]);
 
   // The interval exists only while a turn is running, so an idle page never
   // re-renders on a timer.
@@ -840,6 +916,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
       tombstones: tombstonesRef.current,
       pendingServerDeletions: pendingDeletionsRef.current,
     }, currentConversationIdRef.current);
+
+    if (!result.persisted) {
+      storageUnavailableRef.current = true;
+      queueMicrotask(() => setStorageUnavailable(true));
+    }
 
     if (result.evictedIds.length) {
       const evictedAt = Date.now();
@@ -917,6 +998,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   }, []);
 
   const setCurrentDraft = useCallback((value: string) => {
+    cloudInitialSelectionResolvedRef.current = true;
     inputRef.current = value;
     setInput(value);
     setConversationDraft(currentConversationIdRef.current, value);
@@ -926,6 +1008,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
     conversationId: string,
     attachments: ChatAttachment[],
   ) => {
+    cloudInitialSelectionResolvedRef.current = true;
     setComposerAttachments(previous => {
       const next = { ...previous };
       if (attachments.length) next[conversationId] = attachments;
@@ -980,7 +1063,44 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
     }
   }, [updateConversationById]);
 
+  const reportCloudFailure = useCallback((errorCode: string) => {
+    if (cloudTelemetryStateRef.current === 'failed') return;
+    cloudTelemetryStateRef.current = 'failed';
+    cloudFailureStartedAtRef.current = Date.now();
+    reportClientEvent('sync_failed', {
+      errorCode,
+      outcome: storageUnavailableRef.current ? 'memory_only' : 'local_copy_safe',
+    });
+  }, []);
+
+  const reportCloudRecovery = useCallback(() => {
+    setCloudLastSuccessfulAt(Date.now());
+    setCloudError('');
+    setCloudErrorAction(null);
+    if (cloudTelemetryStateRef.current !== 'failed') return;
+    const startedAt = cloudFailureStartedAtRef.current;
+    cloudTelemetryStateRef.current = 'healthy';
+    cloudFailureStartedAtRef.current = null;
+    reportClientEvent('sync_recovered', {
+      outcome: 'synced',
+      ...(startedAt ? { durationMs: Date.now() - startedAt } : {}),
+    });
+  }, []);
+
   const recordCloudSave = useCallback((saved: SavedConversation, syncedLocalUpdatedAt: number) => {
+    setCloudLastSuccessfulAt(Date.now());
+    const currentRef = conversationsRef.current[saved.id];
+    if (currentRef) {
+      conversationsRef.current = {
+        ...conversationsRef.current,
+        [saved.id]: {
+          ...currentRef,
+          cloudRevision: saved.revision,
+          cloudUpdatedAt: saved.updated_at,
+          cloudSyncedLocalUpdatedAt: syncedLocalUpdatedAt,
+        },
+      };
+    }
     setConversations(previous => {
       const current = previous[saved.id];
       if (!current) return previous;
@@ -1078,6 +1198,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
     if (cloudSyncPausedRef.current || signal.aborted) return false;
     setCloudStatus('saving');
     setCloudError('');
+    setCloudErrorAction(null);
 
     const upsert = (conversation: Conversation, revision: number) => ChatAPI.upsertSavedConversation({
       id: conversation.id,
@@ -1122,9 +1243,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
       }
       setCloudStatus('error');
       setCloudError('Changes are safe on this device. Cloud history will retry after the next edit or reload.');
+      setCloudErrorAction('retry');
+      reportCloudFailure(telemetryErrorCode(error));
       return false;
     }
-  }, [applyCloudWinner, isGuest, recordCloudSave, removeRemotelyDeletedConversation]);
+  }, [applyCloudWinner, isGuest, recordCloudSave, removeRemotelyDeletedConversation, reportCloudFailure]);
 
   const deleteCloudConversation = useCallback(async (conversation: Conversation) => {
     if (isGuest || !conversation.cloudRevision) return;
@@ -1145,6 +1268,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
       }
       setCloudStatus('error');
       setCloudError('The chat was removed here. Cloud deletion will retry when history reloads.');
+      setCloudErrorAction('retry');
     }
   }, [isGuest]);
 
@@ -1256,6 +1380,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   }, [speechRecognition]);
 
   const createAndSelectConversation = useCallback(() => {
+    cloudInitialSelectionResolvedRef.current = true;
     const id = generateConversationId();
     const conversation = createNewConversation(id, welcomeMessage);
     setConversations(previous => {
@@ -1283,6 +1408,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, stopListening]);
 
   const handleSelectConversation = useCallback((conversationId: string, updateUrl = true) => {
+    cloudInitialSelectionResolvedRef.current = true;
     if (conversationId === currentConversationIdRef.current) {
       setDrawerOpen(false);
       if (updateUrl) writeConversationUrl(conversationId, 'replace');
@@ -1536,6 +1662,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
     setShowExamples(true);
     setAutoFollow(true);
     setCloudError('');
+    setCloudErrorAction(null);
     writeConversationUrl(conversationId, 'replace');
 
     // Persist the tombstoned empty replacement synchronously. This both clears
@@ -1568,12 +1695,23 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
    */
   useEffect(() => {
     if (isGuest || cloudSyncPaused) return;
+    const initialHydration = !cloudInitialSelectionResolvedRef.current;
     const controller = new AbortController();
     cloudBootstrapAbortRef.current?.abort();
     cloudBootstrapAbortRef.current = controller;
+    if (!initialHydration) {
+      if (cloudSyncTimerRef.current !== null) {
+        window.clearTimeout(cloudSyncTimerRef.current);
+        cloudSyncTimerRef.current = null;
+      }
+      cloudSyncAbortRef.current?.abort();
+      cloudSyncAbortRef.current = null;
+      cloudSyncLoopRef.current = false;
+    }
     let active = true;
 
     void (async () => {
+      setCloudReady(false);
       setCloudStatus(isOnlineRef.current ? 'loading' : 'offline');
       if (!isOnlineRef.current) {
         setCloudReady(true);
@@ -1621,7 +1759,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         }));
         const tombstoneDeleteFailed = tombstoneResults.some(result => result.status === 'rejected');
 
-        const visibleSummaries = summaries.filter(summary => tombstonesRef.current[summary.id] === undefined);
+        const visibleSummaries = summaries.filter(summary => (
+          tombstonesRef.current[summary.id] === undefined
+          && (initialHydration || conversationsRef.current[summary.id]?.cloudRevision !== summary.revision)
+        ));
         const settled = await settleInBatches(
           visibleSummaries.map(summary => () => ChatAPI.getSavedConversation(summary.id, { signal: controller.signal }))
         );
@@ -1637,7 +1778,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         const detailReadFailed = settled.some(result => result.status === 'rejected'
           && (!(result.reason instanceof APIError) || result.reason.code !== 'not_found'));
         const saved = settled.flatMap(result => result.status === 'fulfilled' ? [result.value.conversation] : []);
-        const requestedId = requestedConversationIdRef.current;
+        const requestedId = initialHydration ? requestedConversationIdRef.current : null;
         if (
           requestedId
           && tombstonesRef.current[requestedId] === undefined
@@ -1652,8 +1793,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         }
         if (!active || controller.signal.aborted) return;
 
+        // The request may have started as initial hydration, but user intent
+        // always wins if they typed, attached a file, opened another chat, or
+        // created a new one while cloud details were in flight.
+        const applyInitialSelection = initialHydration && !cloudInitialSelectionResolvedRef.current;
         let merged = { ...conversationsRef.current };
-        if (initialChatState.createdFallback && saved.length && !cloudSyncable(merged[initialChatState.currentId])) {
+        if (applyInitialSelection && initialChatState.createdFallback && saved.length && !cloudSyncable(merged[initialChatState.currentId])) {
           delete merged[initialChatState.currentId];
         }
         for (const remote of saved) {
@@ -1670,44 +1815,58 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         const newestCloudId = saved
           .slice()
           .sort((left, right) => right.updated_at - left.updated_at)[0]?.id;
-        const selectedId = requestedId && merged[requestedId]
-          ? requestedId
-          : initialChatState.createdFallback && newestCloudId
-            ? newestCloudId
-            : merged[currentConversationIdRef.current]
-              ? currentConversationIdRef.current
-              : Object.keys(merged)[0];
+        const selectedBeforeRefresh = currentConversationIdRef.current;
+        const selectedId = applyInitialSelection
+          ? requestedId && merged[requestedId]
+            ? requestedId
+            : initialChatState.createdFallback && newestCloudId
+              ? newestCloudId
+              : merged[selectedBeforeRefresh]
+                ? selectedBeforeRefresh
+                : Object.keys(merged)[0]
+          : merged[selectedBeforeRefresh]
+            ? selectedBeforeRefresh
+            : Object.keys(merged)[0];
         if (!selectedId) throw new Error('Cloud history returned no selectable conversation');
         merged = enforceCapAndQueueDeletion(merged, selectedId);
         conversationsRef.current = merged;
         setConversations(merged);
-        currentConversationIdRef.current = selectedId;
-        setCurrentConversationId(selectedId);
-        const selectedDraft = merged[selectedId]?.draft ?? '';
-        inputRef.current = selectedDraft;
-        setInput(selectedDraft);
-        setShowExamples((merged[selectedId]?.messages.length ?? 0) <= 1);
-        writeConversationUrl(selectedId, 'replace');
+        if (applyInitialSelection || selectedId !== selectedBeforeRefresh) {
+          currentConversationIdRef.current = selectedId;
+          setCurrentConversationId(selectedId);
+          const selectedDraft = merged[selectedId]?.draft ?? '';
+          inputRef.current = selectedDraft;
+          setInput(selectedDraft);
+          setShowExamples((merged[selectedId]?.messages.length ?? 0) <= 1);
+          writeConversationUrl(selectedId, 'replace');
+        }
+        if (!detailReadFailed) cloudInitialSelectionResolvedRef.current = true;
 
         let bootstrapSucceeded = !tombstoneDeleteFailed && !detailReadFailed;
         let alreadyUploaded = false;
         try { alreadyUploaded = localStorage.getItem(cloudBootstrapStorageKey(userId)) === 'complete'; } catch { /* optional */ }
-        if (!alreadyUploaded) {
-          const uploadIds = Object.values(merged)
+        const uploadIds = Object.values(merged)
             .filter(conversation => cloudSyncable(conversation)
               && conversation.cloudSyncedLocalUpdatedAt !== conversation.updatedAt)
             .map(conversation => conversation.id);
-          for (const conversationId of uploadIds) {
-            if (!await syncConversationToCloud(conversationId, controller.signal)) bootstrapSucceeded = false;
-          }
-          if (bootstrapSucceeded) {
-            try { localStorage.setItem(cloudBootstrapStorageKey(userId), 'complete'); } catch { /* optional */ }
-          }
+        for (const conversationId of uploadIds) {
+          if (!await syncConversationToCloud(conversationId, controller.signal)) bootstrapSucceeded = false;
         }
+        if (!alreadyUploaded && uploadIds.length > 0 && bootstrapSucceeded) {
+          try { localStorage.setItem(cloudBootstrapStorageKey(userId), 'complete'); } catch { /* optional */ }
+        }
+        const dirtyWritesRemain = Object.values(conversationsRef.current).some(conversation => (
+          cloudSyncable(conversation)
+          && conversation.cloudSyncedLocalUpdatedAt !== conversation.updatedAt
+        ));
+        if (dirtyWritesRemain) bootstrapSucceeded = false;
         if (!active || controller.signal.aborted) return;
         setCloudReady(true);
         setCloudStatus(bootstrapSucceeded ? 'synced' : 'error');
+        if (bootstrapSucceeded) reportCloudRecovery();
+        else reportCloudFailure(detailReadFailed ? 'history_detail' : 'pending_deletion');
         if (!bootstrapSucceeded) {
+          setCloudErrorAction('retry');
           setCloudError(previous => previous || (detailReadFailed
             ? 'Some account history could not be loaded. Local chats remain available; reload to retry.'
             : 'A cloud deletion is still pending. It will retry when history reloads.'));
@@ -1716,7 +1875,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         if (!active || controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) return;
         setCloudReady(true);
         setCloudStatus('error');
-        setCloudError(error instanceof APIError && error.code === 'csrf_unavailable'
+        reportCloudFailure(telemetryErrorCode(error));
+        const needsReload = error instanceof APIError && error.code === 'csrf_unavailable';
+        setCloudErrorAction(needsReload ? 'reload' : 'retry');
+        setCloudError(needsReload
           ? 'Cloud history needs a fresh secure page token. Reload this page to resume syncing.'
           : 'Cloud history is unavailable. Chats remain safe on this device.');
       }
@@ -1727,7 +1889,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
       controller.abort();
       if (cloudBootstrapAbortRef.current === controller) cloudBootstrapAbortRef.current = null;
     };
-  }, [cloudSyncPaused, enforceCapAndQueueDeletion, initialChatState.createdFallback, initialChatState.currentId, isGuest, isOnline, removeRemotelyDeletedConversation, syncConversationToCloud, userId]);
+  }, [cloudRefreshGeneration, cloudSyncPaused, enforceCapAndQueueDeletion, initialChatState.createdFallback, initialChatState.currentId, isGuest, removeRemotelyDeletedConversation, reportCloudFailure, reportCloudRecovery, syncConversationToCloud, userId]);
 
   const cloudDirtySignature = useMemo(() => Object.values(conversations)
     .filter(conversation => !isGuest
@@ -1760,7 +1922,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         cloudSyncLoopRef.current = false;
         if (!controller.signal.aborted) {
           setCloudStatus(success ? 'synced' : 'error');
-          if (success) setCloudSyncGeneration(value => value + 1);
+          if (success) {
+            reportCloudRecovery();
+            setCloudSyncGeneration(value => value + 1);
+          }
         }
       })();
     }, CLOUD_SYNC_DEBOUNCE_MS);
@@ -1770,7 +1935,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         cloudSyncTimerRef.current = null;
       }
     };
-  }, [cloudDirtySignature, cloudReady, cloudSyncGeneration, cloudSyncPaused, isGuest, isLoading, isOnline, syncConversationToCloud]);
+  }, [cloudDirtySignature, cloudReady, cloudSyncGeneration, cloudSyncPaused, isGuest, isLoading, isOnline, reportCloudRecovery, syncConversationToCloud]);
 
   useEffect(() => () => {
     if (cloudSyncTimerRef.current !== null) window.clearTimeout(cloudSyncTimerRef.current);
@@ -2602,16 +2767,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   }, [userId]);
 
   const handleExportConversation = useCallback(() => {
-    const conversation = conversationsRef.current[currentConversationIdRef.current];
-    if (!conversation) return;
     setChatMenuAnchor(null);
-    void import('../services/conversationExport')
-      .then(({ createConversationExport, downloadConversationExport }) => {
-        downloadConversationExport(createConversationExport(conversation, 'markdown'));
-        reportConversationExport('markdown', 'download', conversation.messages.length);
-        setAnnouncement('Conversation export started.');
-      })
-      .catch(() => setErrorMessage('The conversation export could not be prepared. Please retry.'));
+    setExportConversationOpen(true);
+  }, []);
+
+  const handleConversationExportCompleted = useCallback((outcome: ConversationExportOutcome) => {
+    reportConversationExport(outcome.format, outcome.delivery, outcome.messageCount);
   }, []);
 
   const handlePrintConversation = useCallback(() => {
@@ -2668,9 +2829,31 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   const handleSend = useCallback(() => { void handleSendMessage(); }, [handleSendMessage]);
   const handleStop = useCallback(() => abortActiveTurn(true), [abortActiveTurn]);
   const handleAttachmentBusyChange = useCallback((busy: boolean) => {
+    if (busy) cloudInitialSelectionResolvedRef.current = true;
     attachmentBusyRef.current = busy;
     setAttachmentBusy(busy);
   }, []);
+  const handleComposerAttachmentsChange = useCallback((attachments: ChatAttachment[]) => {
+    setComposerAttachmentsForConversation(currentConversationIdRef.current, attachments);
+  }, [setComposerAttachmentsForConversation]);
+  const handleRemoveComposerAttachment = useCallback((attachment: ChatAttachment) => (
+    deleteComposerAttachment(currentConversationIdRef.current, attachment)
+  ), [deleteComposerAttachment]);
+  const handleRetryCloudHistory = useCallback(() => {
+    if (isGuest || !isOnlineRef.current || cloudSyncPausedRef.current) return;
+    setCloudStatus('loading');
+    setCloudRefreshGeneration(value => value + 1);
+  }, [isGuest]);
+  const handleHistorySearchUsed = useCallback((resultCount: number) => {
+    reportClientEvent('history_search', {
+      outcome: resultCount > 0 ? 'results' : 'no_results',
+      value: resultCount,
+    });
+  }, []);
+  const handleHistoryResultOpened = useCallback(() => {
+    reportClientEvent('history_result_opened', { outcome: 'conversation' });
+  }, []);
+  const openDrawer = useCallback(() => setDrawerOpen(true), []);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
   const lastUserMessageId = useMemo(() => {
@@ -2950,12 +3133,47 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
   const currentCloudSynced = !isGuest
     && Boolean(currentConversation.cloudRevision)
     && currentConversation.cloudSyncedLocalUpdatedAt === currentConversation.updatedAt;
-  const currentComposerAttachments = composerAttachments[currentConversationId] ?? [];
+  const currentComposerAttachments = useMemo(
+    () => composerAttachments[currentConversationId] ?? [],
+    [composerAttachments, currentConversationId],
+  );
+  const attachmentControls = useMemo(() => isGuest ? undefined : (
+    <React.Suspense fallback={(
+      <Typography role="status" variant="caption" color="text.secondary" sx={{ display: 'block', py: 0.75 }}>
+        Loading attachment tools…
+      </Typography>
+    )}>
+      <AttachmentTray
+        key={currentConversationId}
+        compact
+        signedIn
+        conversationId={currentConversationId}
+        attachments={currentComposerAttachments}
+        onChange={handleComposerAttachmentsChange}
+        onBusyChange={handleAttachmentBusyChange}
+        onRemoveAttachment={handleRemoveComposerAttachment}
+        disabled={isLoading || showCaptcha || !isOnline}
+      />
+    </React.Suspense>
+  ), [
+    currentComposerAttachments,
+    currentConversationId,
+    handleAttachmentBusyChange,
+    handleComposerAttachmentsChange,
+    handleRemoveComposerAttachment,
+    isGuest,
+    isLoading,
+    isOnline,
+    showCaptcha,
+  ]);
   const currentSupportAttachmentIds = [...new Set([
     ...currentConversation.messages.flatMap(message => message.attachments?.map(attachment => attachment.id) ?? []),
     ...currentComposerAttachments.map(attachment => attachment.id),
   ])];
   const visibleCloudStatus = isGuest ? 'device' : !isOnline ? 'offline' : cloudStatus;
+  const pendingCloudChanges = isGuest ? 0 : Object.values(conversations).filter(conversation => (
+    cloudSyncable(conversation) && conversation.cloudSyncedLocalUpdatedAt !== conversation.updatedAt
+  )).length;
   const cloudStatusLabel = visibleCloudStatus === 'device' ? 'On this device'
     : visibleCloudStatus === 'loading' ? 'Loading history…'
       : visibleCloudStatus === 'saving' ? 'Saving…'
@@ -2999,6 +3217,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
       )}>
         <ConversationSidebar
           open={drawerOpen}
+          onOpen={openDrawer}
           onClose={closeDrawer}
           conversations={sortedConversations}
           currentConversationId={currentConversationId}
@@ -3006,6 +3225,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
           onDeleteConversation={requestDeleteConversation}
           onNewConversation={handleNewConversation}
           onRenameConversation={requestRenameConversation}
+          onSearchUsed={handleHistorySearchUsed}
+          onSearchResultOpened={handleHistoryResultOpened}
           desktopCollapsed={desktopRailCollapsed}
           onToggleDesktopCollapsed={toggleDesktopRail}
         />
@@ -3015,7 +3236,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
         {/* Just the first row of a fixed-height column — no stickiness needed.
             It was sticky only while the document was the scroller. */}
         <Box className="wf-chat-header" sx={{ borderBottom: `1px solid ${borderColor}`, px: { xs: 0.75, sm: 2 }, py: { xs: 0.75, sm: 1.25 }, minHeight: { xs: 52, sm: 62 }, display: 'flex', alignItems: 'center', gap: { xs: 0.5, sm: 1.5 }, backgroundColor: 'background.paper', flexShrink: 0 }}>
-          <IconButton sx={{ display: { xs: 'inline-flex', md: 'none' } }} onClick={() => setDrawerOpen(true)} aria-label="Open chat history"><MenuIcon /></IconButton>
+          <IconButton sx={{ display: { xs: 'inline-flex', md: 'none' } }} onClick={openDrawer} aria-label="Open chat history"><MenuIcon /></IconButton>
           <Avatar src={BOT_AVATAR} alt={ASSISTANT_NAME} sx={{ display: { xs: 'none', sm: 'flex' }, width: 36, height: 36, bgcolor: '#0a2c4d' }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Typography component={isStandalone ? 'h1' : 'h2'} variant="h6" sx={{ lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -3033,11 +3254,13 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
             </Tooltip>
           )}
           <Tooltip title={cloudStatusTooltip}>
-            <Box
+            <ButtonBase
               className="wf-sync-status"
-              role="status"
-              tabIndex={0}
               aria-label={`History status: ${cloudStatusLabel}`}
+              aria-haspopup="dialog"
+              aria-controls={syncStatusAnchor ? 'wf-sync-status-popover' : undefined}
+              aria-expanded={Boolean(syncStatusAnchor)}
+              onClick={(event) => setSyncStatusAnchor(event.currentTarget)}
               sx={{ px: { xs: 0.6, sm: 1 }, py: 0.35, borderRadius: 999, border: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', gap: 0.6, flexShrink: 0 }}
             >
               {visibleCloudStatus === 'loading' || visibleCloudStatus === 'saving'
@@ -3045,8 +3268,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
                 : visibleCloudStatus === 'offline' || visibleCloudStatus === 'error'
                   ? <CloudOffOutlinedIcon sx={{ fontSize: 15 }} />
                   : <CloudDoneOutlinedIcon sx={{ fontSize: 15 }} />}
-              <Typography sx={{ display: { xs: 'none', sm: 'block' }, fontSize: 11.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>{cloudStatusLabel}</Typography>
-            </Box>
+              <Typography component="span" sx={{ display: { xs: 'none', sm: 'block' }, fontSize: 11.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>{cloudStatusLabel}</Typography>
+            </ButtonBase>
           </Tooltip>
           <Tooltip title="New chat">
             <IconButton sx={{ display: { xs: 'inline-flex', sm: 'none' } }} onClick={handleNewConversation} aria-label="New chat">
@@ -3066,6 +3289,78 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
             </IconButton>
           </Tooltip>
         </Box>
+
+        <Box
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          aria-label="Chat history status updates"
+          sx={{ position: 'absolute', width: 1, height: 1, p: 0, m: -1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0 }}
+        >
+          Chat history: {cloudStatusLabel}
+        </Box>
+
+        <Popover
+          id="wf-sync-status-popover"
+          open={Boolean(syncStatusAnchor)}
+          anchorEl={syncStatusAnchor}
+          onClose={() => setSyncStatusAnchor(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          container={() => document.getElementById('wf-chat-window')}
+          slotProps={{
+            paper: {
+              role: 'dialog',
+              'aria-labelledby': 'wf-sync-status-title',
+              tabIndex: -1,
+              sx: { width: 300, maxWidth: 'calc(100vw - 24px)', p: 2 },
+            },
+          }}
+        >
+          <Typography id="wf-sync-status-title" component="h2" variant="subtitle2" sx={{ fontWeight: 700 }}>Chat history</Typography>
+          <Typography variant="body2" sx={{ mt: 0.5, color: 'text.secondary' }}>
+            {cloudStatusTooltip}
+          </Typography>
+          <Box sx={{ mt: 1.5, display: 'grid', gap: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">
+              {isGuest
+                ? 'Guest chats are stored only in this browser.'
+                : cloudLastSuccessfulAt
+                  ? `Last successful sync: ${formatSyncTime(cloudLastSuccessfulAt)}`
+                  : 'No successful account sync in this session yet.'}
+            </Typography>
+            {!isGuest && (
+              <Typography variant="caption" color="text.secondary">
+                {pendingCloudChanges === 0 ? 'No unsaved chat edits on this device.' : `${pendingCloudChanges} chat edit${pendingCloudChanges === 1 ? '' : 's'} waiting to sync.`}
+              </Typography>
+            )}
+            {storageUnavailable && (
+              <Alert severity="warning" sx={{ mt: 0.5 }}>
+                Browser storage is unavailable. Keep this tab open until your work is saved elsewhere.
+              </Alert>
+            )}
+          </Box>
+          {!isGuest && cloudErrorAction === 'reload' ? (
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => window.location.reload()}
+              sx={{ mt: 1.5 }}
+            >
+              Reload chat
+            </Button>
+          ) : !isGuest && (
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={!isOnline || visibleCloudStatus === 'loading' || visibleCloudStatus === 'saving' || cloudSyncPaused}
+              onClick={handleRetryCloudHistory}
+              sx={{ mt: 1.5 }}
+            >
+              Retry sync now
+            </Button>
+          )}
+        </Popover>
 
         <Menu
           id="wf-chat-actions-menu"
@@ -3099,7 +3394,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
           )}
           <Divider />
           <MenuItem onClick={handleExportConversation}>
-            <DownloadOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Export Markdown
+            <DownloadOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Export conversation
           </MenuItem>
           <MenuItem onClick={handlePrintConversation}>
             <PrintOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Print
@@ -3239,25 +3534,38 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
 
             {showExamples && currentConversation.messages.length === 1 && !isLoading && (
               <Fade in timeout={reduceMotion ? 0 : undefined}>
-                <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pb: 3 }}>
+                <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.25, sm: 2.5, md: 4 }, pb: { xs: 1.5, sm: 3 } }}>
                   <Typography sx={{ display: 'flex', alignItems: 'center', gap: 0.75, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'text.secondary', mb: 1.5 }}>
-                    <LightbulbIcon sx={{ fontSize: 16 }} /> Try asking
+                    <LightbulbIcon sx={{ fontSize: 16 }} /> Start with a task
                   </Typography>
-                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.5 }}>
-                    {EXAMPLE_PROMPTS.map(prompt => (
+                  <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: { xs: 0.75, sm: 1.25 } }}>
+                    {STARTER_ACTIONS.map(starter => (
                       <Box
-                        key={prompt}
+                        key={starter.id}
                         component="button"
                         onClick={() => {
-                          setCurrentDraft(prompt);
+                          setCurrentDraft(starter.prompt);
+                          reportClientEvent('starter_selected', { outcome: starter.id });
                           requestAnimationFrame(() => textFieldRef.current?.querySelector('textarea')?.focus());
                         }}
-                        sx={{ textAlign: 'left', cursor: 'pointer', font: 'inherit', display: 'flex', alignItems: 'center', gap: 1.25, p: 1.5, border: t => `1px solid ${t.palette.divider}`, borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary', transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s', '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' } }}
+                        sx={{
+                          textAlign: 'left', cursor: 'pointer', font: 'inherit', minWidth: 0,
+                          display: 'flex', alignItems: 'center', gap: { xs: 0.75, sm: 1.1 },
+                          p: { xs: 1, sm: 1.35 }, border: t => `1px solid ${t.palette.divider}`,
+                          borderRadius: 2.5, bgcolor: 'background.paper', color: 'text.primary',
+                          transition: 'border-color 0.12s, box-shadow 0.12s, transform 0.12s',
+                          '&:hover, &:focus-visible': { borderColor: 'primary.main', boxShadow: 'var(--wf-shadow-block)', transform: 'translateY(-1px)' },
+                        }}
                       >
-                        <Box sx={{ width: 32, height: 32, borderRadius: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'rgba(15,108,189,0.1)', color: 'primary.main' }}>
-                          <LightbulbIcon sx={{ fontSize: 16 }} />
+                        <Box sx={{ width: { xs: 28, sm: 34 }, height: { xs: 28, sm: 34 }, borderRadius: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'rgba(15,108,189,0.1)', color: 'primary.main' }}>
+                          {starterIcon(starter.id)}
                         </Box>
-                        <Typography sx={{ fontSize: 14, fontWeight: 500 }}>{prompt}</Typography>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ fontSize: { xs: 12.5, sm: 14 }, lineHeight: 1.25, fontWeight: 650 }}>{starter.title}</Typography>
+                          <Typography sx={{ display: { xs: 'none', sm: 'block' }, mt: 0.35, fontSize: 11.5, lineHeight: 1.35, color: 'text.secondary' }}>
+                            {starter.description}
+                          </Typography>
+                        </Box>
                       </Box>
                     ))}
                   </Box>
@@ -3307,37 +3615,6 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
           </Alert>
         )}
 
-        {!isGuest && (
-          <Box
-            sx={{
-              px: { xs: 1, sm: 2 },
-              pt: 1,
-              bgcolor: 'background.paper',
-              borderTop: `1px solid ${borderColor}`,
-              flexShrink: 0,
-            }}
-          >
-            <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
-              <React.Suspense fallback={(
-                <Typography role="status" variant="caption" color="text.secondary" sx={{ display: 'block', py: 1.5 }}>
-                  Loading attachment tools…
-                </Typography>
-              )}>
-                <AttachmentTray
-                  key={currentConversationId}
-                  signedIn
-                  conversationId={currentConversationId}
-                  attachments={currentComposerAttachments}
-                  onChange={attachments => setComposerAttachmentsForConversation(currentConversationId, attachments)}
-                  onBusyChange={handleAttachmentBusyChange}
-                  onRemoveAttachment={attachment => deleteComposerAttachment(currentConversationId, attachment)}
-                  disabled={isLoading || showCaptcha || !isOnline}
-                />
-              </React.Suspense>
-            </Box>
-          </Box>
-        )}
-
         <InputArea
           input={input}
           setInput={setCurrentDraft}
@@ -3355,6 +3632,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
           onStopListening={stopListening}
           onToggleMute={toggleMute}
           textFieldRef={textFieldRef}
+          attachmentControls={attachmentControls}
         />
 
         {/* The forum's breadcrumb ad, relocated here from above the chat so it
@@ -3483,6 +3761,17 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({ userAvatar, userName
             open
             onClose={() => setPreferencesOpen(false)}
             voiceEnabled={ENV.ENABLE_VOICE}
+          />
+        </React.Suspense>
+      )}
+
+      {exportConversationOpen && (
+        <React.Suspense fallback={null}>
+          <ExportConversationDialog
+            open
+            onClose={() => setExportConversationOpen(false)}
+            conversation={currentConversation}
+            onCompleted={handleConversationExportCompleted}
           />
         </React.Suspense>
       )}

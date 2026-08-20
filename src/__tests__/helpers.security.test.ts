@@ -137,6 +137,18 @@ https://test.windowsforum.com/images/ai/answers/example.png
     expect(rendered.querySelectorAll('a[href="https://docs.example.org/reference?q=chat"]')).toHaveLength(1);
   });
 
+  it('deduplicates fragment, tracking-parameter, and trailing-slash URL variants', () => {
+    const output = sanitizeAndParse([
+      '[docs.example.com](https://docs.example.com/setup/?utm_source=chat#install)',
+      '[docs.example.com](https://docs.example.com/setup?gclid=tracking)',
+    ].join(' and '));
+    const rendered = document.createElement('div');
+    rendered.innerHTML = output;
+
+    expect([...rendered.querySelectorAll('sup')].map(node => node.textContent)).toEqual(['[1]', '[1]']);
+    expect(rendered.querySelectorAll('p:last-child a')).toHaveLength(1);
+  });
+
   it('allows image requests only to the exact approved origins and paths', () => {
     const output = sanitizeAndParse(`
 ![lookalike](https://windowsforum.com.attacker.example/images/ai/screenshots/pixel.png)

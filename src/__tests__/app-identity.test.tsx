@@ -21,9 +21,16 @@ vi.mock('../services/api', async importOriginal => {
 });
 
 vi.mock('../components/ChatWindow', () => ({
-  ChatWindow: ({ userId }: { userId: string }) => (
+  ChatWindow: ({
+    userId,
+    identityVerificationGeneration,
+  }: {
+    userId: string;
+    identityVerificationGeneration?: number;
+  }) => (
     <div data-testid="chat-window">
       chat-user-{userId}
+      <span data-testid="identity-generation">{identityVerificationGeneration}</span>
       <button type="button">composer-user-{userId}</button>
     </div>
   ),
@@ -191,6 +198,7 @@ describe('identity lifecycle', () => {
       resolveSecond?.(user(42));
     });
     await waitFor(() => expect(screen.queryByRole('status', { name: 'Rechecking chat identity' })).not.toBeInTheDocument());
+    expect(screen.getByTestId('identity-generation')).toHaveTextContent('2');
     expect(chat).toBeVisible();
     expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
     expect(composer).toHaveFocus();

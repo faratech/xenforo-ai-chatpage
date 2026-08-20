@@ -59,4 +59,26 @@ describe('chat preferences dialog', () => {
     expect(mocks.save).toHaveBeenCalledWith({ voice: 'cedar', speed: 1 });
     expect(mocks.configure).toHaveBeenCalledWith({ voice: 'cedar', speed: 1 });
   });
+
+  it('lists the keyboard commands implemented by the chat surface', () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <PreferencesDialog open onClose={vi.fn()} voiceEnabled={false} />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Keyboard shortcuts' })).toBeInTheDocument();
+    expect(screen.getByText('Send message')).toBeInTheDocument();
+    expect(screen.getByText('Add a new line')).toBeInTheDocument();
+    expect(screen.getByText('Search chat history')).toBeInTheDocument();
+    expect(screen.getByText('Save a message edit')).toBeInTheDocument();
+    expect(screen.getByText('Cancel a message edit')).toBeInTheDocument();
+    expect([...document.querySelectorAll('kbd')].map(key => key.textContent)).toEqual([
+      'Enter',
+      'Shift', 'Enter',
+      'Ctrl/⌘', 'K',
+      'Ctrl/⌘', 'Enter',
+      'Esc',
+    ]);
+  });
 });

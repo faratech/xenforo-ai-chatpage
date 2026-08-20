@@ -190,6 +190,26 @@ export const parseHttpUrl = (value: string): URL | null => {
   }
 };
 
+/**
+ * Stable identity for source deduplication. Keep navigation pointed at the
+ * original cited URL, but ignore presentation-only differences that commonly
+ * make the same document arrive more than once.
+ */
+export const canonicalHttpUrlKey = (value: string): string | null => {
+  const url = parseHttpUrl(value);
+  if (!url) return null;
+
+  url.hash = '';
+  for (const key of [...url.searchParams.keys()]) {
+    if (/^(?:utm_[a-z\d_]+|fbclid|gclid|dclid|msclkid)$/i.test(key)) {
+      url.searchParams.delete(key);
+    }
+  }
+  url.searchParams.sort();
+  if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '');
+  return url.href;
+};
+
 const isSafeLink = (href: string): boolean => {
   if (href.startsWith('#') || href.startsWith('?')) return true;
   if (href.startsWith('/') && !href.startsWith('//')) return true;
@@ -261,7 +281,7 @@ export const sanitizeAndParse = (content: string): string => {
     const parsedUrl = parseHttpUrl(url);
     if (!parsedUrl) return escapeHtml(text);
 
-    const key = parsedUrl.href;
+    const key = canonicalHttpUrlKey(parsedUrl.href) ?? parsedUrl.href;
     let index = citationIndexes.get(key);
     if (index === undefined) {
       index = citations.length + 1;

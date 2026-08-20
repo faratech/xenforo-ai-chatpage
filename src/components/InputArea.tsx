@@ -43,6 +43,7 @@ export const InputArea = memo<InputAreaProps>(({
   onStopListening,
   onToggleMute,
   textFieldRef,
+  attachmentControls,
 }) => {
   const theme = useTheme();
   const isOverLimit = inputBytes > maxMessageBytes;
@@ -73,15 +74,12 @@ export const InputArea = memo<InputAreaProps>(({
     >
       <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
         <Box
+          className="wf-composer-shell"
           sx={{
-            display: 'flex',
-            alignItems: 'flex-end',
-            gap: 0.5,
-            p: 0.75,
-            pl: 1,
             border: `1px solid ${theme.palette.divider}`,
             borderRadius: '14px',
             backgroundColor: 'background.paper',
+            overflow: 'hidden',
             transition: 'border-color 0.12s, box-shadow 0.12s',
             '&:focus-within': {
               borderColor: 'primary.main',
@@ -89,25 +87,28 @@ export const InputArea = memo<InputAreaProps>(({
             },
           }}
         >
-          {voiceEnabled && isSpeechRecognitionSupported && (
-            <Tooltip title={isListening ? 'Stop recording' : 'Voice input'}>
-              <IconButton
-                onClick={isListening ? onStopListening : onStartListening}
-                aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
-                size="small"
-                sx={{
-                  color: isListening ? '#fff' : 'text.secondary',
-                  bgcolor: isListening ? 'error.main' : 'transparent',
-                  '&:hover': { bgcolor: isListening ? 'error.main' : 'action.hover' },
-                }}
-              >
-                {isListening ? <MicIcon fontSize="small" /> : <MicNoneIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-          )}
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: 0.5, p: 0.75, pl: 1 }}>
+            {attachmentControls}
+            {voiceEnabled && isSpeechRecognitionSupported && (
+              <Tooltip title={isListening ? 'Stop recording' : 'Voice input'}>
+                <IconButton
+                  onClick={isListening ? onStopListening : onStartListening}
+                  aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                  size="small"
+                  sx={{
+                    color: isListening ? '#fff' : 'text.secondary',
+                    bgcolor: isListening ? 'error.main' : 'transparent',
+                    '&:hover': { bgcolor: isListening ? 'error.main' : 'action.hover' },
+                  }}
+                >
+                  {isListening ? <MicIcon fontSize="small" /> : <MicNoneIcon fontSize="small" />}
+                </IconButton>
+              </Tooltip>
+            )}
 
-          <TextField
+            <TextField
             ref={textFieldRef}
+            sx={{ flex: '1 1 140px', minWidth: 0 }}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -137,9 +138,9 @@ export const InputArea = memo<InputAreaProps>(({
             // screen-reader users lose their place each turn and nobody can
             // draft the next message during a long response. Only the submit
             // action is gated (canSend / handleKeyDown).
-          />
+            />
 
-          {voiceEnabled && (
+            {voiceEnabled && (
             <Tooltip title={isMuted ? 'Enable read-aloud' : 'Mute read-aloud'}>
               <IconButton
                 onClick={onToggleMute}
@@ -151,9 +152,9 @@ export const InputArea = memo<InputAreaProps>(({
                 {isMuted ? <VolumeOffIcon fontSize="small" /> : <VolumeUpIcon fontSize="small" />}
               </IconButton>
             </Tooltip>
-          )}
+            )}
 
-          {isLoading ? (
+            {isLoading ? (
             <Tooltip title="Stop generation">
               <IconButton
                 onClick={onStop}
@@ -164,7 +165,7 @@ export const InputArea = memo<InputAreaProps>(({
                 <StopIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-          ) : (
+            ) : (
             <Tooltip title={isOffline ? 'Reconnect to send' : 'Send message'}>
               <span>
                 <IconButton
@@ -185,19 +186,20 @@ export const InputArea = memo<InputAreaProps>(({
                 </IconButton>
               </span>
             </Tooltip>
-          )}
+            )}
+          </Box>
         </Box>
 
         <Stack
           direction="row"
-          sx={{ justifyContent: 'space-between', mt: 1, px: 0.5, gap: 1, flexWrap: 'wrap' }}
+          sx={{ justifyContent: 'space-between', alignItems: 'center', mt: 0.75, px: 0.5, gap: 1, flexWrap: 'nowrap' }}
         >
-          <Typography id="wf-composer-help" variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+          <Typography id="wf-composer-help" variant="caption" noWrap sx={{ minWidth: 0, color: 'text.secondary', fontSize: 11 }}>
             {isOffline
               ? 'Offline · your draft is saved on this device'
               : isListening ? 'Listening… speak now' : 'Press Enter to send · Shift+Enter for new line'}
           </Typography>
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+          <Typography variant="caption" sx={{ display: { xs: 'none', sm: 'block' }, color: 'text.secondary', fontSize: 11, whiteSpace: 'nowrap' }}>
             {ASSISTANT_NAME} can make mistakes
           </Typography>
           <Typography
@@ -206,7 +208,7 @@ export const InputArea = memo<InputAreaProps>(({
             // Announce only once the limit is exceeded. A live region here
             // queued an announcement of the byte count on every keystroke.
             aria-live={isOverLimit ? 'polite' : 'off'}
-            sx={{ color: isOverLimit ? 'error.main' : 'text.secondary', fontSize: 11 }}
+            sx={{ display: { xs: isNearLimit ? 'block' : 'none', sm: 'block' }, color: isOverLimit ? 'error.main' : 'text.secondary', fontSize: 11, whiteSpace: 'nowrap' }}
           >
             {isOverLimit
               ? `Message is ${inputBytes - maxMessageBytes} bytes too long`

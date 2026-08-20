@@ -50,6 +50,7 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
   const [revalidating, setRevalidating] = useState(false);
   const [revalidationNotice, setRevalidationNotice] = useState('');
   const [identityLocked, setIdentityLocked] = useState(false);
+  const [identityVerificationGeneration, setIdentityVerificationGeneration] = useState(0);
   const identityRequestRef = useRef<Promise<void> | null>(null);
   const initialIdentityRequestRef = useRef(initialIdentityPromise);
   const identityRef = useRef<ChatIdentity | null>(null);
@@ -100,6 +101,7 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
         setIdentityError('');
         setRevalidationNotice('');
         setIdentityLocked(false);
+        setIdentityVerificationGeneration(value => value + 1);
       } catch (error) {
         console.error('Error fetching user data:', error);
         const established = identityRef.current;
@@ -198,12 +200,15 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
     const onVisibility = () => {
       if (document.visibilityState === 'visible') onActivation();
     };
+    const onReconnect = () => revalidateIdentity(true);
     window.addEventListener('pageshow', onPageShow);
     window.addEventListener('focus', onActivation);
+    window.addEventListener('online', onReconnect);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       window.removeEventListener('pageshow', onPageShow);
       window.removeEventListener('focus', onActivation);
+      window.removeEventListener('online', onReconnect);
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [revalidateIdentity]);
@@ -286,6 +291,7 @@ const App: React.FC<AppProps> = ({ initialIdentityPromise = null }) => {
             userAvatar={identity.userAvatar}
             userName={identity.userName}
             userId={identity.userId}
+            identityVerificationGeneration={identityVerificationGeneration}
           />
         </Suspense>
       </Box>

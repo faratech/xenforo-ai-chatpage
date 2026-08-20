@@ -191,7 +191,10 @@ beforeEach(() => {
   delete window.turnstile;
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('ChatWindow state ownership', () => {
   it('announces the finalized answer once and emits content-free lifecycle telemetry', async () => {
@@ -279,6 +282,72 @@ describe('ChatWindow state ownership', () => {
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
     expect(await screen.findByLabelText('Type your message')).toHaveValue('Keep this unfinished question');
+  });
+
+  it('uses capability-led starters and records only the selected action id', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_starters" />);
+
+    const starter = await screen.findByRole('button', { name: /Troubleshoot a Windows problem/ });
+    fireEvent.click(starter);
+
+    expect(screen.getByLabelText('Type your message')).toHaveValue(
+      'Help me troubleshoot a Windows problem. Start by asking for the most useful missing details.',
+    );
+    expect(telemetryMocks.reportClientEvent).toHaveBeenCalledWith('starter_selected', {
+      outcome: 'troubleshoot',
+    });
+    expect(JSON.stringify(telemetryMocks.reportClientEvent.mock.calls)).not.toContain('most useful missing details');
+  });
+
+  it('opens an actionable sync status and recovers through Retry sync now', async () => {
+    apiMocks.listSavedConversations
+      .mockRejectedValueOnce(new APIError('temporary failure', { status: 503, retryable: true }))
+      .mockResolvedValueOnce({ success: true, conversations: [], next_cursor: null });
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    const status = await screen.findByLabelText('History status: Sync paused');
+    fireEvent.click(status);
+    expect(await screen.findByText('Cloud history is unavailable. Chats remain safe on this device.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry sync now' }));
+
+    await waitFor(() => expect(apiMocks.listSavedConversations).toHaveBeenCalledTimes(2));
+    expect(await screen.findByLabelText('History status: Synced')).toBeInTheDocument();
+    expect(telemetryMocks.reportClientEvent).toHaveBeenCalledWith('sync_failed', expect.objectContaining({
+      outcome: 'local_copy_safe',
+    }));
+    expect(telemetryMocks.reportClientEvent).toHaveBeenCalledWith('sync_recovered', expect.objectContaining({
+      outcome: 'synced',
+    }));
+  });
+
+  it('offers a reload instead of a futile retry when the secure page token is stale', async () => {
+    apiMocks.listSavedConversations.mockRejectedValueOnce(new APIError('csrf unavailable', {
+      status: 403,
+      code: 'csrf_unavailable',
+      retryable: false,
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    fireEvent.click(await screen.findByLabelText('History status: Sync paused'));
+    const statusDialog = screen.getByRole('dialog', { name: 'Chat history' });
+    expect(within(statusDialog).getByRole('button', { name: 'Reload chat' })).toBeInTheDocument();
+    expect(within(statusDialog).queryByRole('button', { name: 'Retry sync now' })).not.toBeInTheDocument();
+  });
+
+  it('opens the consolidated export dialog and reports a content-free copy outcome', async () => {
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_export" />);
+
+    fireEvent.click(await screen.findByLabelText('Chat actions'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Export conversation' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export conversation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Copy plain text/ }));
+
+    await waitFor(() => expect(telemetryMocks.reportConversationExport).toHaveBeenCalledWith(
+      'text', 'clipboard', 1,
+    ));
+    expect(screen.getAllByText('Conversation copied as plain text.')).toHaveLength(1);
+    expect(JSON.stringify(telemetryMocks.reportConversationExport.mock.calls)).not.toContain('Welcome to WindowsForum');
   });
 
   it('branches into a new local chat without modifying the original', async () => {
@@ -538,6 +607,24 @@ describe('ChatWindow state ownership', () => {
     expect(await screen.findByRole('dialog', { name: /Chat settings/ })).toBeInTheDocument();
   });
 
+  it('warns when browser history persistence becomes unavailable after startup', async () => {
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('quota exceeded', 'QuotaExceededError');
+    });
+    apiMocks.listSavedConversations.mockRejectedValueOnce(new APIError('temporary failure', {
+      status: 503,
+      retryable: true,
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    fireEvent.click(await screen.findByLabelText('History status: Sync paused'));
+    expect(await screen.findByText(/Browser storage is unavailable/)).toBeInTheDocument();
+    expect(telemetryMocks.reportClientEvent).toHaveBeenCalledWith('sync_failed', expect.objectContaining({
+      outcome: 'memory_only',
+    }));
+  });
+
   it('binds a Turnstile token to the pending turn and submits it only once', async () => {
     let turnstileConfig: Record<string, unknown> | undefined;
     window.turnstile = {
@@ -723,6 +810,144 @@ describe('authenticated history, feedback, and sharing', () => {
     expect(new URL(window.location.href).searchParams.get('conversation')).toBe('conv_cloud');
   });
 
+  it('does not replace a fallback chat when the user types during initial cloud hydration', async () => {
+    const remote = savedConversation();
+    apiMocks.listSavedConversations.mockResolvedValue({
+      success: true,
+      conversations: [{
+        id: remote.id,
+        title: remote.title,
+        revision: remote.revision,
+        created_at: remote.created_at,
+        updated_at: remote.updated_at,
+        message_count: remote.messages.length,
+      }],
+      next_cursor: null,
+    });
+    let resolveDetail: ((value: { success: true; conversation: typeof remote }) => void) | undefined;
+    apiMocks.getSavedConversation.mockImplementationOnce(() => new Promise(resolve => {
+      resolveDetail = resolve;
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await waitFor(() => expect(apiMocks.getSavedConversation).toHaveBeenCalledWith(
+      'conv_cloud',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    fireEvent.change(screen.getByLabelText('Type your message'), {
+      target: { value: 'Do not discard this draft' },
+    });
+
+    await act(async () => { resolveDetail?.({ success: true, conversation: remote }); });
+
+    expect(await screen.findByLabelText('History status: Synced')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Do not discard this draft')).toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.get('conversation')).not.toBe('conv_cloud');
+  });
+
+  it('revalidates cloud history without replacing the chat selected after bootstrap', async () => {
+    window.history.replaceState(null, '', '/?conversation=conv_cloud');
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud', title: 'Older local chat', createdAt: 1_000, updatedAt: 2_000,
+          messages: [{ id: 'local_ai', role: 'ai', rawContent: 'Older local answer', timestamp: 2_000 }],
+        },
+        conv_scratch: {
+          id: 'conv_scratch', title: 'Local scratch', createdAt: 1_500, updatedAt: 2_500,
+          messages: [{ id: 'scratch_ai', role: 'ai', rawContent: 'Local notes', timestamp: 2_500 }],
+          draft: 'keep this draft',
+          draftUpdatedAt: 2_600,
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    mockCloudList();
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    expect(await screen.findByText('Cloud answer')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Local scratch Draft saved$/ }));
+    expect(await screen.findByDisplayValue('keep this draft')).toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.get('conversation')).toBe('conv_scratch');
+
+    fireEvent.click(screen.getByLabelText('History status: Synced'));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry sync now' }));
+
+    await waitFor(() => expect(apiMocks.listSavedConversations).toHaveBeenCalledTimes(2));
+    expect(screen.getByDisplayValue('keep this draft')).toBeInTheDocument();
+    expect(screen.getByText('Local notes')).toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.get('conversation')).toBe('conv_scratch');
+  });
+
+  it('retries a dirty cloud write before reporting sync recovery', async () => {
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud', title: 'Dirty local edit', createdAt: 1_000, updatedAt: 4_000,
+          cloudRevision: 3, cloudUpdatedAt: 3_000, cloudSyncedLocalUpdatedAt: 3_000,
+          messages: [{ id: 'local_user', role: 'user', rawContent: 'Unsaved edit', timestamp: 4_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('chat_cloud_bootstrap:v1:42', 'complete');
+    mockCloudList(savedConversation({ updated_at: 3_000 }));
+    apiMocks.upsertSavedConversation.mockRejectedValueOnce(new APIError('temporary', {
+      status: 503,
+      code: 'temporarily_unavailable',
+      retryable: true,
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    expect(await screen.findByLabelText('History status: Sync paused')).toBeInTheDocument();
+    expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByLabelText('History status: Sync paused'));
+    const statusDialog = screen.getByRole('dialog', { name: 'Chat history' });
+    fireEvent.click(within(statusDialog).getByRole('button', { name: 'Retry sync now' }));
+
+    await waitFor(() => expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(2));
+    expect(await screen.findByLabelText('History status: Synced')).toBeInTheDocument();
+    expect(telemetryMocks.reportClientEvent).toHaveBeenCalledWith('sync_recovered', expect.objectContaining({
+      outcome: 'synced',
+    }));
+  });
+
+  it('skips unchanged cloud detail reads during manual revalidation', async () => {
+    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_cloud: {
+          id: 'conv_cloud', title: 'Cloud chat', createdAt: 1_000, updatedAt: 3_000,
+          cloudRevision: 3, cloudUpdatedAt: 3_000, cloudSyncedLocalUpdatedAt: 3_000,
+          messages: [{ id: 'cloud_ai', role: 'ai', rawContent: 'Cloud answer', timestamp: 3_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    mockCloudList();
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+
+    expect(await screen.findByLabelText('History status: Synced')).toBeInTheDocument();
+    expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByLabelText('History status: Synced'));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Chat history' })).getByRole('button', { name: 'Retry sync now' }));
+
+    await waitFor(() => expect(apiMocks.listSavedConversations).toHaveBeenCalledTimes(2));
+    expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1);
+    expect(await screen.findByLabelText('History status: Synced')).toBeInTheDocument();
+  });
+
   it('hydrates cloud details with bounded concurrency', async () => {
     const remotes = Array.from({ length: 12 }, (_, index) => savedConversation({
       id: `conv_cloud_${index}`,
@@ -770,6 +995,14 @@ describe('authenticated history, feedback, and sharing', () => {
 
   it('keeps available cloud chats visible and reports a partial hydration failure', async () => {
     const available = savedConversation();
+    const recovered = savedConversation({
+      id: 'conv_unavailable',
+      title: 'Recovered newer chat',
+      revision: 1,
+      created_at: 2_000,
+      updated_at: 4_500,
+      messages: [{ id: 'recovered_ai', role: 'ai', rawContent: 'Recovered answer', timestamp: 4_500 }],
+    });
     apiMocks.listSavedConversations.mockResolvedValue({
       success: true,
       conversations: [
@@ -794,12 +1027,21 @@ describe('authenticated history, feedback, and sharing', () => {
     });
     apiMocks.getSavedConversation
       .mockResolvedValueOnce({ success: true, conversation: available })
-      .mockRejectedValueOnce(new APIError('temporary failure', { status: 503, retryable: true }));
+      .mockRejectedValueOnce(new APIError('temporary failure', { status: 503, retryable: true }))
+      .mockResolvedValueOnce({ success: true, conversation: recovered });
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
 
     expect(await screen.findByText('Cloud answer')).toBeInTheDocument();
     expect(await screen.findByLabelText('History status: Sync paused')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Type your message'), { target: { value: 'Keep working in this chat' } });
+    fireEvent.click(screen.getByLabelText('History status: Sync paused'));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Chat history' })).getByRole('button', { name: 'Retry sync now' }));
+
+    expect(await screen.findByLabelText('History status: Synced')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Keep working in this chat')).toBeInTheDocument();
+    expect(screen.getByText('Cloud answer')).toBeInTheDocument();
+    expect(screen.queryByText('Recovered answer')).not.toBeInTheDocument();
   });
 
   it('uploads existing local history once and records the returned revision', async () => {

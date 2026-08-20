@@ -496,6 +496,8 @@ function wfChatProductTelemetryEvents(): array
 {
     return [
         'app_error', 'unhandled_rejection', 'largest_contentful_paint', 'layout_shift', 'navigation',
+        'surface_ready', 'starter_selected', 'history_search', 'history_result_opened',
+        'sync_failed', 'sync_recovered',
         'chat_send_started', 'chat_first_token', 'chat_completed', 'chat_stopped', 'chat_failed',
         'message_copied', 'message_feedback', 'source_opened', 'conversation_created',
         'conversation_opened', 'conversation_renamed', 'conversation_deleted', 'conversation_exported',

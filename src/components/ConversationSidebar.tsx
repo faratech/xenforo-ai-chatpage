@@ -1,8 +1,9 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Typography from '@mui/material/Typography';
 import Drawer from '@mui/material/Drawer';
+import SwipeableDrawer from '@mui/material/SwipeableDrawer';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
 import ListItemText from '@mui/material/ListItemText';
@@ -28,6 +29,82 @@ import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 
 type DateGroup = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older';
 
+interface ConversationSearchResult {
+  conversation: Conversation;
+  excerpt?: string;
+  matchCount: number;
+}
+
+const normalizeSearchText = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+const countMatches = (value: string, normalizedQuery: string): number => {
+  const haystack = normalizeSearchText(value).toLocaleLowerCase();
+  let count = 0;
+  let offset = 0;
+
+  while (offset < haystack.length) {
+    const matchAt = haystack.indexOf(normalizedQuery, offset);
+    if (matchAt < 0) break;
+    count += 1;
+    offset = matchAt + normalizedQuery.length;
+  }
+
+  return count;
+};
+
+const excerptAroundMatch = (value: string, normalizedQuery: string): string | undefined => {
+  const compact = normalizeSearchText(value);
+  const matchAt = compact.toLocaleLowerCase().indexOf(normalizedQuery);
+  if (matchAt < 0) return undefined;
+
+  const contextBefore = 42;
+  const contextAfter = 72;
+  let start = Math.max(0, matchAt - contextBefore);
+  let end = Math.min(compact.length, matchAt + normalizedQuery.length + contextAfter);
+
+  if (start > 0) {
+    const nextSpace = compact.indexOf(' ', start);
+    if (nextSpace >= 0 && nextSpace < matchAt) start = nextSpace + 1;
+  }
+  if (end < compact.length) {
+    const previousSpace = compact.lastIndexOf(' ', end);
+    if (previousSpace > matchAt + normalizedQuery.length) end = previousSpace;
+  }
+
+  return `${start > 0 ? '…' : ''}${compact.slice(start, end)}${end < compact.length ? '…' : ''}`;
+};
+
+const highlightMatches = (value: string, normalizedQuery: string) => {
+  if (!normalizedQuery) return value;
+
+  const normalizedValue = value.toLocaleLowerCase();
+  const parts: Array<string | React.ReactElement> = [];
+  let offset = 0;
+  let key = 0;
+
+  while (offset < value.length) {
+    const matchAt = normalizedValue.indexOf(normalizedQuery, offset);
+    if (matchAt < 0) break;
+    if (matchAt > offset) parts.push(value.slice(offset, matchAt));
+    parts.push(
+      <Box
+        component="mark"
+        key={key}
+        className="wf-history-match"
+        sx={{ px: 0.15, borderRadius: 0.35, bgcolor: 'warning.light', color: 'warning.contrastText' }}
+      >
+        {value.slice(matchAt, matchAt + normalizedQuery.length)}
+      </Box>,
+    );
+    key += 1;
+    offset = matchAt + normalizedQuery.length;
+  }
+
+  if (!parts.length) return value;
+  if (offset < value.length) parts.push(value.slice(offset));
+  return parts;
+};
+
 const groupForDate = (timestamp: number): DateGroup => {
   const now = new Date();
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -46,7 +123,10 @@ const GROUP_ORDER: DateGroup[] = ['Today', 'Yesterday', 'Previous 7 days', 'Olde
  */
 export const ConversationSidebar = memo<ConversationSidebarProps>(({
   open,
+  onOpen,
   onClose,
+  onSearchUsed,
+  onSearchResultOpened,
   conversations,
   currentConversationId,
   onSelectConversation,
@@ -57,29 +137,189 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
   onToggleDesktopCollapsed,
 }) => {
   const [query, setQuery] = useState('');
+  const [activeResultIndex, setActiveResultIndex] = useState(-1);
   const [menuState, setMenuState] = useState<{
     anchor: HTMLElement;
     conversation: Conversation;
   } | null>(null);
+  const desktopSearchRef = useRef<HTMLInputElement | null>(null);
+  const mobileSearchRef = useRef<HTMLInputElement | null>(null);
+  const desktopResultRefs = useRef(new Map<string, HTMLDivElement>());
+  const mobileResultRefs = useRef(new Map<string, HTMLDivElement>());
+  const shortcutFocusPendingRef = useRef(false);
+  const searchSessionReportedRef = useRef(false);
+  const [searchAnnouncement, setSearchAnnouncement] = useState('');
+  const handleMobileOpen = useCallback(() => onOpen?.(), [onOpen]);
+
+  const normalizedQuery = normalizeSearchText(query).toLocaleLowerCase();
+
+  const searchResults = useMemo<ConversationSearchResult[]>(() => conversations.flatMap(conversation => {
+    if (!normalizedQuery) return [{ conversation, matchCount: 0 }];
+
+    const titleMatches = countMatches(conversation.title, normalizedQuery);
+    let messageMatches = 0;
+    let excerpt: string | undefined;
+    for (const message of conversation.messages) {
+      const matches = countMatches(message.rawContent, normalizedQuery);
+      messageMatches += matches;
+      if (!excerpt && matches > 0) excerpt = excerptAroundMatch(message.rawContent, normalizedQuery);
+    }
+
+    const matchCount = titleMatches + messageMatches;
+    return matchCount > 0 ? [{
+      conversation,
+      excerpt: excerpt ?? excerptAroundMatch(conversation.title, normalizedQuery),
+      matchCount,
+    }] : [];
+  }), [conversations, normalizedQuery]);
 
   const groups = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    const filtered = normalized
-      ? conversations.filter(conversation => (
-        conversation.title.toLocaleLowerCase().includes(normalized)
-        || conversation.messages.some(message => message.rawContent.toLocaleLowerCase().includes(normalized))
-      ))
-      : conversations;
-
     return GROUP_ORDER.map(label => ({
       label,
-      conversations: filtered.filter(conversation => groupForDate(conversation.updatedAt) === label),
-    })).filter(group => group.conversations.length > 0);
-  }, [conversations, query]);
+      results: searchResults.filter(result => groupForDate(result.conversation.updatedAt) === label),
+    })).filter(group => group.results.length > 0);
+  }, [searchResults]);
+
+  const orderedResults = useMemo(() => groups.flatMap(group => group.results), [groups]);
+  const resultIndexById = useMemo(() => new Map(
+    orderedResults.map((result, index) => [result.conversation.id, index]),
+  ), [orderedResults]);
+
+  useEffect(() => {
+    if (!normalizedQuery) {
+      searchSessionReportedRef.current = false;
+      setSearchAnnouncement('');
+      return;
+    }
+
+    const announcementTimer = window.setTimeout(() => {
+      setSearchAnnouncement(orderedResults.length === 0
+        ? 'No chats found.'
+        : `${orderedResults.length} ${orderedResults.length === 1 ? 'chat' : 'chats'} found.`);
+    }, 250);
+
+    if (searchSessionReportedRef.current) {
+      return () => window.clearTimeout(announcementTimer);
+    }
+
+    const telemetryTimer = window.setTimeout(() => {
+      searchSessionReportedRef.current = true;
+      onSearchUsed?.(orderedResults.length);
+    }, 600);
+    return () => {
+      window.clearTimeout(announcementTimer);
+      window.clearTimeout(telemetryTimer);
+    };
+  }, [normalizedQuery, onSearchUsed, orderedResults.length]);
+
+  const focusSearch = useCallback((mobile: boolean) => {
+    (mobile ? mobileSearchRef : desktopSearchRef).current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!shortcutFocusPendingRef.current) return;
+    const mobile = window.matchMedia?.('(max-width: 899.95px)').matches ?? window.innerWidth < 900;
+    // The temporary Drawer's focus trap runs as it mounts. Mobile focus is
+    // intentionally deferred to the transition's onEntered callback so it
+    // cannot be replaced by the drawer paper's initial focus.
+    if (mobile || desktopCollapsed) return;
+    shortcutFocusPendingRef.current = false;
+    focusSearch(false);
+  }, [desktopCollapsed, focusSearch, open]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.altKey || event.shiftKey) return;
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'k') return;
+
+      const isOpenBlockingSurface = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement) || element.closest('.wf-history-mobile-drawer')) return false;
+        if (element.closest('[aria-hidden="true"], .MuiModal-hidden')) return false;
+        const style = window.getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const eventElement = event.target instanceof Element ? event.target : document.activeElement;
+      const targetSurface = eventElement?.closest('[role="dialog"], [role="menu"]') ?? null;
+      const activeBlockingSurface = isOpenBlockingSurface(targetSurface)
+        ? targetSurface
+        : [...document.querySelectorAll<HTMLElement>('[role="dialog"], [role="menu"]')]
+          .find(isOpenBlockingSurface);
+      if (activeBlockingSurface) return;
+
+      const mobile = window.matchMedia?.('(max-width: 899.95px)').matches ?? window.innerWidth < 900;
+      if (mobile && !open && !onOpen) return;
+      if (!mobile && desktopCollapsed && !onToggleDesktopCollapsed) return;
+
+      event.preventDefault();
+      shortcutFocusPendingRef.current = true;
+      if (mobile && !open) {
+        onOpen?.();
+      } else if (!mobile && desktopCollapsed) {
+        onToggleDesktopCollapsed?.();
+      } else {
+        shortcutFocusPendingRef.current = false;
+        focusSearch(mobile);
+      }
+    };
+
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [desktopCollapsed, focusSearch, onOpen, onToggleDesktopCollapsed, open]);
 
   const chooseConversation = (conversationId: string, closeAfter: boolean) => {
+    if (normalizedQuery) onSearchResultOpened?.();
     onSelectConversation(conversationId);
     if (closeAfter) onClose();
+  };
+
+  const focusResult = (index: number, mobile: boolean) => {
+    if (!orderedResults.length) return;
+    const wrappedIndex = (index + orderedResults.length) % orderedResults.length;
+    const result = orderedResults[wrappedIndex];
+    setActiveResultIndex(wrappedIndex);
+    const refs = mobile ? mobileResultRefs : desktopResultRefs;
+    requestAnimationFrame(() => refs.current.get(result.conversation.id)?.focus());
+  };
+
+  const clearSearch = (mobile: boolean) => {
+    setQuery('');
+    setActiveResultIndex(-1);
+    requestAnimationFrame(() => focusSearch(mobile));
+  };
+
+  const handleSearchKeyDown = (event: React.KeyboardEvent, mobile: boolean) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (normalizedQuery) clearSearch(mobile);
+      else if (mobile) onClose();
+      return;
+    }
+    if (!normalizedQuery || !orderedResults.length) return;
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const nextIndex = activeResultIndex < 0
+        ? event.key === 'ArrowDown' ? 0 : orderedResults.length - 1
+        : activeResultIndex + (event.key === 'ArrowDown' ? 1 : -1);
+      focusResult(nextIndex, mobile);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const result = orderedResults[Math.max(0, Math.min(activeResultIndex, orderedResults.length - 1))];
+      if (result) chooseConversation(result.conversation.id, mobile);
+    }
+  };
+
+  const handleResultKeyDown = (event: React.KeyboardEvent, resultIndex: number, mobile: boolean) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (normalizedQuery) clearSearch(mobile);
+      else if (mobile) onClose();
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      focusResult(resultIndex + (event.key === 'ArrowDown' ? 1 : -1), mobile);
+    }
   };
 
   const renderContent = (collapsed: boolean, mobile: boolean) => (
@@ -146,24 +386,40 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
           <TextField
             type="search"
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActiveResultIndex(-1);
+            }}
+            onKeyDown={(event) => handleSearchKeyDown(event, mobile)}
+            inputRef={mobile ? mobileSearchRef : desktopSearchRef}
             placeholder="Search chats"
-            aria-label="Search chat history"
-            size="small"
-            fullWidth
             slotProps={{
+              htmlInput: {
+                'aria-label': 'Search chat history',
+                'aria-keyshortcuts': 'Control+K Meta+K',
+              },
               input: {
                 startAdornment: (
                   <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18 }} /></InputAdornment>
                 ),
                 endAdornment: query ? (
                   <InputAdornment position="end">
-                    <IconButton size="small" onClick={() => setQuery('')} aria-label="Clear chat search"><CloseIcon fontSize="small" /></IconButton>
+                    <IconButton size="small" onClick={() => clearSearch(mobile)} aria-label="Clear chat search"><CloseIcon fontSize="small" /></IconButton>
                   </InputAdornment>
                 ) : undefined,
               },
             }}
+            size="small"
+            fullWidth
           />
+          <Typography
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            sx={{ position: 'absolute', width: 1, height: 1, p: 0, m: -1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0 }}
+          >
+            {searchAnnouncement}
+          </Typography>
         </Box>
       )}
 
@@ -179,8 +435,10 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                 {group.label}
               </ListSubheader>
             )}
-            {group.conversations.map(conversation => {
+            {group.results.map(result => {
+              const { conversation } = result;
               const selected = conversation.id === currentConversationId;
+              const resultIndex = resultIndexById.get(conversation.id) ?? 0;
               const row = (
                 <Box
                   key={conversation.id}
@@ -205,10 +463,18 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                   }}
                 >
                   <ListItemButton
+                    id={`wf-history-${mobile ? 'mobile' : 'desktop'}-result-${resultIndex}`}
+                    ref={(element) => {
+                      const refs = mobile ? mobileResultRefs : desktopResultRefs;
+                      if (element) refs.current.set(conversation.id, element);
+                      else refs.current.delete(conversation.id);
+                    }}
                     selected={selected}
                     aria-current={selected ? 'page' : undefined}
                     aria-label={collapsed ? conversation.title : undefined}
                     onClick={() => chooseConversation(conversation.id, mobile)}
+                    onFocus={() => setActiveResultIndex(resultIndex)}
+                    onKeyDown={(event) => handleResultKeyDown(event, resultIndex, mobile)}
                     sx={{
                       minWidth: 0,
                       minHeight: 42,
@@ -222,11 +488,20 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                     <ChatBubbleOutlineIcon sx={{ fontSize: 17, opacity: 0.85, flexShrink: 0 }} />
                     {!collapsed && (
                       <ListItemText
-                        primary={conversation.title}
-                        secondary={conversation.draft?.trim() ? 'Draft saved' : undefined}
+                        primary={normalizedQuery ? highlightMatches(conversation.title, normalizedQuery) : conversation.title}
+                        secondary={normalizedQuery ? (
+                          <>
+                            <Box component="span" sx={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' }}>
+                              {highlightMatches(result.excerpt ?? conversation.title, normalizedQuery)}
+                            </Box>
+                            <Box component="span" sx={{ display: 'block', mt: 0.25, color: 'text.secondary', fontSize: 10 }}>
+                              {result.matchCount} {result.matchCount === 1 ? 'match' : 'matches'}
+                            </Box>
+                          </>
+                        ) : conversation.draft?.trim() ? 'Draft saved' : undefined}
                         slotProps={{
                           primary: { noWrap: true, sx: { fontSize: 13, fontWeight: selected ? 650 : 500 } },
-                          secondary: { noWrap: true, sx: { fontSize: 10.5, color: 'primary.main' } },
+                          secondary: { component: 'div', sx: { fontSize: 10.5, color: normalizedQuery ? 'text.secondary' : 'primary.main' } },
                         }}
                       />
                     )}
@@ -289,15 +564,26 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
         {renderContent(desktopCollapsed, false)}
       </Drawer>
 
-      <Drawer
+      <SwipeableDrawer
         anchor="left"
         open={open}
+        onOpen={handleMobileOpen}
         onClose={onClose}
-        ModalProps={{ container: () => document.getElementById('wf-chat-window') }}
-        sx={{ display: { xs: 'block', md: 'none' }, '& .MuiDrawer-paper': { width: 'min(88vw, 320px)', bgcolor: 'background.paper' } }}
+        ModalProps={{ keepMounted: true, container: () => document.getElementById('wf-chat-window') }}
+        slotProps={{
+          paper: { className: 'wf-history-mobile-drawer', 'aria-label': 'Chat history' },
+          transition: {
+            onEntered: () => {
+              if (!shortcutFocusPendingRef.current) return;
+              shortcutFocusPendingRef.current = false;
+              focusSearch(true);
+            },
+          },
+        }}
+        sx={{ display: { xs: 'block', md: 'none' }, '& .MuiDrawer-paper': { width: '92vw', maxWidth: '360px', bgcolor: 'background.paper' } }}
       >
         {renderContent(false, true)}
-      </Drawer>
+      </SwipeableDrawer>
 
       <Menu
         anchorEl={menuState?.anchor ?? null}

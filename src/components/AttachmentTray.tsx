@@ -1,9 +1,11 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
+import IconButton from '@mui/material/IconButton';
 import LinearProgress from '@mui/material/LinearProgress';
 import Stack from '@mui/material/Stack';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import Alert from '@mui/material/Alert';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
@@ -57,6 +59,8 @@ export interface AttachmentTrayProps {
   /** Kept configurable for reuse, but never allowed above the backend limit. */
   maxAttachments?: number;
   onBusyChange?: (busy: boolean) => void;
+  /** Compact controls designed to sit inside the rounded message composer. */
+  compact?: boolean;
   /**
    * Optional server cleanup hook. The chip remains when this rejects (for
    * example, when the backend reports that a saved case still uses the file).
@@ -114,9 +118,11 @@ export const AttachmentTray = ({
   maxAttachments = ATTACHMENT_MAX_COUNT,
   onBusyChange,
   onRemoveAttachment,
+  compact = false,
 }: AttachmentTrayProps) => {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
+  const compactTriggerRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const latestAttachmentsRef = useRef<readonly ChatAttachment[]>(attachments);
   const onBusyChangeRef = useRef(onBusyChange);
@@ -154,7 +160,7 @@ export const AttachmentTray = ({
     if (!signedIn) abortRef.current?.abort();
   }, [signedIn]);
 
-  const uploadFiles = async (selectedFiles: readonly File[]) => {
+  const uploadFiles = useCallback(async (selectedFiles: readonly File[]) => {
     if (unavailable || selectedFiles.length === 0) return;
     const slots = Math.max(0, limit - latestAttachmentsRef.current.length);
     if (slots === 0) {
@@ -215,7 +221,7 @@ export const AttachmentTray = ({
         onBusyChange?.(false);
       }
     }
-  };
+  }, [conversationId, limit, onBusyChange, onChange, unavailable]);
 
   const resetFileInput = () => {
     if (inputRef.current) inputRef.current.value = '';
@@ -259,6 +265,58 @@ export const AttachmentTray = ({
     void uploadFiles(files);
   };
 
+  useEffect(() => {
+    if (!compact) return undefined;
+    const composer = compactTriggerRef.current?.closest<HTMLElement>('.wf-composer-shell');
+    if (!composer) return undefined;
+
+    const onDragEnter = (event: DragEvent) => {
+      event.preventDefault();
+      if (unavailable) return;
+      dragDepthRef.current += 1;
+      setDragActive(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      event.preventDefault();
+      if (!unavailable && event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    };
+    const onDragLeave = (event: DragEvent) => {
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setDragActive(false);
+    };
+    const onDrop = (event: DragEvent) => {
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDragActive(false);
+      if (unavailable || !event.dataTransfer) return;
+      void uploadFiles(Array.from(event.dataTransfer.files));
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      if (unavailable) return;
+      const files = Array.from(event.clipboardData?.items ?? [])
+        .filter(item => item.kind === 'file')
+        .map(item => item.getAsFile())
+        .filter((file): file is File => file !== null);
+      if (files.length === 0) return;
+      event.preventDefault();
+      void uploadFiles(files);
+    };
+
+    composer.addEventListener('dragenter', onDragEnter);
+    composer.addEventListener('dragover', onDragOver);
+    composer.addEventListener('dragleave', onDragLeave);
+    composer.addEventListener('drop', onDrop);
+    composer.addEventListener('paste', onPaste);
+    return () => {
+      composer.removeEventListener('dragenter', onDragEnter);
+      composer.removeEventListener('dragover', onDragOver);
+      composer.removeEventListener('dragleave', onDragLeave);
+      composer.removeEventListener('drop', onDrop);
+      composer.removeEventListener('paste', onPaste);
+    };
+  }, [compact, unavailable, uploadFiles]);
+
   const removeAttachment = async (attachment: ChatAttachment) => {
     if (busy || disabled) return;
     setRemovingId(attachment.id);
@@ -287,6 +345,106 @@ export const AttachmentTray = ({
       <Alert severity="info" variant="outlined" icon={<AttachFileIcon fontSize="inherit" />}>
         Sign in to attach screenshots, logs, or text files to this chat.
       </Alert>
+    );
+  }
+
+  if (compact) {
+    return (
+      <Stack sx={{ display: 'contents' }} aria-busy={busy}>
+        <Box
+          ref={compactTriggerRef}
+          id={`${inputId}-compact-trigger`}
+          role="region"
+          aria-label="File attachment drop zone"
+          aria-describedby={`${inputId}-guidance`}
+          sx={{
+            minHeight: 34,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.65,
+            flex: '0 0 auto',
+            borderRadius: 1.5,
+            bgcolor: dragActive ? 'action.hover' : 'transparent',
+            outline: dragActive ? '1px dashed' : 'none',
+            outlineColor: 'primary.main',
+          }}
+        >
+          <Tooltip title={remaining === 0 ? 'Attachment limit reached' : 'Attach screenshots or files'}>
+            <span>
+              <IconButton
+                component="label"
+                htmlFor={inputId}
+                size="small"
+                disabled={unavailable || remaining === 0}
+                aria-label="Attach screenshots or files"
+                sx={{ color: 'text.secondary' }}
+              >
+                <AttachFileIcon fontSize="small" />
+                <input
+                  ref={inputRef}
+                  id={inputId}
+                  type="file"
+                  accept={ATTACHMENT_ACCEPT}
+                  multiple
+                  hidden
+                  onChange={handleFileInput}
+                />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Typography
+            id={`${inputId}-guidance`}
+            variant="caption"
+            noWrap
+            sx={{ display: attachments.length ? 'none' : { xs: 'none', sm: 'block' }, color: 'text.secondary' }}
+          >
+            Add a screenshot, log, or text file · {remaining} slots available
+          </Typography>
+        </Box>
+
+        {attachments.length > 0 && (
+          <Stack
+            direction="row"
+            useFlexGap
+            spacing={0.5}
+            aria-label="Attached files"
+            sx={{ order: -1, flex: '1 0 100%', width: '100%', minWidth: 0, flexWrap: 'nowrap', overflowX: 'auto', overscrollBehaviorX: 'contain', pb: 0.25 }}
+          >
+            {attachments.map(attachment => (
+              <Chip
+                key={attachment.id}
+                icon={<InsertDriveFileIcon />}
+                label={`${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+                size="small"
+                variant="outlined"
+                disabled={disabled}
+                onDelete={busy ? undefined : () => void removeAttachment(attachment)}
+                deleteIcon={<span aria-label={`Remove ${attachment.name}`}>×</span>}
+                sx={{ flex: '0 0 auto', maxWidth: { xs: 180, sm: 280 }, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+              />
+            ))}
+          </Stack>
+        )}
+
+        {busy && progress && (
+          <Box aria-live="polite" sx={{ order: 1, flex: '1 0 100%' }}>
+            <Typography variant="caption" noWrap sx={{ display: 'block', mb: 0.35 }}>
+              Uploading {progress.completed + 1 > progress.total ? progress.total : progress.completed + 1} of {progress.total}: {progress.fileName}
+            </Typography>
+            <LinearProgress
+              variant="determinate"
+              value={(progress.completed / progress.total) * 100}
+              aria-label="Attachment upload progress"
+            />
+          </Box>
+        )}
+
+        {error && (
+          <Alert severity="error" onClose={() => setError(null)} role="alert" sx={{ order: 1, flex: '1 0 100%' }}>
+            {error}
+          </Alert>
+        )}
+      </Stack>
     );
   }
 

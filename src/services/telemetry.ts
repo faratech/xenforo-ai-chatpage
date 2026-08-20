@@ -90,12 +90,13 @@ export const reportSourceOpened = (
 
 export type ExportDelivery =
   | 'download'
+  | 'clipboard'
   | 'web-share-file'
   | 'web-share-text'
   | 'cancelled';
 
 export const reportConversationExport = (
-  format: 'markdown' | 'json',
+  format: 'markdown' | 'json' | 'text',
   delivery: ExportDelivery,
   messageCount: number,
   eventId?: string,

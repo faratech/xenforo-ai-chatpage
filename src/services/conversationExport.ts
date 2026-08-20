@@ -1,4 +1,6 @@
+import { lexer, walkTokens, type Token } from 'marked';
 import type { Annotation, Conversation, Message } from '../types';
+import { canonicalHttpUrlKey, normalizeAssistantMarkup, parseHttpUrl } from '../utils/helpers';
 
 export type ConversationExportFormat = 'markdown' | 'json';
 export type ConversationShareMethod = 'web-share-file' | 'web-share-text' | 'download' | 'cancelled';
@@ -65,6 +67,150 @@ const annotationMarkdown = (annotation: Annotation): string => {
 
 const messageHeading = (message: Message): string => message.role === 'user' ? 'You' : 'WindowsForum AI';
 
+const humanReadableMessageContent = (message: Message): string => (
+  message.role === 'ai' ? normalizeAssistantMarkup(message.rawContent) : message.rawContent
+);
+
+interface FoldedMarkdownSources {
+  content: string;
+  annotations: Annotation[];
+  folded: boolean;
+}
+
+const markdownTokenText = (token: Token): string => {
+  if ('tokens' in token && Array.isArray(token.tokens)) {
+    return token.tokens.map(markdownTokenText).join('');
+  }
+  return 'text' in token && typeof token.text === 'string' ? token.text : '';
+};
+
+const isSourcesLabelToken = (token: Token): boolean => (
+  (token.type === 'heading' || token.type === 'paragraph')
+  && markdownTokenText(token).trim().replace(/:$/, '').toLocaleLowerCase() === 'sources'
+);
+
+const isSourceBodyToken = (token: Token): boolean => {
+  if (token.type === 'space') return true;
+  if (token.type !== 'list' && token.type !== 'paragraph') return false;
+
+  let containsLink = false;
+  void walkTokens([token], nested => {
+    if (nested.type === 'link') containsLink = true;
+  });
+  return containsLink || /(?:https?:\/\/|\[\d+\])/i.test(token.raw);
+};
+
+const safeLinkAnnotations = (tokens: Token[]): Annotation[] => {
+  const annotations: Annotation[] = [];
+  void walkTokens(tokens, token => {
+    if (token.type !== 'link') return;
+    const url = parseHttpUrl(token.href);
+    if (!url) return;
+    annotations.push({
+      type: 'url_citation',
+      url: url.href,
+      title: token.text.trim() || url.hostname,
+    });
+  });
+  return annotations;
+};
+
+/**
+ * Removes only a trailing provider-authored Sources block. Structured
+ * annotations are required before folding so an ordinary authored section is
+ * never silently rewritten when there is no replacement provenance list.
+ */
+const foldTrailingMarkdownSources = (content: string): FoldedMarkdownSources => {
+  let tokens: Token[];
+  try {
+    tokens = lexer(content);
+  } catch {
+    return { content, annotations: [], folded: false };
+  }
+
+  for (let sourceIndex = tokens.length - 1; sourceIndex >= 0; sourceIndex -= 1) {
+    const label = tokens[sourceIndex];
+    if (!label || !isSourcesLabelToken(label)) continue;
+
+    const tail = tokens.slice(sourceIndex + 1);
+    if (!tail.every(isSourceBodyToken)) continue;
+
+    let removalIndex = sourceIndex;
+    let previousIndex = sourceIndex - 1;
+    while (previousIndex >= 0 && tokens[previousIndex]?.type === 'space') previousIndex -= 1;
+    if (previousIndex >= 0 && tokens[previousIndex]?.type === 'hr') removalIndex = previousIndex;
+    const start = tokens.slice(0, removalIndex).reduce((offset, token) => offset + token.raw.length, 0);
+
+    return {
+      content: content.slice(0, start).trimEnd(),
+      annotations: safeLinkAnnotations(tail),
+      folded: true,
+    };
+  }
+
+  return { content, annotations: [], folded: false };
+};
+
+const annotationIdentity = (annotation: Annotation): string => {
+  switch (annotation.type) {
+    case 'url_citation':
+      return `url:${canonicalHttpUrlKey(annotation.url) ?? annotation.url}`;
+    case 'file_citation':
+      return `file:${annotation.fileId || annotation.filename || ''}`;
+    case 'container_file_citation':
+      return `container:${annotation.containerId || ''}:${annotation.fileId || ''}`;
+    case 'file_path':
+      return `path:${annotation.fileId || ''}`;
+  }
+};
+
+const annotationTitleScore = (annotation: Annotation): number => {
+  if (annotation.type !== 'url_citation' || !annotation.title?.trim()) return 0;
+  const title = annotation.title.trim();
+  const hostname = parseHttpUrl(annotation.url)?.hostname.replace(/^www\./, '') ?? '';
+  return title.replace(/^www\./, '').toLocaleLowerCase() === hostname.toLocaleLowerCase()
+    ? 1
+    : 10 + Math.min(title.length, 100);
+};
+
+const mergeSourceAnnotations = (
+  authored: readonly Annotation[],
+  structured: readonly Annotation[],
+): Annotation[] => {
+  const merged: Annotation[] = [];
+  const positions = new Map<string, number>();
+
+  for (const annotation of [...authored, ...structured]) {
+    const identity = annotationIdentity(annotation);
+    const existingIndex = positions.get(identity);
+    if (existingIndex === undefined) {
+      positions.set(identity, merged.length);
+      merged.push(annotation);
+      continue;
+    }
+
+    const existing = merged[existingIndex];
+    if (
+      existing?.type === 'url_citation'
+      && annotation.type === 'url_citation'
+      && annotationTitleScore(annotation) > annotationTitleScore(existing)
+    ) {
+      merged[existingIndex] = { ...existing, title: annotation.title };
+    }
+  }
+
+  return merged;
+};
+
+/** A deterministic speaker-labelled transcript for the clipboard. */
+export const conversationToPlainText = (conversation: Conversation): string => {
+  const transcript = conversation.messages.flatMap(message => [
+    messageHeading(message),
+    humanReadableMessageContent(message).trim(),
+  ]);
+  return `${[conversation.title.trim() || 'Conversation', ...transcript].join('\n\n').trim()}\n`;
+};
+
 export const conversationToMarkdown = (
   conversation: Conversation,
   options: ConversationExportOptions = {},
@@ -78,10 +224,20 @@ export const conversationToMarkdown = (
   ];
 
   for (const message of conversation.messages) {
-    lines.push(`## ${messageHeading(message)}`, '', message.rawContent.trim(), '');
-    if (message.annotations?.length) {
+    let content = humanReadableMessageContent(message).trim();
+    let annotations = mergeSourceAnnotations([], message.annotations ?? []);
+    if (message.role === 'ai' && annotations.length) {
+      const folded = foldTrailingMarkdownSources(content);
+      if (folded.folded) {
+        content = folded.content;
+        annotations = mergeSourceAnnotations(folded.annotations, annotations);
+      }
+    }
+
+    lines.push(`## ${messageHeading(message)}`, '', content, '');
+    if (annotations.length) {
       lines.push('### Sources', '');
-      message.annotations.forEach((annotation, index) => {
+      annotations.forEach((annotation, index) => {
         lines.push(`${index + 1}. ${annotationMarkdown(annotation)}`);
       });
       lines.push('');

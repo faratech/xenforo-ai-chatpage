@@ -232,7 +232,13 @@ export interface MessageProps {
 
 export interface ConversationSidebarProps {
   open: boolean;
+  /** Opens the mobile drawer so the global history-search shortcut can focus it. */
+  onOpen?: () => void;
   onClose: () => void;
+  /** Reports only the committed result count; the local query never leaves this component. */
+  onSearchUsed?: (resultCount: number) => void;
+  /** Reports that a filtered result was opened without conversation metadata. */
+  onSearchResultOpened?: () => void;
   conversations: Conversation[];
   currentConversationId: string;
   onSelectConversation: (convId: string) => void;
@@ -260,10 +266,14 @@ export interface InputAreaProps {
   onStopListening: () => void;
   onToggleMute: () => void;
   textFieldRef: React.RefObject<HTMLDivElement | null>;
+  /** Optional member-only upload controls rendered inside the composer shell. */
+  attachmentControls?: React.ReactNode;
 }
 
 export interface ChatWindowProps {
   userAvatar: string;
   userName: string;
   userId: string;
+  /** Advances only after App has successfully revalidated the same session. */
+  identityVerificationGeneration?: number;
 }

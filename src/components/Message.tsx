@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, memo } from 'react';
+import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Avatar from '@mui/material/Avatar';
@@ -24,7 +24,12 @@ import VolumeUpOutlinedIcon from '@mui/icons-material/VolumeUpOutlined';
 import ThumbDownOutlinedIcon from '@mui/icons-material/ThumbDownOutlined';
 import ThumbUpOutlinedIcon from '@mui/icons-material/ThumbUpOutlined';
 import type { Annotation, MessageProps } from '../types';
-import { parseHttpUrl, sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
+import {
+  canonicalHttpUrlKey,
+  parseHttpUrl,
+  sanitizeAndParse,
+  splitStreamingMarkdown,
+} from '../utils/helpers';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
 import { reportClientEvent, reportSourceOpened, type SourceKind } from '../services/telemetry';
@@ -32,7 +37,7 @@ import { reportClientEvent, reportSourceOpened, type SourceKind } from '../servi
 const citationLabel = (annotation: Annotation): string => {
   switch (annotation.type) {
     case 'url_citation': {
-      if (annotation.title) return annotation.title;
+      if (annotation.title?.trim()) return annotation.title.trim();
       const url = parseHttpUrl(annotation.url);
       return url ? url.hostname : annotation.url;
     }
@@ -48,7 +53,7 @@ const citationLabel = (annotation: Annotation): string => {
 const citationReactKey = (annotation: Annotation, index: number): string => {
   switch (annotation.type) {
     case 'url_citation':
-      return `url_${annotation.url}_${index}`;
+      return `url_${canonicalHttpUrlKey(annotation.url) ?? annotation.url}_${index}`;
     case 'file_citation':
       return `file_${annotation.fileId || annotation.filename || ''}_${index}`;
     case 'container_file_citation':
@@ -57,6 +62,70 @@ const citationReactKey = (annotation: Annotation, index: number): string => {
       return `path_${annotation.fileId || ''}_${index}`;
   }
 };
+
+const sourceIdentity = (annotation: Annotation): string => {
+  switch (annotation.type) {
+    case 'url_citation':
+      return `url:${canonicalHttpUrlKey(annotation.url) ?? annotation.url}`;
+    case 'file_citation':
+      return `file:${annotation.fileId || annotation.filename || ''}`;
+    case 'container_file_citation':
+      return `container:${annotation.containerId || ''}:${annotation.fileId || ''}`;
+    case 'file_path':
+      return `path:${annotation.fileId || ''}`;
+  }
+};
+
+const citationTitleScore = (annotation: Annotation): number => {
+  if (annotation.type !== 'url_citation' || !annotation.title?.trim()) return 0;
+  const title = annotation.title.trim();
+  const hostname = parseHttpUrl(annotation.url)?.hostname.replace(/^www\./, '') ?? '';
+  return title.replace(/^www\./, '').toLowerCase() === hostname.toLowerCase()
+    ? 1
+    : 10 + Math.min(title.length, 100);
+};
+
+const citationMeta = (annotation: Annotation): string => {
+  switch (annotation.type) {
+    case 'url_citation':
+      return parseHttpUrl(annotation.url)?.hostname.replace(/^www\./, '') || 'Link unavailable';
+    case 'file_citation':
+      return 'File';
+    case 'container_file_citation':
+      return 'Attached file';
+    case 'file_path':
+      return 'Generated file';
+  }
+};
+
+const COLLAPSED_SOURCE_COUNT = 4;
+
+const INLINE_CITATION_SX = {
+  '& .wf-inline-citation': {
+    appearance: 'none',
+    border: 0,
+    borderRadius: '999px',
+    m: '0 1px',
+    px: '4px',
+    py: '1px',
+    minWidth: '1.65em',
+    font: 'inherit',
+    fontSize: '1em',
+    fontWeight: 700,
+    lineHeight: 1.35,
+    verticalAlign: 'baseline',
+    color: 'primary.main',
+    bgcolor: 'action.hover',
+    cursor: 'pointer',
+    transition: 'background-color 120ms ease, box-shadow 120ms ease',
+    '&:hover': { bgcolor: 'action.selected' },
+    '&:focus-visible': {
+      outline: '2px solid',
+      outlineColor: 'primary.main',
+      outlineOffset: '2px',
+    },
+  },
+} as const;
 
 const MAX_EDIT_BYTES = 4096;
 const editEncoder = new TextEncoder();
@@ -68,11 +137,11 @@ const formatAttachmentSize = (bytes: number): string => {
 };
 
 /**
- * Adds a controlled toolbar around sanitized code blocks and makes approved
- * answer images keyboard-operable. The assistant cannot forge either control:
+ * Adds controlled code actions, keyboard-operable answer images, and citation
+ * navigation after sanitization. The assistant cannot forge these controls:
  * sanitizeAndParse removes buttons and data attributes before this runs.
  */
-const enhanceRichContent = (html: string): string => {
+const enhanceRichContent = (html: string, interactiveCitations = true): string => {
   if (!html || typeof document === 'undefined') return html;
   const template = document.createElement('template');
   template.innerHTML = html;
@@ -112,6 +181,22 @@ const enhanceRichContent = (html: string): string => {
     image.tabIndex = 0;
     image.setAttribute('role', 'button');
     image.setAttribute('aria-label', `Open image${image.alt ? `: ${image.alt}` : ''}`);
+  }
+
+  if (interactiveCitations) {
+    for (const marker of template.content.querySelectorAll('sup')) {
+      const match = /^\[(\d+)\]$/.exec(marker.textContent?.trim() ?? '');
+      if (!match) continue;
+      const index = Number(match[1]);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'wf-inline-citation';
+      button.dataset.sourceIndex = String(index);
+      button.setAttribute('aria-label', `Go to source ${index}`);
+      button.title = `Go to source ${index}`;
+      button.textContent = `[${index}]`;
+      marker.replaceChildren(button);
+    }
   }
 
   return template.innerHTML;
@@ -219,36 +304,118 @@ const sourceKind = (annotation: Annotation): SourceKind => {
 const SourcesList = ({
   annotations,
   eventId,
+  expanded,
+  highlightedIndex,
+  listId,
+  onToggle,
 }: {
   annotations: Annotation[];
   eventId?: string;
-}) => (
-  <Box component="section" aria-label="Sources" className="message-file-sources" sx={{ mt: 1.25, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
-    <Typography component="div" sx={{ fontSize: 12, color: 'text.secondary', mb: 0.5 }}>Sources</Typography>
-    <Box component="ol" sx={{ m: 0, pl: 2.5 }}>
-    {annotations.map((annotation, index) => {
-      // Only validated http(s) URLs become links; everything else is text.
-      const safeUrl = annotation.type === 'url_citation' ? parseHttpUrl(annotation.url) : null;
-      return (
-        <Typography key={citationReactKey(annotation, index)} component="li" sx={{ fontSize: 12 }}>
-          {safeUrl ? (
-            <a
-              href={safeUrl.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={() => reportSourceOpened(sourceKind(annotation), index + 1, eventId)}
-            >
-              {citationLabel(annotation)}
-            </a>
-          ) : (
-            citationLabel(annotation)
-          )}
+  expanded: boolean;
+  highlightedIndex: number | null;
+  listId: string;
+  onToggle: () => void;
+}) => {
+  const hiddenCount = annotations.length - COLLAPSED_SOURCE_COUNT;
+
+  return (
+    <Box
+      component="section"
+      aria-label="Sources"
+      className="message-file-sources"
+      sx={{ mt: 1.25, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}
+    >
+      <Stack direction="row" spacing={0.75} sx={{ alignItems: 'baseline', mb: 0.5 }}>
+        <Typography component="h3" sx={{ m: 0, fontSize: 12, fontWeight: 700, color: 'text.secondary' }}>
+          Sources
         </Typography>
-      );
-    })}
+        <Typography component="span" sx={{ fontSize: 11, color: 'text.disabled' }}>
+          {annotations.length}
+        </Typography>
+      </Stack>
+      <Box id={listId} component="ol" sx={{ m: 0, pl: 2.5, display: 'grid', gap: 0.25 }}>
+        {annotations.map((annotation, index) => {
+          // Only validated http(s) URLs become links; everything else is text.
+          const safeUrl = annotation.type === 'url_citation' ? parseHttpUrl(annotation.url) : null;
+          const label = citationLabel(annotation);
+          const meta = citationMeta(annotation);
+          const showMeta = meta.replace(/^www\./, '').toLowerCase()
+            !== label.trim().replace(/^www\./, '').toLowerCase();
+          const highlighted = highlightedIndex === index + 1;
+          const collapsed = !expanded && index >= COLLAPSED_SOURCE_COUNT;
+          return (
+            <Box
+              key={citationReactKey(annotation, index)}
+              component="li"
+              tabIndex={-1}
+              aria-label={`Source ${index + 1}: ${label}`}
+              data-source-row-index={index + 1}
+              data-source-highlighted={highlighted ? 'true' : undefined}
+              data-source-collapsed={collapsed ? 'true' : undefined}
+              sx={{
+                display: collapsed ? 'none' : 'list-item',
+                py: 0.35,
+                pl: 0.25,
+                pr: 0.75,
+                borderRadius: 1,
+                scrollMarginBlock: '20vh',
+                bgcolor: highlighted ? 'action.selected' : 'transparent',
+                boxShadow: highlighted ? 'inset 3px 0 0' : 'none',
+                color: highlighted ? 'primary.main' : 'inherit',
+                transition: 'background-color 160ms ease, box-shadow 160ms ease',
+                outline: 'none',
+                '&:focus-visible': {
+                  outline: '2px solid',
+                  outlineColor: 'primary.main',
+                  outlineOffset: '2px',
+                },
+              }}
+            >
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: 0.75, minWidth: 0 }}>
+                {safeUrl ? (
+                  <Box
+                    component="a"
+                    href={safeUrl.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={label}
+                    onClick={() => reportSourceOpened(sourceKind(annotation), index + 1, eventId)}
+                    sx={{ minWidth: 0, overflowWrap: 'anywhere', fontSize: 12, lineHeight: 1.35 }}
+                  >
+                    {label}
+                  </Box>
+                ) : (
+                  <Typography component="span" sx={{ minWidth: 0, overflowWrap: 'anywhere', fontSize: 12, lineHeight: 1.35 }}>
+                    {label}
+                  </Typography>
+                )}
+                {showMeta && (
+                  <Typography component="span" sx={{ fontSize: 10.5, lineHeight: 1.35, color: 'text.secondary' }}>
+                    {meta}
+                  </Typography>
+                )}
+              </Box>
+            </Box>
+          );
+        })}
+      </Box>
+      {hiddenCount > 0 && (
+        <Button
+          className="wf-source-toggle"
+          type="button"
+          size="small"
+          variant="text"
+          aria-controls={listId}
+          aria-expanded={expanded}
+          onClick={onToggle}
+          sx={{ mt: 0.4, px: 0.5, minWidth: 0, fontSize: 11.5, textTransform: 'none' }}
+        >
+          {expanded ? 'Show fewer sources' : `Show ${hiddenCount} more ${hiddenCount === 1 ? 'source' : 'sources'}`}
+        </Button>
+      )}
     </Box>
-  </Box>
-);
+  );
+};
 
 /**
  * Message Component — WindowsForum "Ask the AI" bubble layout.
@@ -286,15 +453,21 @@ export const Message = memo<MessageProps>(({
   const [selectedImage, setSelectedImage] = useState<{ src: string; alt: string } | null>(null);
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   const [feedbackReason, setFeedbackReason] = useState('');
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
+  const [highlightedSourceIndex, setHighlightedSourceIndex] = useState<number | null>(null);
+  const sourcesListId = useId();
+  const articleRef = useRef<HTMLElement | null>(null);
+  const pendingSourceFocusRef = useRef<number | null>(null);
+  const sourceHighlightResetRef = useRef<number | null>(null);
 
   const renderedAnswer = useMemo(
     () => (isStreaming
       ? { html: '', citations: [] }
       : prepareAnswerContent(
-        enhanceRichContent(sanitizeAndParse(msg.rawContent)),
+        enhanceRichContent(sanitizeAndParse(msg.rawContent), !isUser),
         msg.annotations,
       )),
-    [msg.rawContent, msg.annotations, isStreaming]
+    [msg.rawContent, msg.annotations, isStreaming, isUser]
   );
   const renderedContent = renderedAnswer.html;
 
@@ -302,15 +475,31 @@ export const Message = memo<MessageProps>(({
   // them by canonical URL/file identity before rendering a single panel.
   const visibleAnnotations = useMemo(() => {
     if (isStreaming) return [];
-    const seen = new Set<string>();
-    return [...renderedAnswer.citations, ...(msg.annotations ?? [])].filter(annotation => {
-      const key = annotation.type === 'url_citation'
-        ? `url:${parseHttpUrl(annotation.url)?.href ?? annotation.url}`
-        : citationReactKey(annotation, 0);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    const merged: Annotation[] = [];
+    const positions = new Map<string, number>();
+
+    for (const annotation of [...renderedAnswer.citations, ...(msg.annotations ?? [])]) {
+      const key = sourceIdentity(annotation);
+      const existingIndex = positions.get(key);
+      if (existingIndex === undefined) {
+        positions.set(key, merged.length);
+        merged.push(annotation);
+        continue;
+      }
+
+      const existing = merged[existingIndex];
+      if (
+        existing.type === 'url_citation'
+        && annotation.type === 'url_citation'
+        && citationTitleScore(annotation) > citationTitleScore(existing)
+      ) {
+        // Inline order determines marker numbering. Keep its position and URL,
+        // but let the richer structured annotation improve the visible title.
+        merged[existingIndex] = { ...existing, title: annotation.title };
+      }
+    }
+
+    return merged;
   }, [isStreaming, msg.annotations, renderedAnswer.citations]);
 
   // While streaming, format the part of the answer that is structurally
@@ -324,7 +513,7 @@ export const Message = memo<MessageProps>(({
   const streamingClosed = streamingSplit?.closed ?? '';
   const renderedStreamingPrefix = useMemo(
     () => (streamingClosed
-      ? prepareAnswerContent(enhanceRichContent(sanitizeAndParse(streamingClosed))).html
+      ? prepareAnswerContent(enhanceRichContent(sanitizeAndParse(streamingClosed), false)).html
       : ''),
     [streamingClosed]
   );
@@ -332,7 +521,44 @@ export const Message = memo<MessageProps>(({
   const copyResetRef = useRef<number | null>(null);
   useEffect(() => () => {
     if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+    if (sourceHighlightResetRef.current !== null) window.clearTimeout(sourceHighlightResetRef.current);
   }, []);
+
+  const focusSourceRow = useCallback((index: number): boolean => {
+    const row = articleRef.current?.querySelector<HTMLElement>(`[data-source-row-index="${index}"]`);
+    if (!row || row.dataset.sourceCollapsed === 'true') return false;
+
+    const reducedMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    row.scrollIntoView?.({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'nearest' });
+    row.focus({ preventScroll: true });
+    setHighlightedSourceIndex(index);
+    setActionAnnouncement(`Source ${index} focused.`);
+
+    if (sourceHighlightResetRef.current !== null) {
+      window.clearTimeout(sourceHighlightResetRef.current);
+    }
+    sourceHighlightResetRef.current = window.setTimeout(() => {
+      sourceHighlightResetRef.current = null;
+      setHighlightedSourceIndex(current => current === index ? null : current);
+    }, 2200);
+    return true;
+  }, []);
+
+  const focusSource = useCallback((index: number) => {
+    if (index < 1 || index > visibleAnnotations.length) return;
+    if (focusSourceRow(index)) return;
+
+    pendingSourceFocusRef.current = index;
+    if (index > COLLAPSED_SOURCE_COUNT) setSourcesExpanded(true);
+  }, [focusSourceRow, visibleAnnotations.length]);
+
+  useEffect(() => {
+    const pendingIndex = pendingSourceFocusRef.current;
+    if (pendingIndex !== null && focusSourceRow(pendingIndex)) {
+      pendingSourceFocusRef.current = null;
+    }
+  }, [focusSourceRow, sourcesExpanded, visibleAnnotations.length]);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -360,6 +586,16 @@ export const Message = memo<MessageProps>(({
   const handleRichContentClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const citationButton = target.closest<HTMLButtonElement>('button.wf-inline-citation[data-source-index]');
+    if (citationButton) {
+      const sourceIndex = Number(citationButton.dataset.sourceIndex);
+      if (Number.isInteger(sourceIndex)) {
+        event.preventDefault();
+        focusSource(sourceIndex);
+      }
+      return;
+    }
+
     const button = target.closest<HTMLButtonElement>('button[data-code-action]');
     if (button) {
       const block = button.closest<HTMLElement>('.wf-code-block');
@@ -397,7 +633,7 @@ export const Message = memo<MessageProps>(({
 
     const image = target.closest<HTMLImageElement>('img.wf-answer-image');
     if (image) setSelectedImage({ src: image.currentSrc || image.src, alt: image.alt || 'Answer image' });
-  }, [msg.turnId]);
+  }, [focusSource, msg.turnId]);
 
   const handleRichContentKeyDown = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -443,7 +679,12 @@ export const Message = memo<MessageProps>(({
       <Box component="span" />
     </Box>
   ) : isStreaming ? (
-    <Box className="message-content" onClick={handleRichContentClick} onKeyDown={handleRichContentKeyDown}>
+    <Box
+      className="message-content"
+      onClick={handleRichContentClick}
+      onKeyDown={handleRichContentKeyDown}
+      sx={INLINE_CITATION_SX}
+    >
       {renderedStreamingPrefix && (
         <Box dangerouslySetInnerHTML={{ __html: renderedStreamingPrefix }} />
       )}
@@ -459,6 +700,7 @@ export const Message = memo<MessageProps>(({
       className="message-content"
       onClick={handleRichContentClick}
       onKeyDown={handleRichContentKeyDown}
+      sx={INLINE_CITATION_SX}
       dangerouslySetInnerHTML={{ __html: renderedContent }}
     />
   );
@@ -588,7 +830,7 @@ export const Message = memo<MessageProps>(({
 
   return (
     <>
-    <Box component="article" aria-label={`${isUser ? userName : ASSISTANT_NAME} message`} sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
+    <Box ref={articleRef} component="article" aria-label={`${isUser ? userName : ASSISTANT_NAME} message`} sx={{ px: { xs: 1.5, sm: 2.5, md: 4 }, py: 1, '&:hover .message-actions, &:focus-within .message-actions': { opacity: 1 } }}>
       <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto' }}>
         {isUser ? (
           /* ---- User: right-aligned blue bubble + avatar ---- */
@@ -731,7 +973,17 @@ export const Message = memo<MessageProps>(({
                 >
                   {contentBlock}
                   {!!visibleAnnotations.length && !isStreaming && (
-                    <SourcesList annotations={visibleAnnotations} eventId={msg.turnId} />
+                    <SourcesList
+                      annotations={visibleAnnotations}
+                      eventId={msg.turnId}
+                      expanded={sourcesExpanded}
+                      highlightedIndex={highlightedSourceIndex}
+                      listId={sourcesListId}
+                      onToggle={() => {
+                        setSourcesExpanded(current => !current);
+                        setHighlightedSourceIndex(null);
+                      }}
+                    />
                   )}
                 </Box>
               )}

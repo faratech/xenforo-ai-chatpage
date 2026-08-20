@@ -424,6 +424,10 @@
   #react-chat-container .message-actions,
   #react-chat-container .wf-input-area { display: none !important; }
   #react-chat-container .message-content { page-break-inside: avoid; }
+  #react-chat-container .message-file-sources [data-source-collapsed="true"] {
+    display: list-item !important;
+  }
+  #react-chat-container .message-file-sources .wf-source-toggle { display: none !important; }
 }
 
 /* ===== Reduced motion ===== */

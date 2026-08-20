@@ -12,6 +12,7 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import InstallDesktopOutlinedIcon from '@mui/icons-material/InstallDesktopOutlined';
+import KeyboardOutlinedIcon from '@mui/icons-material/KeyboardOutlined';
 import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import {
@@ -31,6 +32,60 @@ export interface PreferencesDialogProps {
 
 const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5] as const;
 const voiceLabel = (voice: string): string => voice.charAt(0).toUpperCase() + voice.slice(1);
+
+const SHORTCUTS = [
+  { label: 'Send message', keys: ['Enter'] },
+  { label: 'Add a new line', keys: ['Shift', 'Enter'] },
+  { label: 'Search chat history', keys: ['Ctrl/⌘', 'K'] },
+  { label: 'Save a message edit', keys: ['Ctrl/⌘', 'Enter'] },
+  { label: 'Cancel a message edit', keys: ['Esc'] },
+] as const;
+
+const KeyboardShortcut = ({ label, keys }: (typeof SHORTCUTS)[number]) => (
+  <Box
+    sx={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 2,
+      py: 0.5,
+    }}
+  >
+    <Typography component="dt" variant="body2">{label}</Typography>
+    <Box
+      component="dd"
+      aria-label={`${label}: ${keys.join(' plus ')}`}
+      sx={{ m: 0, display: 'inline-flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}
+    >
+      {keys.map((key, index) => (
+        <Box key={key} component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+          {index > 0 && <Typography component="span" aria-hidden variant="caption" color="text.secondary">+</Typography>}
+          <Box
+            component="kbd"
+            aria-hidden
+            sx={{
+              minWidth: 28,
+              px: 0.75,
+              py: 0.25,
+              border: theme => `1px solid ${theme.palette.divider}`,
+              borderBottomWidth: 2,
+              borderRadius: 1,
+              bgcolor: 'action.hover',
+              color: 'text.secondary',
+              fontFamily: 'inherit',
+              fontSize: 11,
+              fontWeight: 700,
+              lineHeight: 1.35,
+              textAlign: 'center',
+            }}
+          >
+            {key}
+          </Box>
+        </Box>
+      ))}
+    </Box>
+  </Box>
+);
 
 const installOutcomeText = (outcome: InstallPromptOutcome): string => {
   if (outcome === 'accepted') return 'WindowsForum AI was added to this device.';
@@ -162,6 +217,24 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
               </Box>
             </>
           )}
+
+          <Divider />
+          <Box component="section" aria-labelledby="wf-shortcuts-heading">
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.75 }}>
+              <KeyboardOutlinedIcon color="primary" />
+              <Box>
+                <Typography id="wf-shortcuts-heading" component="h3" variant="subtitle1" sx={{ fontWeight: 700 }}>
+                  Keyboard shortcuts
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Move through chat without leaving the keyboard.
+                </Typography>
+              </Box>
+            </Stack>
+            <Box component="dl" sx={{ m: 0 }}>
+              {SHORTCUTS.map(shortcut => <KeyboardShortcut key={shortcut.label} {...shortcut} />)}
+            </Box>
+          </Box>
         </Stack>
       </DialogContent>
       <DialogActions>
