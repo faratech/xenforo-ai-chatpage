@@ -362,13 +362,17 @@ try {
               globalThis.__wfSmokeVitals.shifts.push({
                 value: entry.value,
                 time: Math.round(entry.startTime),
-                sources: (entry.sources ?? []).map(source => ({
-                  node: source.node
-                    ? `${source.node.tagName}.${String(source.node.className ?? '').slice(0, 60)}`
-                    : 'null',
-                  prev: source.previousRect ? [source.previousRect.x, source.previousRect.y] : null,
-                  cur: source.currentRect ? [source.currentRect.x, source.currentRect.y] : null,
-                })),
+                sources: (entry.sources ?? []).map(source => {
+                  const node = source.node;
+                  const label = node && node.getAttribute ? (node.getAttribute('aria-label') || node.id || '') : '';
+                  return {
+                    node: node
+                      ? `${node.tagName}.${String(node.className ?? '').slice(0, 40)}[${label}]`
+                      : 'null',
+                    prev: source.previousRect ? [Math.round(source.previousRect.x), Math.round(source.previousRect.y)] : null,
+                    cur: source.currentRect ? [Math.round(source.currentRect.x), Math.round(source.currentRect.y)] : null,
+                  };
+                }),
               });
             }
           }
