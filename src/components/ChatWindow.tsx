@@ -1030,6 +1030,18 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       queueMicrotask(() => setStorageUnavailable(true));
     }
 
+    // Cap trims are local-only: tombstone them so another tab cannot merge
+    // them straight back from its own disk state, but never queue a server
+    // deletion — hitting the history limit is not the user asking to delete
+    // their account's copy.
+    if (result.trimmedIds.length) {
+      const trimmedAt = Date.now();
+      tombstonesRef.current = { ...tombstonesRef.current };
+      for (const id of result.trimmedIds) {
+        tombstonesRef.current[id] = trimmedAt;
+      }
+    }
+
     if (result.evictedIds.length) {
       const evictedAt = Date.now();
       tombstonesRef.current = { ...tombstonesRef.current };
@@ -1100,20 +1112,29 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     return () => window.removeEventListener('wf-chat-save-before-update', saveBeforeUpdate);
   }, [persistScrollPositions, persistStore]);
 
-  const enforceCapAndQueueDeletion = useCallback((next: ConversationMap, keepId: string): ConversationMap => {
+  const enforceCapAndQueueDeletion = useCallback((
+    next: ConversationMap,
+    keepId: string,
+    options: { queueServerDeletions?: boolean } = {},
+  ): ConversationMap => {
+    // Server deletion is an explicit user action. A passive cross-tab merge
+    // that happens to exceed the cap must tombstone locally only — queueing
+    // irreversible server cleanup from a storage event deleted account data
+    // no one asked to delete.
+    const queueServerDeletions = options.queueServerDeletions ?? true;
     const capped = enforceConversationCap(next, keepId);
     const evicted = Object.keys(next).filter(id => !capped[id]);
     if (evicted.length) {
       const evictedAt = Date.now();
       tombstonesRef.current = { ...tombstonesRef.current };
-      pendingDeletionsRef.current = { ...pendingDeletionsRef.current };
+      if (queueServerDeletions) pendingDeletionsRef.current = { ...pendingDeletionsRef.current };
       for (const id of evicted) {
         tombstonesRef.current[id] = evictedAt;
-        pendingDeletionsRef.current[id] = evictedAt;
+        if (queueServerDeletions) pendingDeletionsRef.current[id] = evictedAt;
       }
-      queueMicrotask(() => setErrorMessage(
-        'Your oldest conversation was removed from this browser and queued for secure server cleanup.'
-      ));
+      queueMicrotask(() => setErrorMessage(queueServerDeletions
+        ? 'Your oldest conversation was removed from this browser and queued for secure server cleanup.'
+        : 'Your oldest conversation was removed from this browser to stay within the history limit.'));
     }
     return capped;
   }, []);
@@ -2404,7 +2425,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         }, remote);
         tombstonesRef.current = merged.tombstones;
         pendingDeletionsRef.current = merged.pendingServerDeletions;
-        return enforceCapAndQueueDeletion(merged.conversations, currentConversationIdRef.current);
+        return enforceCapAndQueueDeletion(merged.conversations, currentConversationIdRef.current, {
+          queueServerDeletions: false,
+        });
       });
       if (currentTombstoned) {
         if (activeTurnRef.current?.conversationId === currentConversationIdRef.current) {

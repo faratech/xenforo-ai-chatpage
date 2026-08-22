@@ -22,13 +22,14 @@ import type {
 } from '../types';
 import { ENV } from '../config/env';
 
-const STORAGE_VERSION_KEY = 'chat_storage_version';
 const UNSCOPED_LEGACY_CONVERSATIONS_KEY = 'chat_conversations';
 const UNSCOPED_LEGACY_CURRENT_KEY = 'current_conversation_id';
 
 export interface StorageKeys {
   store: string;
   current: string;
+  /** Quarantine for an envelope that failed to parse; overwritten per incident. */
+  corrupt: string;
   legacyStoreV3: string;
   legacyCurrentV3: string;
   legacyConversations: string;
@@ -40,6 +41,7 @@ export const storageKeys = (userId: string): StorageKeys => {
   return {
     store: `chat_store:v4:${principal}`,
     current: `current_conversation_id:v4:${principal}`,
+    corrupt: `chat_store_corrupt:v1:${principal}`,
     legacyStoreV3: `chat_store:v3:${principal}`,
     legacyCurrentV3: `current_conversation_id:v3:${principal}`,
     legacyConversations: `chat_conversations:v2:${principal}`,
@@ -198,7 +200,14 @@ const normalizeConversation = (id: string, value: unknown): Conversation | null 
   const messages = value.messages
     .map(normalizeMessage)
     .filter((message): message is Message => message !== null);
-  if (messages.length !== value.messages.length) return null;
+  // Salvage, never discard: one unreadable message (e.g. written by a newer
+  // build) must not erase the whole thread — dropping the conversation here
+  // made the loss permanent on the next save.
+  if (messages.length !== value.messages.length) {
+    console.warn(
+      `Recovered conversation ${id}: dropped ${value.messages.length - messages.length} unreadable message(s).`,
+    );
+  }
 
   const conversation: Conversation = {
     id,
@@ -461,21 +470,45 @@ export interface LoadResult {
  * Loads the per-user store, migrating v3 (and older v2 maps) into a v4
  * envelope once, and dropping the unscoped pre-v2 keys that cannot be assigned
  * to a user safely on a shared browser.
+ *
+ * Ordering matters: the v4 write is attempted (with one cap-reduced retry)
+ * BEFORE any legacy blob is removed. Deleting the legacy sources first meant
+ * a quota failure mid-migration destroyed every conversation with no way to
+ * retry. A corrupt v4 envelope is quarantined before recovery so it is never
+ * silently overwritten.
  */
 export const loadStore = (userId: string): LoadResult => {
   const keys = storageKeys(userId);
   try {
-    localStorage.removeItem(UNSCOPED_LEGACY_CONVERSATIONS_KEY);
-    localStorage.removeItem(UNSCOPED_LEGACY_CURRENT_KEY);
-    localStorage.setItem(STORAGE_VERSION_KEY, '4');
-
-    let store = parseStore(localStorage.getItem(keys.store));
+    const rawStore = localStorage.getItem(keys.store);
+    let store = parseStore(rawStore);
+    if (!store && rawStore) {
+      // The envelope exists but is unreadable (e.g. a truncated write).
+      // Quarantine it — best effort; quota pressure must not turn a recovery
+      // path into a crash — then fall through to migration/first-run.
+      try {
+        localStorage.setItem(keys.corrupt, rawStore);
+        console.warn('Chat history envelope was unreadable; quarantined it for inspection.');
+      } catch { /* best effort */ }
+    }
     let currentId = localStorage.getItem(keys.current);
     // A poisoned current id (e.g. "__proto__") must never reach an object
     // key or enforceConversationCap; the JSON paths already filter these.
     if (currentId && DANGEROUS_KEYS.has(currentId)) currentId = null;
 
-    if (!store) {
+    /** Superseded keys may only be dropped once their data lives in v4 on disk. */
+    const removeSupersededKeys = () => {
+      localStorage.removeItem(UNSCOPED_LEGACY_CONVERSATIONS_KEY);
+      localStorage.removeItem(UNSCOPED_LEGACY_CURRENT_KEY);
+      localStorage.removeItem(keys.legacyStoreV3);
+      localStorage.removeItem(keys.legacyCurrentV3);
+      localStorage.removeItem(keys.legacyConversations);
+      localStorage.removeItem(keys.legacyCurrent);
+    };
+
+    if (store) {
+      removeSupersededKeys();
+    } else {
       // One-time v3 → v4 migration. Preserve deletion state as well as the
       // transcript; otherwise a deleted chat could reappear from another tab.
       const v3 = parseV3Store(localStorage.getItem(keys.legacyStoreV3));
@@ -491,18 +524,29 @@ export const loadStore = (userId: string): LoadResult => {
         if (legacyCurrent && !DANGEROUS_KEYS.has(legacyCurrent) && !currentId) currentId = legacyCurrent;
       }
 
-      // Remove legacy blobs BEFORE writing v4: their data is already parsed
-      // into `store`, and freeing space first prevents migration from evicting
-      // live history under quota pressure.
-      localStorage.removeItem(keys.legacyStoreV3);
-      localStorage.removeItem(keys.legacyCurrentV3);
-      localStorage.removeItem(keys.legacyConversations);
-      localStorage.removeItem(keys.legacyCurrent);
+      let persisted = false;
       try {
         localStorage.setItem(keys.store, serializeStore(store));
-        if (currentId) localStorage.setItem(keys.current, currentId);
-      } catch {
-        // The first saveStore retries with eviction if quota is still tight.
+        persisted = true;
+      } catch { /* retried below with a cap-reduced store */ }
+      if (!persisted && currentId && !DANGEROUS_KEYS.has(currentId)) {
+        try {
+          const reduced = emptyStore();
+          reduced.conversations = enforceConversationCap(store.conversations, currentId);
+          reduced.tombstones = store.tombstones;
+          reduced.pendingServerDeletions = store.pendingServerDeletions;
+          localStorage.setItem(keys.store, serializeStore(reduced));
+          store = reduced;
+          persisted = true;
+        } catch { /* legacy blobs stay intact for the next attempt */ }
+      }
+      if (persisted) {
+        try {
+          if (currentId) localStorage.setItem(keys.current, currentId);
+        } catch { /* non-fatal: saveStore rewrites it */ }
+        removeSupersededKeys();
+      } else {
+        console.warn('Local chat storage is full; legacy chat history kept in place for a later migration retry.');
       }
     }
 
@@ -517,6 +561,12 @@ export interface SaveResult {
   persisted: boolean;
   /** Conversation ids evicted under quota pressure, oldest first. */
   evictedIds: string[];
+  /**
+   * Conversation ids dropped by cap enforcement (not quota eviction). Callers
+   * tombstone these in the same commit; leaving them merely absent let another
+   * tab merge them straight back from its own disk state.
+   */
+  trimmedIds: string[];
   /** The store as actually persisted (post cap, GC, and eviction). */
   store: ChatStoreV4;
 }
@@ -539,9 +589,17 @@ export const saveStore = (
     onDisk = parseStore(localStorage.getItem(keys.store));
   } catch (error) {
     console.warn('Failed to read chat history before saving:', error);
-    return { persisted: false, evictedIds: [], store: applyTombstones(store) };
+    return { persisted: false, evictedIds: [], trimmedIds: [], store: applyTombstones(store) };
   }
   let prepared: ChatStoreV4 = onDisk ? mergeStores(store, onDisk) : applyTombstones(store);
+
+  /** Ids dropped by cap enforcement in the current pass. */
+  const collectTrimmed = (before: ConversationMap): string[] => {
+    const kept = enforceConversationCap(before, currentId);
+    if (Object.keys(kept).length === Object.keys(before).length) return [];
+    return Object.keys(before).filter(id => !(id in kept));
+  };
+  let trimmedIds = collectTrimmed(prepared.conversations);
   prepared = {
     ...prepared,
     conversations: enforceConversationCap(prepared.conversations, currentId),
@@ -561,6 +619,7 @@ export const saveStore = (
           for (const id of evictedIds) delete conversations[id];
           prepared = { ...prepared, conversations };
         }
+        trimmedIds = [...new Set([...trimmedIds, ...collectTrimmed(prepared.conversations)])];
         prepared = {
           ...prepared,
           conversations: enforceConversationCap(prepared.conversations, currentId),
@@ -576,11 +635,11 @@ export const saveStore = (
       if (localStorage.getItem(keys.current) !== currentId) {
         localStorage.setItem(keys.current, currentId);
       }
-      return { persisted: true, evictedIds, store: prepared };
+      return { persisted: true, evictedIds, trimmedIds, store: prepared };
     } catch (error) {
       if (!isQuotaError(error)) {
         console.warn('Failed to persist chat history:', error);
-        return { persisted: false, evictedIds, store: prepared };
+        return { persisted: false, evictedIds, trimmedIds, store: prepared };
       }
       const evictable = Object.values(prepared.conversations)
         .filter(conversation => conversation.id !== currentId)
@@ -589,7 +648,7 @@ export const saveStore = (
           return pinnedDifference !== 0 ? pinnedDifference : a.updatedAt - b.updatedAt;
         });
       if (!evictable.length) {
-        return { persisted: false, evictedIds, store: prepared };
+        return { persisted: false, evictedIds, trimmedIds, store: prepared };
       }
       const oldest = evictable[0];
       evictedIds.push(oldest.id);

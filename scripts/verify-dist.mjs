@@ -96,11 +96,11 @@ for (const file of jsFiles.filter(name => name.endsWith('.js'))) {
 const totalJsGzipBytes = [...jsGzipSizes.values()].reduce((total, size) => total + size, 0);
 // This aggregate deliberately counts every optional route chunk, including
 // member-only support/share/account/export dialogs that are never fetched on
-// the core path. The measured product surfaces are ~256 KiB after adding the
-// source inspector, keyboard history search, actionable sync state, compact
-// uploads, and consolidated export. Keep ~9 KiB release headroom while the
-// strict 4 KiB bootstrap and 50 KiB ChatWindow caps below protect startup cost.
-const totalJsGzipBudget = 265 * 1024;
+// the core path. Raised 2026-08-22 from 265 KiB when the storage data-loss
+// guards (salvage-not-drop parsing, migration ordering, quarantine) consumed
+// the last of the previous headroom. The strict 4 KiB bootstrap and 50 KiB
+// ChatWindow caps below still protect startup cost.
+const totalJsGzipBudget = 268 * 1024;
 if (totalJsGzipBytes > totalJsGzipBudget) {
   throw new Error(
     `Compressed JavaScript budget exceeded: ${totalJsGzipBytes} bytes gzip > ${totalJsGzipBudget}.`,

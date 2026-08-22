@@ -572,3 +572,102 @@ describe('pending server deletions', () => {
     expect(merged.pendingServerDeletions.conv_gone).toBeUndefined();
   });
 });
+
+describe('storage data-loss guards', () => {
+  it('keeps a conversation when only some of its messages are unreadable', () => {
+    // One message written by a hypothetical newer build (unknown role) must
+    // cost that message, never the whole thread.
+    const keys = storageKeys('42');
+    const poisoned = {
+      version: 4,
+      conversations: {
+        conv_mixed: {
+          id: 'conv_mixed',
+          title: 'Mixed',
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          messages: [
+            { id: 'm1', role: 'user', rawContent: 'kept', timestamp: 1_000 },
+            { id: 'm2', role: 'tool', rawContent: 'from the future', timestamp: 1_500 },
+          ],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    };
+    storage.setItem(keys.store, JSON.stringify(poisoned));
+
+    const loaded = loadStore('42');
+    const kept = loaded.store.conversations.conv_mixed;
+    expect(kept).toBeDefined();
+    expect(kept.messages).toHaveLength(1);
+    expect(kept.messages[0].id).toBe('m1');
+  });
+
+  it('keeps legacy blobs in place when the migration write hits quota', () => {
+    const keys = storageKeys('42');
+    const v3 = {
+      version: 3,
+      conversations: { conv_old: JSON.parse(JSON.stringify(conversation('conv_old', 500))) },
+      tombstones: {},
+      pendingServerDeletions: {},
+    };
+    storage.setItem(keys.legacyStoreV3, JSON.stringify(v3));
+    storage.setItem(keys.legacyCurrentV3, 'conv_old');
+    storage.failWrites(keys.store, 2);
+
+    const first = loadStore('42');
+    // The session still sees the migrated store…
+    expect(first.store.conversations.conv_old).toBeDefined();
+    // …but the legacy sources survive for a retry.
+    expect(storage.getItem(keys.legacyStoreV3)).not.toBeNull();
+    expect(storage.getItem(keys.store)).toBeNull();
+
+    storage.failWrites(keys.store, 0);
+    const second = loadStore('42');
+    expect(second.store.conversations.conv_old).toBeDefined();
+    expect(storage.getItem(keys.store)).not.toBeNull();
+    expect(storage.getItem(keys.legacyStoreV3)).toBeNull();
+  });
+
+  it('quarantines an unreadable envelope instead of silently overwriting it', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const keys = storageKeys('42');
+    const damaged = '{"version":4,"conversations":{"conv_x":';
+    storage.setItem(keys.store, damaged);
+
+    const loaded = loadStore('42');
+    expect(loaded.store.conversations).toEqual({});
+    expect(storage.getItem(keys.corrupt)).toBe(damaged);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('reports cap-trimmed ids from saveStore and honors their tombstones', () => {
+    const conversations: Record<string, Conversation> = {};
+    for (let index = 0; index < 52; index += 1) {
+      const id = `conv_${String(index).padStart(2, '0')}`;
+      conversations[id] = conversation(id, 1_000 + index);
+    }
+    const result = saveStore('42', { ...emptyStore(), conversations }, 'conv_51');
+
+    expect(result.persisted).toBe(true);
+    expect(result.trimmedIds.length).toBe(2);
+    expect(Object.keys(result.store.conversations)).toHaveLength(50);
+
+    // Tombstoning the trimmed ids (as persistStore does) must survive a merge
+    // against a disk state — or another tab — that still holds them.
+    const tombstoned = {
+      ...emptyStore(),
+      conversations: { conv_current: conversation('conv_current', Date.now()) },
+      tombstones: Object.fromEntries(result.trimmedIds.map(id => [id, Date.now()])),
+    };
+    const resurrected = {
+      ...emptyStore(),
+      conversations: Object.fromEntries(result.trimmedIds.map(id => [id, conversation(id, 999)])),
+    };
+    const merged = mergeStores(tombstoned, resurrected);
+    for (const id of result.trimmedIds) {
+      expect(merged.conversations[id]).toBeUndefined();
+    }
+  });
+});
