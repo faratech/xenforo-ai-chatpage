@@ -88,6 +88,12 @@ export const InputArea = memo<InputAreaProps>(({
           }}
         >
           <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: 0.5, p: 0.75, pl: 1 }}>
+          {/* flex-basis on the textarea is 0 (grown to fit), never an intrinsic
+              measurement: a basis derived from text metrics re-wraps this row
+              once webfont/fallback metrics settle during hydration, jumping the
+              whole composer by one button row (~42px) after first paint. With
+              basis 0 and fixed-width buttons, whether the row fits is pure
+              arithmetic and cannot change mid-load. */}
             {attachmentControls}
             {voiceEnabled && isSpeechRecognitionSupported && (
               <Tooltip title={isListening ? 'Stop recording' : 'Voice input'}>
@@ -108,7 +114,7 @@ export const InputArea = memo<InputAreaProps>(({
 
             <TextField
             ref={textFieldRef}
-            sx={{ flex: '1 1 140px', minWidth: 0 }}
+            sx={{ flex: '1 1 0%', minWidth: 64 }}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -147,7 +153,7 @@ export const InputArea = memo<InputAreaProps>(({
                 aria-label={isMuted ? 'Enable read-aloud' : 'Mute read-aloud'}
                 aria-pressed={!isMuted}
                 size="small"
-                sx={{ color: 'text.secondary' }}
+                sx={{ color: 'text.secondary', flexShrink: 0 }}
               >
                 {isMuted ? <VolumeOffIcon fontSize="small" /> : <VolumeUpIcon fontSize="small" />}
               </IconButton>
@@ -160,7 +166,7 @@ export const InputArea = memo<InputAreaProps>(({
                 onClick={onStop}
                 aria-label="Stop generation"
                 size="small"
-                sx={{ bgcolor: 'action.hover', borderRadius: '10px', width: 38, height: 38 }}
+                sx={{ bgcolor: 'action.hover', borderRadius: '10px', width: 38, height: 38, flexShrink: 0 }}
               >
                 <StopIcon fontSize="small" />
               </IconButton>
@@ -176,6 +182,7 @@ export const InputArea = memo<InputAreaProps>(({
                     borderRadius: '10px',
                     width: 38,
                     height: 38,
+                    flexShrink: 0,
                     color: '#fff',
                     bgcolor: canSend ? 'primary.main' : 'action.disabledBackground',
                     '&:hover': { bgcolor: 'primary.dark' },

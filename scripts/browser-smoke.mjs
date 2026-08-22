@@ -395,7 +395,56 @@ try {
     await page.goto(`${origin}/chatpage/`);
     await waitForComposer(page);
     const composerReadyMs = Date.now() - startedAt;
+    if (debugCls) {
+      // Is the read-aloud button present at composer-ready, or does it mount
+      // during the shift window?
+      globalThis.__wfInputProbeAtReady = await page.evaluate(() => {
+        const area = document.querySelector('.wf-input-area');
+        const mute = document.querySelector('button[aria-label="Mute read-aloud"], button[aria-label="Enable read-aloud"]');
+        return {
+          areaHeight: area?.getBoundingClientRect().height ?? null,
+          mutePresent: Boolean(mute),
+          buttons: [...(area?.querySelectorAll('button') ?? [])].map(b => b.getAttribute('aria-label')),
+        };
+      });
+      globalThis.__wfRegionProbe = await page.evaluate(() => {
+        const dump = [];
+        const walk = (el, depth) => {
+          if (!el || depth > 3) return;
+          const r = el.getBoundingClientRect();
+          dump.push(`${'  '.repeat(depth)}${el.tagName}.${String(el.className).slice(0, 40)} h=${Math.round(r.height)} y=${Math.round(r.y)}`);
+          for (const child of [...el.children].slice(0, 8)) walk(child, depth + 1);
+        };
+        walk(document.querySelector('#wf-chat-window'), 0);
+        return dump;
+      });
+    }
     await page.waitForTimeout(500);
+    if (debugCls) {
+      globalThis.__wfRegionProbeAfter = null;
+      globalThis.__wfRegionProbeAfter = await page.evaluate(() => {
+        const dump = [];
+        const walk = (el, depth) => {
+          if (!el || depth > 3) return;
+          const r = el.getBoundingClientRect();
+          dump.push(`${'  '.repeat(depth)}${el.tagName}.${String(el.className).slice(0, 40)} h=${Math.round(r.height)} y=${Math.round(r.y)}`);
+          for (const child of [...el.children].slice(0, 8)) walk(child, depth + 1);
+        };
+        walk(document.querySelector('#wf-chat-window'), 0);
+        return dump;
+      });
+      globalThis.__wfInputProbeAfter = await page.evaluate(() => {
+        const area = document.querySelector('.wf-input-area');
+        const mute = document.querySelector('button[aria-label="Mute read-aloud"], button[aria-label="Enable read-aloud"]');
+        return {
+          areaHeight: area?.getBoundingClientRect().height ?? null,
+          mutePresent: Boolean(mute),
+          buttons: [...(area?.querySelectorAll('button') ?? [])].map(b => b.getAttribute('aria-label')),
+          placeholderLines: Math.round((document.querySelector('.wf-input-area textarea')?.getBoundingClientRect().height ?? 0) / 21),
+          alerts: [...document.querySelectorAll('#wf-chat-window [role="alert"]')].map(a => a.textContent?.slice(0, 90)),
+        };
+      });
+    }
     const vitals = await page.evaluate(() => {
       const firstContentfulPaint = performance.getEntriesByName('first-contentful-paint')[0];
       return {
@@ -406,6 +455,15 @@ try {
       };
     });
     if (debugCls && vitals.cls > 0.05) {
+      console.log(`[smoke] input-area at composer-ready: ${JSON.stringify(globalThis.__wfInputProbeAtReady)}`);
+      console.log('[smoke] region diff (ready -> after):');
+      const before = globalThis.__wfRegionProbe ?? [];
+      const after = globalThis.__wfRegionProbeAfter ?? [];
+      const max = Math.max(before.length, after.length);
+      for (let i = 0; i < max; i += 1) {
+        if (before[i] !== after[i]) console.log(`  - ${before[i] ?? '(none)'}
+  + ${after[i] ?? '(none)'}`);
+      }
       console.log('[smoke] CLS budget exceeded; shift sources:');
       for (const shift of vitals.shifts) {
         console.log(`  v=${shift.value.toFixed(4)} at ${shift.time}ms`);
