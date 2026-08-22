@@ -129,10 +129,8 @@ readonly -a ROLLBACK_COMPAT_ARTIFACTS=(
 )
 
 readonly -a XF_STYLES=(wf3 wf3_domperf)
-# Designer dir ids double as the src/styles/<id> directory names; the style ids
-# are the xf_style rows they sync into. Styles no longer need designer mode.
-readonly WF3_STYLE_ID="${WF3_STYLE_ID:-40}"
-readonly WF3_DOMPERF_STYLE_ID="${WF3_DOMPERF_STYLE_ID:-47}"
+# Each src/styles/<dir> tree resolves its own xf_style id at deploy time (see
+# scripts/lib/xenforo-style-id.php); no hardcoded dir-to-id map lives here.
 readonly -a XF_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
 readonly WF5_STYLE="wf5"
 readonly WF5_STYLE_ID="${WF5_STYLE_ID:-51}"
@@ -1211,7 +1209,6 @@ snapshot_active_templates() {
 
   php "$APP_ROOT/scripts/snapshot-xenforo-template-db.php" \
     "$XENFORO_ROOT" "$TEMPLATE_SNAPSHOT_DIR" \
-    "$WF3_STYLE_ID" "$WF3_DOMPERF_STYLE_ID" "$WF5_STYLE_ID" \
     || return 1
 
   for style in "${XF_STYLES[@]}"; do
@@ -1427,16 +1424,11 @@ apply_template_bundle() {
 
   # Style-wide disk-to-DB template sync. Replaces the retired
   # xf-designer:import-templates/rebuild-metadata pair, which required the
-  # target styles to be designer-managed; styles are no longer designer-managed.
+  # target styles to be designer-managed. Each tree self-resolves its target
+  # style (designer_mode binding if present, else its .wf-style-id marker).
   local wide_syncer="$APP_ROOT/scripts/sync-xenforo-style-wide.php"
-  local style_id
   for style in "${XF_STYLES[@]}"; do
-    case "$style" in
-      wf3) style_id="$WF3_STYLE_ID" ;;
-      wf3_domperf) style_id="$WF3_DOMPERF_STYLE_ID" ;;
-      *) fail "No xf_style id mapping for designer dir $style"; return 1 ;;
-    esac
-    php "$wide_syncer" "$XENFORO_ROOT" "$style" "$style_id" \
+    php "$wide_syncer" "$XENFORO_ROOT" "$style" \
       || { fail "Style-wide template sync failed for $style"; return 1; }
   done
 
@@ -1447,12 +1439,12 @@ apply_template_bundle() {
         || { fail "Cannot push $style template metadata to $PEER_HOST"; return 1; }
     done
 
-    peer_ssh bash -s -- "$XENFORO_ROOT" "$wide_syncer" "$WF3_STYLE_ID" "$WF3_DOMPERF_STYLE_ID" <<'REMOTE' || { fail "Peer style-wide template sync failed"; return 1; }
+    peer_ssh bash -s -- "$XENFORO_ROOT" "$wide_syncer" <<'REMOTE' || { fail "Peer style-wide template sync failed"; return 1; }
 # wf-peer-sync-styles
 set -Eeuo pipefail
 cd "$1"
-php "$2" "$1" wf3 "$3"
-php "$2" "$1" wf3_domperf "$4"
+php "$2" "$1" wf3
+php "$2" "$1" wf3_domperf
 REMOTE
   else
     skip_peer "the peer template push and style-wide sync"

@@ -23,7 +23,12 @@ declare(strict_types=1);
  *     `xf-designer:rebuild-metadata`.
  *
  * Usage:
- *   php sync-xenforo-style-wide.php <xenforo-root> <designer-dir-id> <style-id>
+ *   php sync-xenforo-style-wide.php <xenforo-root> <designer-dir-id> [style-id]
+ *
+ * The target style is auto-detected (designer_mode binding if present, else
+ * the tree's committed .wf-style-id marker — see lib/xenforo-style-id.php).
+ * Passing [style-id] explicitly turns detection into a cross-check and fails
+ * closed on any disagreement.
  */
 
 if (PHP_SAPI !== 'cli')
@@ -34,16 +39,16 @@ if (PHP_SAPI !== 'cli')
 
 $xenForoRoot = realpath($argv[1] ?? '') ?: '';
 $designerId = $argv[2] ?? '';
-$styleId = isset($argv[3]) ? (int)$argv[3] : 0;
+$explicitStyleId = isset($argv[3]) ? (int)$argv[3] : 0;
 
 if ($xenForoRoot === '' || !is_file($xenForoRoot . '/src/XF.php'))
 {
 	fwrite(STDERR, "Invalid XenForo root\n");
 	exit(2);
 }
-if ($designerId === '' || !preg_match('/^[a-z0-9_]+$/i', $designerId) || $styleId < 1)
+if ($designerId === '' || !preg_match('/^[a-z0-9_]+$/i', $designerId) || $explicitStyleId < 0)
 {
-	fwrite(STDERR, "Usage: php sync-xenforo-style-wide.php <xenforo-root> <designer-dir-id> <style-id>\n");
+	fwrite(STDERR, "Usage: php sync-xenforo-style-wide.php <xenforo-root> <designer-dir-id> [style-id]\n");
 	exit(2);
 }
 
@@ -51,6 +56,14 @@ require $xenForoRoot . '/src/XF.php';
 
 \XF::start($xenForoRoot);
 \XF::setupApp('XF\\Pub\\App');
+
+require __DIR__ . '/lib/xenforo-style-id.php';
+$styleId = wf_resolve_style_id($xenForoRoot . '/src/styles', $designerId);
+if ($explicitStyleId > 0 && $explicitStyleId !== $styleId)
+{
+	fwrite(STDERR, "Refusing: style dir '{$designerId}' resolves to {$styleId}, not the requested {$explicitStyleId}\n");
+	exit(1);
+}
 
 $app = \XF::app();
 $style = $app->em()->find('XF:Style', $styleId);
