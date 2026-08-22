@@ -1528,6 +1528,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     fireEvent.click(screen.getAllByLabelText('Pinned chats')[0]);
@@ -1540,6 +1541,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       8,
       { archived: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     fireEvent.click(screen.getAllByLabelText('Archived chats')[0]);
@@ -1551,6 +1553,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       9,
       { archived: false },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     fireEvent.click(screen.getAllByLabelText('All chats')[0]);
@@ -1603,6 +1606,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
@@ -1630,6 +1634,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       8,
       { pinned: false },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1);
@@ -1687,12 +1692,14 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     await waitFor(() => expect(apiMocks.setSavedConversationState).toHaveBeenNthCalledWith(
       2,
       'conv_cloud',
       8,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(2);
     await waitFor(() => {
@@ -1762,6 +1769,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     await screen.findByText('Chat pinned and synced.');
 
@@ -1822,6 +1830,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
 
     fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
@@ -1836,6 +1845,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       8,
       { pinned: false },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     expect(apiMocks.setSavedConversationState.mock.calls.map(call => call[2])).toEqual([
       { pinned: true },
@@ -1865,6 +1875,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     const pendingSaveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
@@ -1927,6 +1938,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       7,
       { pinned: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     fireEvent.click((await screen.findAllByLabelText('Actions for Cloud chat'))[0]);
@@ -1941,6 +1953,7 @@ describe('authenticated history, feedback, and sharing', () => {
       'conv_cloud',
       8,
       { pinned: true, archived: true },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
 
     await waitFor(() => {
@@ -3060,5 +3073,55 @@ describe('composer and message integrity', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Message actions' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Read aloud' }));
     expect(onSpeak).toHaveBeenCalledWith('ai-1', '```ts\nconst answer = 42;\n```');
+  });
+});
+
+describe('usage from the chat menu preserves the composer draft', () => {
+  it('does not wipe an unsent draft when Usage runs from the menu', async () => {
+    window.localStorage.setItem('chat_store:v4:guest_menu_usage', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_usage: {
+          id: 'conv_usage',
+          title: 'Chat U',
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          messages: [{ id: 'u1', role: 'user', rawContent: 'Earlier question', timestamp: 1_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_menu_usage', 'conv_usage');
+
+    renderThemed(
+      <ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_menu_usage" />,
+    );
+    const composer = await screen.findByLabelText('Type your message');
+    fireEvent.change(composer, { target: { value: 'Unsent question about GPUs' } });
+
+    fireEvent.click(screen.getByLabelText('Chat actions'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Usage' }));
+    expect(await screen.findByText(/no per-account quota is tracked/)).toBeInTheDocument();
+
+    expect(composer).toHaveValue('Unsent question about GPUs');
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_menu_usage') ?? '{}') as {
+        conversations: Record<string, { draft?: string }>;
+      };
+      expect(stored.conversations.conv_usage.draft).toBe('Unsent question about GPUs');
+    });
+  });
+
+  it('still clears the composer when /usage is typed as a command', async () => {
+    renderThemed(
+      <ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_typed_usage" />,
+    );
+    const composer = await screen.findByLabelText('Type your message');
+    fireEvent.change(composer, { target: { value: '/usage' } });
+    fireEvent.keyDown(composer, { key: 'Enter' });
+
+    expect(await screen.findByText(/no per-account quota is tracked/)).toBeInTheDocument();
+    expect(composer).toHaveValue('');
   });
 });

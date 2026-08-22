@@ -921,12 +921,16 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const inputRef = useRef(input);
   const mutedRef = useRef(isMuted);
   const isClearingRef = useRef(false);
+  /** A /usage fetch runs outside activeTurnRef; this keeps it single-flight too. */
+  const usageInFlightRef = useRef(false);
   const isOnlineRef = useRef(isOnline);
   const requestedConversationIdRef = useRef(initialChatState.requestedId);
   const cloudInitialSelectionResolvedRef = useRef(false);
   const lastIdentityVerificationGenerationRef = useRef(identityVerificationGeneration);
   const cloudBootstrapAbortRef = useRef<AbortController | null>(null);
   const cloudSyncAbortRef = useRef<AbortController | null>(null);
+  /** Aborts per-conversation metadata writes; quiesced alongside cloud sync. */
+  const metadataAbortRef = useRef<AbortController | null>(null);
   const cloudSyncTimerRef = useRef<number | null>(null);
   const cloudSyncLoopRef = useRef(false);
   const cloudSyncPausedRef = useRef(false);
@@ -1343,6 +1347,25 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     const deleted = conversationsRef.current[conversationId];
     if (!deleted || (!authoritative && deleted.cloudRevision === undefined)) return false;
 
+    // Stop a turn still streaming into this conversation. Left running, its
+    // completion would be silently dropped by updateConversationById (the
+    // conversation no longer exists) while TTS still read the invisible
+    // answer aloud. Inline rather than via abortActiveTurn: persistence and
+    // branch-restore semantics make no sense for a conversation being deleted.
+    const activeTurn = activeTurnRef.current;
+    if (activeTurn?.conversationId === conversationId) {
+      activeTurnRef.current = null;
+      activeTurn.controller.abort();
+      if (streamingFrameRef.current !== null) {
+        cancelAnimationFrame(streamingFrameRef.current);
+        streamingFrameRef.current = null;
+      }
+      setStreamingState(null);
+      setActiveRequestId(null);
+      AudioService.stop();
+      setSpeakingMessageId(null);
+    }
+
     const deletedAt = Math.max(
       Date.now(),
       (pendingDeletionsRef.current[conversationId] ?? 0) + 1,
@@ -1716,8 +1739,13 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     if (metadataSyncInFlightRef.current[conversationId]) return;
     metadataSyncInFlightRef.current[conversationId] = true;
 
+    if (!metadataAbortRef.current || metadataAbortRef.current.signal.aborted) {
+      metadataAbortRef.current = new AbortController();
+    }
+    const signal = metadataAbortRef.current.signal;
+
     try {
-      while (metadataDesiredStateRef.current[conversationId]) {
+      while (metadataDesiredStateRef.current[conversationId] && !signal.aborted) {
         const target = metadataDesiredStateRef.current[conversationId]!;
         const current = conversationsRef.current[conversationId];
         if (!current || current.cloudRevision === undefined) {
@@ -1731,10 +1759,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             conversationId,
             current.metadataRevision ?? 0,
             target.changes,
+            { signal },
           );
         } catch (error) {
           if (!(error instanceof APIError) || error.code !== 'metadata_revision_conflict') throw error;
-          const latest = await ChatAPI.getSavedConversation(conversationId);
+          const latest = await ChatAPI.getSavedConversation(conversationId, { signal });
           metadataConfirmedStateRef.current[conversationId] = {
             pinnedAt: latest.conversation.pinned_at ?? undefined,
             archivedAt: latest.conversation.archived_at ?? undefined,
@@ -1753,6 +1782,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             conversationId,
             latest.conversation.metadata_revision,
             target.changes,
+            { signal },
           );
         }
 
@@ -1776,6 +1806,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           : target.pinned ? 'Chat pinned and synced.' : 'Chat unpinned and synced.');
       }
     } catch (error) {
+      // A quiesce (delete-all, sign-out, offline pivot) aborts this worker on
+      // purpose: drop all bookkeeping silently. Restoring "confirmed" state
+      // or surfacing an error here would fight the very wipe that aborted us.
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        return;
+      }
       const confirmed = metadataConfirmedStateRef.current[conversationId];
       delete metadataDesiredStateRef.current[conversationId];
       delete metadataConfirmedStateRef.current[conversationId];
@@ -1970,6 +2006,16 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     cloudBootstrapAbortRef.current = null;
     cloudSyncAbortRef.current?.abort();
     cloudSyncAbortRef.current = null;
+    // The metadata worker's requests carry their own controller: an in-flight
+    // pin/archive write that landed after a server-side wipe used to
+    // resurrect metadata for deleted conversations (or 404 into spurious
+    // sync-failure noise). Drop its desired/confirmed state with it.
+    metadataAbortRef.current?.abort();
+    metadataAbortRef.current = null;
+    metadataDesiredStateRef.current = {};
+    metadataConfirmedStateRef.current = {};
+    metadataRequestGenerationRef.current = {};
+    metadataSyncInFlightRef.current = {};
     cloudSyncLoopRef.current = false;
     if (cloudSyncTimerRef.current !== null) {
       window.clearTimeout(cloudSyncTimerRef.current);
@@ -2503,10 +2549,18 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
    * Still spends no AI message — asking how much you have left should not
    * consume any of it.
    */
-  const handleUsageCommand = useCallback(async (conversationId: string) => {
-    inputRef.current = '';
-    setInput('');
-    setConversationDraft(conversationId, '');
+  const handleUsageCommand = useCallback(async (
+    conversationId: string,
+    options: { clearComposer?: boolean } = {},
+  ) => {
+    // Only the typed `/usage` command owns the composer. The menu entry runs
+    // while a draft may be sitting unsent in the input; wiping it here used to
+    // destroy that work with no way back.
+    if (options.clearComposer) {
+      inputRef.current = '';
+      setInput('');
+      setConversationDraft(conversationId, '');
+    }
     setErrorMessage('');
     setShowExamples(false);
 
@@ -2611,7 +2665,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
    */
   const runTurn = useCallback(async (params: TurnParams) => {
     const content = params.content.trim();
-    if (!content || activeTurnRef.current || isClearingRef.current) return;
+    if (!content || activeTurnRef.current || isClearingRef.current || usageInFlightRef.current) return;
     if (!isOnlineRef.current) {
       setErrorMessage('You are offline. Your draft is saved and can be sent after you reconnect.');
       return;
@@ -2653,7 +2707,15 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
 
     if (params.kind === 'send' && content.toLowerCase() === '/usage') {
-      await handleUsageCommand(conversationId);
+      // The usage turn never registers in activeTurnRef, so without this flag
+      // a normal message could be sent while the quota fetch was still in
+      // flight and the usage bubble would land after it, out of ask order.
+      usageInFlightRef.current = true;
+      try {
+        await handleUsageCommand(conversationId, { clearComposer: true });
+      } finally {
+        usageInFlightRef.current = false;
+      }
       return;
     }
 
@@ -3304,7 +3366,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
   const handleMenuUsage = useCallback(() => {
     setChatMenuAnchor(null);
-    void handleUsageCommand(currentConversationIdRef.current);
+    void handleUsageCommand(currentConversationIdRef.current, { clearComposer: false });
   }, [handleUsageCommand]);
 
   const handleMenuClear = useCallback(() => {
@@ -3621,11 +3683,14 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     persistScrollPositions();
     if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
       // Unmount (navigation/account switch) interrupted a turn; persist the
-      // resync marker directly since no further renders will run. A branch
-      // operation interrupted before output is restored to its original
-      // branch so the prior answer is not lost on disk.
+      // result directly since no further renders will run. This mirrors what
+      // the Stop button produces: partial output becomes an interrupted
+      // answer row instead of vanishing, and a branch operation interrupted
+      // before any output restores its original messages rather than leaving
+      // the prior answer truncated on disk.
       const conversation = conversationsRef.current[active.conversationId];
-      const restored = active.rollbackMessages && !active.partialText.trim()
+      const hasPartial = active.partialText.trim().length > 0;
+      const restored = !hasPartial && active.rollbackMessages
         ? {
           ...conversation,
           messages: active.rollbackMessages,
@@ -3633,7 +3698,23 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           needsServerResync: true,
           updatedAt: Date.now(),
         }
-        : { ...conversation, needsServerResync: true, updatedAt: Date.now() };
+        : hasPartial
+          ? {
+            ...conversation,
+            needsServerResync: true,
+            updatedAt: Date.now(),
+            messages: [...conversation.messages, {
+              id: messageId('_stopped'),
+              role: 'ai' as const,
+              rawContent: `${active.partialText.trimEnd()}\n\n_Generation stopped._`,
+              timestamp: Date.now(),
+              status: 'stopped' as const,
+              annotations: active.annotations,
+              turnId: active.turnId,
+              activities: active.activities,
+            }],
+          }
+          : { ...conversation, needsServerResync: true, updatedAt: Date.now() };
       saveStore(userId, {
         version: 4,
         conversations: {
