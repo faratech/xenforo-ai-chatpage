@@ -54,6 +54,12 @@ const ALLOWED_MARKDOWN_ATTRIBUTES = [
 ];
 
 const CITATION_LABEL_PATTERN = /(?:^|\b)(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+(?:com|org|net|io|gov|edu)(?:\b|$)/i;
+/**
+ * The label pattern scans from every start position on failure, so an
+ * adversarial link label (model-authored) costs ~O(n²). Real domains fit in
+ * a fraction of this; anything longer cannot be a citation label.
+ */
+const CITATION_LABEL_MAX_LENGTH = 256;
 const BARE_CITATION_PATTERN = /^\(((?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+(?:com|org|net|io|gov|edu)(?:\/[^\s<>()]*)?)\)/i;
 const AI_IMAGE_PATH_PATTERN = /^\/images\/ai\/(?:answers|walkthroughs|screenshots)\/.+\.(?:avif|gif|jpe?g|png|webp)$/i;
 // Approved image host: the windowsforum.com apex and any of its subdomains
@@ -286,7 +292,19 @@ const linkAttributes = (href: string, title?: string | null): string => {
 /**
  * Sanitizes and parses markdown content with citation extraction
  */
-export const sanitizeAndParse = (content: string): string => {
+/**
+ * Renders untrusted markdown/HTML to sanitized markup.
+ *
+ * `extractCitations` defaults to true because assistant answers own the
+ * citation feature. Pass false for user-authored text: a question that
+ * happens to contain `(example.com)` or a bare domain link must not grow
+ * superscript `[n]` markers pointing at a Sources panel only answers render.
+ */
+export const sanitizeAndParse = (
+  content: string,
+  options: { extractCitations?: boolean } = {},
+): string => {
+  const extractCitations = options.extractCitations ?? true;
   if (!content) return content;
   content = normalizeAssistantMarkup(content);
 
@@ -326,7 +344,13 @@ export const sanitizeAndParse = (content: string): string => {
         // source, so a link wrapping an image would otherwise match on the URL
         // inside it and collapse the image into a bogus citation.
         const isPlainTextLabel = tokens.length === 1 && tokens[0].type === 'text';
-        if (isPlainTextLabel && parseHttpUrl(href) && CITATION_LABEL_PATTERN.test(text)) {
+        if (
+          extractCitations
+          && isPlainTextLabel
+          && text.length <= CITATION_LABEL_MAX_LENGTH
+          && parseHttpUrl(href)
+          && CITATION_LABEL_PATTERN.test(text)
+        ) {
           return renderCitation(text, href);
         }
         return `<a ${linkAttributes(href, title)}>${label}</a>`;
@@ -345,7 +369,7 @@ export const sanitizeAndParse = (content: string): string => {
           return source.indexOf('(');
         },
         tokenizer(source) {
-          if (this.lexer.state.inLink) return undefined;
+          if (this.lexer.state.inLink || !extractCitations) return undefined;
           const match = BARE_CITATION_PATTERN.exec(source);
           if (!match) return undefined;
           return {

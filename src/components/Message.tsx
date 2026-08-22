@@ -266,11 +266,21 @@ const prepareAnswerContent = (
   if (authoredSources) {
     const authoredTail = topLevelElements.slice(topLevelElements.indexOf(authoredSources));
     const authoredBody = authoredTail.slice(1);
-    const isTrailingSourceList = authoredBody.every(element => (
-      /^(?:OL|P|UL)$/.test(element.tagName)
-      && (element.querySelector('a[href], sup') !== null
-        || /(?:https?:\/\/|\[\d+\])/.test(element.textContent ?? ''))
-    ));
+    const isTrailingSourceList = authoredBody.every((element) => {
+      if (!/^(?:OL|P|UL)$/.test(element.tagName)) return false;
+      // A list folds when its entries cite; a paragraph folds only when it
+      // carries no prose of its own — links, citation markers, and numbering
+      // aside, the text must be empty. Prose that merely mentions a URL
+      // ("See https://… for details") is answer content and stays in the body.
+      if (element.querySelector('a[href], sup') === null) return false;
+      if (element.tagName !== 'P') return true;
+      const clone = element.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll('a[href], sup').forEach(node => node.remove());
+      const residue = (clone.textContent ?? '')
+        .replace(/\[\d+\]/g, '')
+        .replace(/[\s·•|,.;:()[\]-]+/g, '');
+      return residue.length === 0;
+    });
     if (isTrailingSourceList) {
       authoredTail.forEach(element => appendSafeLinkCitations(element, citations));
     }
@@ -476,12 +486,17 @@ export const Message = memo<MessageComponentProps>(({ msg,
   const sourceHighlightResetRef = useRef<number | null>(null);
 
   const renderedAnswer = useMemo(
-    () => (isStreaming
-      ? { html: '', citations: [] }
-      : prepareAnswerContent(
-        enhanceRichContent(sanitizeAndParse(msg.rawContent), !isUser),
+    () => {
+      if (isStreaming) return { html: '', citations: [] };
+      // Citation extraction is an assistant-output feature (see
+      // sanitizeAndParse): user text keeps plain links, no [n] markers, and no
+      // Sources footer to fold.
+      const sanitized = sanitizeAndParse(msg.rawContent, { extractCitations: !isUser });
+      return prepareAnswerContent(
+        enhanceRichContent(sanitized, !isUser),
         msg.annotations,
-      )),
+      );
+    },
     [msg.rawContent, msg.annotations, isStreaming, isUser]
   );
   const renderedContent = renderedAnswer.html;

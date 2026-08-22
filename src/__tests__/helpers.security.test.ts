@@ -492,3 +492,28 @@ describe('normalizeAssistantMarkup PUA-token hold-back', () => {
     expect(finished).toContain('windowsforum.com');
   });
 });
+
+describe('citation extraction scope and cost', () => {
+  it('leaves user text alone when citation extraction is disabled', () => {
+    const rendered = sanitizeAndParse('why is (example.com) down', { extractCitations: false });
+    expect(rendered).not.toContain('<sup>');
+    expect(rendered).not.toContain('Sources:');
+    expect(rendered).toContain('example.com');
+  });
+
+  it('still extracts citations by default', () => {
+    const rendered = sanitizeAndParse('see [example.com](https://example.com/page)');
+    expect(rendered).toContain('<sup>');
+    expect(rendered).toContain('Sources:');
+  });
+
+  it('bounds adversarial link labels to a cheap length check before the regex runs', () => {
+    const hostile = `[${'a.'.repeat(10_000)}a](https://attacker.example/x)`;
+    const startedAt = performance.now();
+    sanitizeAndParse(hostile);
+    const elapsedMs = performance.now() - startedAt;
+    // The label pattern is ~O(n^2) from every start position; without the
+    // length cap this input measured ~100ms at half this size.
+    expect(elapsedMs).toBeLessThan(25);
+  });
+});

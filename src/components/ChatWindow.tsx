@@ -152,6 +152,8 @@ const TAIL_FOLLOW_SLACK_PX = 80;
  * turns stay clean; a long one has to look measured rather than hung.
  */
 const ELAPSED_HINT_AFTER_MS = 8_000;
+/** Trailing debounce for draft-only persistence; see flushPersistTimer. */
+const PERSIST_DEBOUNCE_MS = 300;
 /** How often the elapsed hint re-renders while a turn is in flight. */
 const ELAPSED_TICK_MS = 1_000;
 const CLOUD_SYNC_DEBOUNCE_MS = 1_200;
@@ -891,6 +893,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const programmaticScrollRef = useRef(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
   const scrollPersistTimerRef = useRef<number | null>(null);
+  /** Fire-and-forget timers (focus restore, permalink highlight) cleared on unmount. */
+  const cosmeticTimersRef = useRef<Set<number>>(new Set());
   const scrollPositionsRef = useRef(loadScrollPositions(userId));
   const pendingMessageTargetRef = useRef(safeMessageQuery());
   const spacerFrameRef = useRef<number | null>(null);
@@ -1067,11 +1071,55 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
   }, [userId]);
 
+  /**
+   * Draft keystrokes rebuild the conversations map on every character; a full
+   * saveStore per keystroke (parse the whole envelope, merge, serialize,
+   * write — all on the main thread the streaming renderer shares) made typing
+   * the most expensive thing in the app. Draft-only edits persist through a
+   * short trailing debounce with explicit flushes at the moments correctness
+   * depends on (hide/page hide/unmount); every other change persists
+   * synchronously exactly as before.
+   */
+  const draftEditPendingRef = useRef(false);
+  const persistTimerRef = useRef<number | null>(null);
+
+  const flushPersistTimer = useCallback(() => {
+    if (persistTimerRef.current === null) return;
+    window.clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = null;
+    persistStore();
+  }, [persistStore]);
+
   useEffect(() => {
     conversationsRef.current = conversations;
-    persistStore();
+    if (draftEditPendingRef.current) {
+      draftEditPendingRef.current = false;
+      if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = window.setTimeout(() => {
+        persistTimerRef.current = null;
+        persistStore();
+      }, PERSIST_DEBOUNCE_MS);
+    } else {
+      persistStore();
+    }
   }, [conversations, persistStore]);
   useEffect(() => { persistStore(); }, [currentConversationId, persistStore]);
+
+  useEffect(() => {
+    const flushOnHide = () => {
+      if (document.visibilityState === 'hidden') flushPersistTimer();
+    };
+    document.addEventListener('visibilitychange', flushOnHide);
+    window.addEventListener('pagehide', flushPersistTimer);
+    return () => {
+      document.removeEventListener('visibilitychange', flushOnHide);
+      window.removeEventListener('pagehide', flushPersistTimer);
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [flushPersistTimer]);
 
   useEffect(() => {
     const saveBeforeUpdate = (event: Event) => {
@@ -1160,6 +1208,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     setConversations(previous => {
       const conversation = previous[conversationId];
       if (!conversation || conversation.draft === value) return previous;
+      // Marks the [conversations] effect to debounce this write; a no-op edit
+      // leaves the flag alone so unrelated persists stay synchronous.
+      draftEditPendingRef.current = true;
       const next = {
         ...previous,
         [conversationId]: {
@@ -3480,7 +3531,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     skipNextAutoFollowRef.current = true;
     armProgrammaticScrollGuard(element);
     element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
-    window.setTimeout(() => element.focus({ preventScroll: true }), SMOOTH_SCROLL_SETTLE_MS);
+    const focusTimer = window.setTimeout(() => {
+      cosmeticTimersRef.current.delete(focusTimer);
+      element.focus({ preventScroll: true });
+    }, SMOOTH_SCROLL_SETTLE_MS);
+    cosmeticTimersRef.current.add(focusTimer);
   }, [armProgrammaticScrollGuard, reduceMotion]);
 
   /**
@@ -3566,7 +3621,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         pane.scrollTop = Math.max(0, top);
         target.classList.add('wf-message-permalink-target');
         target.focus({ preventScroll: true });
-        window.setTimeout(() => target.classList.remove('wf-message-permalink-target'), 2200);
+        const highlightTimer = window.setTimeout(() => {
+          cosmeticTimersRef.current.delete(highlightTimer);
+          target.classList.remove('wf-message-permalink-target');
+        }, 2200);
+        cosmeticTimersRef.current.add(highlightTimer);
         skipNextAutoFollowRef.current = true;
         setAutoFollow(false);
         return;
@@ -3593,7 +3652,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         pane.scrollTop = Math.max(0, top);
         target.classList.add('wf-message-permalink-target');
         target.focus({ preventScroll: true });
-        window.setTimeout(() => target.classList.remove('wf-message-permalink-target'), 2200);
+        const pendingHighlightTimer = window.setTimeout(() => {
+          cosmeticTimersRef.current.delete(pendingHighlightTimer);
+          target.classList.remove('wf-message-permalink-target');
+        }, 2200);
+        cosmeticTimersRef.current.add(pendingHighlightTimer);
         skipNextAutoFollowRef.current = true;
         setAutoFollow(false);
         return;
@@ -3680,6 +3743,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     if (programmaticScrollTimerRef.current !== null) {
       window.clearTimeout(programmaticScrollTimerRef.current);
     }
+    for (const timerId of cosmeticTimersRef.current) window.clearTimeout(timerId);
+    cosmeticTimersRef.current.clear();
     persistScrollPositions();
     if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
       // Unmount (navigation/account switch) interrupted a turn; persist the
