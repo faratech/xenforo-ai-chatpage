@@ -18,8 +18,8 @@
 #     apply the selected release's bundle on BOTH nodes. WF5/style 51 is synced
 #     only for its two owned chat templates; it is never imported style-wide.
 #   - Any failure after activation begins restores the previous assets AND the
-#     snapshotted templates, re-runs designer import, re-purges Cloudflare and
-#     re-verifies the restored state before exiting nonzero.
+#     snapshotted templates, re-runs the style-wide database sync, re-purges
+#     Cloudflare and re-verifies the restored state before exiting nonzero.
 #   - The transaction boundary is frontend release assets plus XenForo chat
 #     templates. Live backend PHP, additive database schema, systemd units,
 #     and already-installed browser service-worker state are not rolled back.
@@ -129,6 +129,10 @@ readonly -a ROLLBACK_COMPAT_ARTIFACTS=(
 )
 
 readonly -a XF_STYLES=(wf3 wf3_domperf)
+# Designer dir ids double as the src/styles/<id> directory names; the style ids
+# are the xf_style rows they sync into. Styles no longer need designer mode.
+readonly WF3_STYLE_ID="${WF3_STYLE_ID:-40}"
+readonly WF3_DOMPERF_STYLE_ID="${WF3_DOMPERF_STYLE_ID:-47}"
 readonly -a XF_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
 readonly WF5_STYLE="wf5"
 readonly WF5_STYLE_ID="${WF5_STYLE_ID:-51}"
@@ -1300,9 +1304,11 @@ REMOTE
   log "Verified imported and compiled XenForo chat templates on both nodes."
 }
 
-# Style 17 predates designer mode and keeps its templates only in XenForo's
-# database. Mirror the canonical wf3 chat templates into that style on both
-# nodes so a cached guest page and a member-selected style cannot bootstrap
+# Style 17 keeps its templates in XenForo's database. (It was briefly
+# designer-managed for the 2026-08-21 parity session; designer mode is retired
+# across all styles, and the syncer runs in 'auto' mode so this works either
+# way.) Mirror the canonical wf3 chat templates into that style on both nodes
+# so a cached guest page and a member-selected style cannot bootstrap
 # different stable entry URLs. The helper also recompiles unchanged rows on
 # each node because compiled template storage is node-local.
 sync_database_chat_style() {
@@ -1310,7 +1316,7 @@ sync_database_chat_style() {
   local source_root="$XENFORO_STYLES_ROOT/wf3/templates/public"
   local remote_syncer="$XENFORO_ROOT/internal_data/.wf-chat-db-style-sync.$$.php"
 
-  php "$syncer" "$XENFORO_ROOT" "$source_root" "$LEGACY_CHAT_STYLE_ID" \
+  php "$syncer" "$XENFORO_ROOT" "$source_root" "$LEGACY_CHAT_STYLE_ID" full auto \
     || { fail "Local database-managed chat style sync failed"; return 1; }
 
   if ! peer_enabled; then
@@ -1329,21 +1335,22 @@ sync_database_chat_style() {
 set -Eeuo pipefail
 syncer="$1"; xenforo_root="$2"; source_root="$3"; style_id="$4"
 trap 'rm -f -- "$syncer"' EXIT
-php "$syncer" "$xenforo_root" "$source_root" "$style_id"
+php "$syncer" "$xenforo_root" "$source_root" "$style_id" full auto
 REMOTE
 
   log "Synchronized database-managed chat style $LEGACY_CHAT_STYLE_ID on both nodes."
 }
 
-# Style 51 is designer-managed, but this deploy owns only its page/widget chat
-# bootstraps. Sync those two rows directly and recompile them on each node; do
-# not run a style-wide WF5 designer import that could sweep unrelated drift.
+# Style 51: this deploy owns only its page/widget chat bootstraps. Sync those
+# two rows directly and recompile them on each node; do not run a style-wide
+# WF5 sync that could sweep unrelated drift. The syncer runs in 'auto' mode:
+# WF5 is no longer designer-managed either.
 sync_wf5_chat_style() {
   local syncer="$APP_ROOT/scripts/sync-xenforo-db-style.php"
   local source_root="$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public"
   local remote_syncer="$XENFORO_ROOT/internal_data/.wf-chat-wf5-sync.$$.php"
 
-  php "$syncer" "$XENFORO_ROOT" "$source_root" "$WF5_STYLE_ID" bootstrap "$WF5_STYLE" \
+  php "$syncer" "$XENFORO_ROOT" "$source_root" "$WF5_STYLE_ID" bootstrap auto \
     || { fail "Local scoped WF5 chat template sync failed"; return 1; }
 
   if ! peer_enabled; then
@@ -1356,21 +1363,22 @@ sync_wf5_chat_style() {
     || { fail "Cannot stage the scoped WF5 sync helper on the peer"; return 1; }
 
   peer_ssh bash -s -- \
-    "$remote_syncer" "$XENFORO_ROOT" "$source_root" "$WF5_STYLE_ID" "$WF5_STYLE" <<'REMOTE' \
+    "$remote_syncer" "$XENFORO_ROOT" "$source_root" "$WF5_STYLE_ID" <<'REMOTE' \
     || { peer_ssh rm -f -- "$remote_syncer" >/dev/null 2>&1 || true; fail "Peer scoped WF5 chat template sync failed"; return 1; }
 # wf-peer-sync-wf5-chat-style
 set -Eeuo pipefail
-syncer="$1"; xenforo_root="$2"; source_root="$3"; style_id="$4"; designer="$5"
+syncer="$1"; xenforo_root="$2"; source_root="$3"; style_id="$4"
 trap 'rm -f -- "$syncer"' EXIT
-php "$syncer" "$xenforo_root" "$source_root" "$style_id" bootstrap "$designer"
+php "$syncer" "$xenforo_root" "$source_root" "$style_id" bootstrap auto
 REMOTE
 
   log "Synchronized two scoped WF5/style $WF5_STYLE_ID chat templates on both nodes."
 }
 
 # apply_template_bundle <bundle_root> — copy payloads into the styles roots on
-# both nodes and run the designer import on both nodes. Written with explicit
-# error chaining so it also works in errexit-suppressed (restore) contexts.
+# both nodes and run the style-wide database sync on both nodes. Written with
+# explicit error chaining so it also works in errexit-suppressed (restore)
+# contexts.
 apply_template_bundle() {
   local bundle_root="$1" verify_chat_contract="${2:-1}" style template source dest
   local wf5_available=1
@@ -1416,13 +1424,20 @@ apply_template_bundle() {
       || { fail "Cannot push $style template payloads to $PEER_HOST"; return 1; }
   done
 
-  (
-    cd "$XENFORO_ROOT" || exit 1
-    php cmd.php xf-designer:import-templates wf3 || exit 1
-    php cmd.php xf-designer:import-templates wf3_domperf || exit 1
-    php cmd.php xf-designer:rebuild-metadata wf3 || exit 1
-    php cmd.php xf-designer:rebuild-metadata wf3_domperf || exit 1
-  ) || { fail "Local XenForo template import/metadata rebuild failed"; return 1; }
+  # Style-wide disk-to-DB template sync. Replaces the retired
+  # xf-designer:import-templates/rebuild-metadata pair, which required the
+  # target styles to be designer-managed; styles are no longer designer-managed.
+  local wide_syncer="$APP_ROOT/scripts/sync-xenforo-style-wide.php"
+  local style_id
+  for style in "${XF_STYLES[@]}"; do
+    case "$style" in
+      wf3) style_id="$WF3_STYLE_ID" ;;
+      wf3_domperf) style_id="$WF3_DOMPERF_STYLE_ID" ;;
+      *) fail "No xf_style id mapping for designer dir $style"; return 1 ;;
+    esac
+    php "$wide_syncer" "$XENFORO_ROOT" "$style" "$style_id" \
+      || { fail "Style-wide template sync failed for $style"; return 1; }
+  done
 
   if peer_enabled; then
     for style in "${XF_STYLES[@]}"; do
@@ -1431,15 +1446,15 @@ apply_template_bundle() {
         || { fail "Cannot push $style template metadata to $PEER_HOST"; return 1; }
     done
 
-    peer_ssh bash -s -- "$XENFORO_ROOT" <<'REMOTE' || { fail "Peer xf-designer:import-templates failed"; return 1; }
-# wf-peer-import-templates
+    peer_ssh bash -s -- "$XENFORO_ROOT" "$wide_syncer" "$WF3_STYLE_ID" "$WF3_DOMPERF_STYLE_ID" <<'REMOTE' || { fail "Peer style-wide template sync failed"; return 1; }
+# wf-peer-sync-styles
 set -Eeuo pipefail
 cd "$1"
-php cmd.php xf-designer:import-templates wf3
-php cmd.php xf-designer:import-templates wf3_domperf
+php "$2" "$1" wf3 "$3"
+php "$2" "$1" wf3_domperf "$4"
 REMOTE
   else
-    skip_peer "the peer template push and designer import"
+    skip_peer "the peer template push and style-wide sync"
   fi
 
   sync_database_chat_style || return 1
@@ -1449,9 +1464,9 @@ REMOTE
   verify_compiled_template_runtime "$verify_chat_contract" || return 1
 
   if peer_enabled; then
-    log "Applied the XenForo chat template bundle and imported designer templates on both nodes."
+    log "Applied the XenForo chat template bundle and synced styles into the database on both nodes."
   else
-    log "Applied the XenForo chat template bundle and imported designer templates."
+    log "Applied the XenForo chat template bundle and synced styles into the database."
   fi
 }
 

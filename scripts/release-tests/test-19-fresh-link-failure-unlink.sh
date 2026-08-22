@@ -6,7 +6,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 setup_sandbox
 
-add_rule php 1 skip:1 'import-templates'
+add_rule php 1 skip:1 'sync-xenforo-style-wide.php'
 
 rc=0
 run_deploy || rc=$?

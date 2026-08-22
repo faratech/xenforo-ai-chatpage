@@ -214,7 +214,7 @@ write_style_metadata() {
 
 # mutate_styles <version-tag> — change the chat templates on both nodes (as the
 # lsyncd-mirrored production trees would be) without touching metadata, i.e. a
-# pending, designer-import-allowed chat template edit.
+# pending chat template edit that only a style-wide sync may publish.
 mutate_styles() {
   local tag="$1" root style template
   for root in "$XENFORO_STYLES_ROOT" "$PEER_STYLES_ROOT"; do
@@ -655,10 +655,10 @@ if [[ "${1:-}" == *sync-xenforo-db-style.php \
   expected_designer="${6:-}"
   [[ -n "$xenforo_root" && -d "$source_root" ]] || exit 2
   if [[ "$style_id" == 17 ]]; then
-    [[ "$profile" == full && -z "$expected_designer" ]] || exit 2
+    [[ "$profile" == full && "$expected_designer" == auto ]] || exit 2
     templates=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
   elif [[ "$style_id" == 51 ]]; then
-    [[ "$profile" == bootstrap && "$expected_designer" == wf5 ]] || exit 2
+    [[ "$profile" == bootstrap && "$expected_designer" == auto ]] || exit 2
     templates=(_page_node.313 _widget_ai_chat.html)
   else
     exit 2
@@ -688,15 +688,21 @@ if [[ "${1:-}" == *sync-xenforo-db-style.php \
   exit 0
 fi
 
-if [[ "$*" == *"xf-designer:import-templates"* ]]; then
-  designer="${@: -1}"
+if [[ "${1:-}" == *sync-xenforo-style-wide.php ]]; then
+  # Args: <script> <xenforo_root> <designer-dir> <style-id>. Emulates the
+  # retired xf-designer:import-templates + rebuild-metadata pair: rewrite the
+  # style tree's _metadata.json and refresh compiled caches for the target
+  # style plus (for wf3, as inheritance children) 46/50.
+  xenforo_root="${2:-}"
+  designer="${3:-}"
   case "$designer" in
     wf3) style_ids=(40 46 50) ;;
     wf3_domperf) style_ids=(47) ;;
-    *) echo "php stub: unexpected designer mode $designer" >&2; exit 1 ;;
+    *) echo "php stub: unexpected designer dir $designer" >&2; exit 1 ;;
   esac
+  [[ -n "$xenforo_root" && -d "$xenforo_root/src/styles/$designer/templates" ]] || exit 2
 
-  templates_root="$PWD/src/styles/$designer/templates"
+  templates_root="$xenforo_root/src/styles/$designer/templates"
   node - "$templates_root" <<'NODE'
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
@@ -724,7 +730,7 @@ NODE
     compiled_name="${template%.html}"
     for language_id in 0 1; do
       for style_id in "${style_ids[@]}"; do
-        compiled_dir="$PWD/internal_data/code_cache/templates/l$language_id/s$style_id/public"
+        compiled_dir="$xenforo_root/internal_data/code_cache/templates/l$language_id/s$style_id/public"
         mkdir -p "$compiled_dir"
         {
           printf '<?php\n// FROM HASH: %s\n' "$hash"

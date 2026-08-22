@@ -11,9 +11,9 @@ r1="$(current_release)"
 
 mutate_dist "build-2"
 mutate_styles "v2"
-add_rule php 1 skip:1 'import-templates'
+add_rule php 1 skip:1 'sync-xenforo-style-wide.php'
 
-imports_before="$(stub_calls php 'import-templates')"
+wide_syncs_before="$(stub_calls php 'sync-xenforo-style-wide.php')"
 rc=0
 run_deploy || rc=$?
 [[ "$rc" -ne 0 ]] || fail_test "deploy should have failed at template import"
@@ -32,8 +32,8 @@ grep -q 'v2' "$XENFORO_STYLES_ROOT/wf3/templates/public/react_chat_container.htm
   || fail_test "failure recovery destroyed the pending local designer source"
 grep -q 'v2' "$PEER_STYLES_ROOT/wf3/templates/public/react_chat_container.html" \
   || fail_test "failure recovery destroyed the pending peer designer source"
-imports_after="$(stub_calls php 'import-templates')"
-[[ "$imports_after" -gt $((imports_before + 1)) ]] || fail_test "designer import did not re-run during rollback"
+wide_syncs_after="$(stub_calls php 'sync-xenforo-style-wide.php')"
+[[ "$wide_syncs_after" -gt $((wide_syncs_before + 1)) ]] || fail_test "style-wide sync did not re-run during rollback"
 
 assert_state remote-switched rolled-back
 assert_contains "$RT_LAST_OUTPUT" "Re-verified the restored release" "restore re-verification"

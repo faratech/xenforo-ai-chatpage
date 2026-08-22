@@ -50,15 +50,14 @@ assert_eq "$(json_object_value "$metadata1" backend_hashes prune-chat-product-da
   "$(sha256sum "$SB/app/scripts/prune-chat-product-data.php" | awk '{print $1}')" \
   "metadata chat product pruner hash"
 
-# Designer import ran on both nodes (2 styles x 2 nodes)
-assert_eq "$(stub_calls php 'remote=0 .*import-templates')" 2 "local designer imports"
-assert_eq "$(stub_calls php 'remote=1 .*import-templates')" 2 "peer designer imports"
-assert_eq "$(stub_calls php 'remote=0 .*rebuild-metadata')" 2 "local metadata rebuilds"
-assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-db-style.php .* 17$')" 1 "local database style syncs"
+# Style-wide database sync ran on both nodes (2 styles x 2 nodes)
+assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-style-wide.php')" 2 "local style-wide syncs"
+assert_eq "$(stub_calls php 'remote=1 .*sync-xenforo-style-wide.php')" 2 "peer style-wide syncs"
+assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-db-style.php .* 17 full auto')" 1 "local database style syncs"
 assert_eq "$(stub_calls php 'remote=1 .*wf-chat-db-style-sync')" 1 "peer database style syncs"
-assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-db-style.php .* 51 bootstrap wf5')" 1 "local scoped WF5 syncs"
+assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-db-style.php .* 51 bootstrap auto')" 1 "local scoped WF5 syncs"
 assert_eq "$(stub_calls php 'remote=1 .*wf-chat-wf5-sync')" 1 "peer scoped WF5 syncs"
-assert_eq "$(stub_calls php 'import-templates wf5')" 0 "broad WF5 designer imports"
+assert_eq "$(stub_calls php 'xf-designer')" 0 "designer commands are retired"
 assert_eq "$(stub_calls php ' -l ')" 6 "backend PHP lint calls"
 assert_eq "$(stub_calls php 'test_chat_predicates.php')" 1 "backend predicate test calls"
 assert_eq "$(stub_calls php 'test_chat_product_contract.php')" 1 "backend product contract test calls"

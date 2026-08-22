@@ -99,5 +99,5 @@ if (betaTemplatesPresent) {
 }
 
 console.log(
-  `Verified ${verifiedConsumers} XenForo chat consumers; ${changedFiles.length} scoped template changes await normal designer import.`,
+  `Verified ${verifiedConsumers} XenForo chat consumers; ${changedFiles.length} scoped template changes await the next style-wide sync.`,
 );

@@ -13,7 +13,7 @@ mutate_dist "build-2"
 add_rule ssh 1+ skip:255 'wf-peer-switch'
 add_rule ssh 1+ skip:255 'wf-peer-probe'
 add_rule ssh 1+ skip:255 'wf-peer-restore'
-add_rule ssh 1+ skip:255 'wf-peer-import-templates'
+add_rule ssh 1+ skip:255 'wf-peer-sync-styles'
 
 rc=0
 run_deploy || rc=$?

@@ -12,7 +12,10 @@ declare(strict_types=1);
  * make that narrow operation explicit and fail closed.
  *
  * Usage:
- *   php sync-xenforo-db-style.php <xenforo-root> <template-source-dir> <style-id> [full|bootstrap] [expected-designer-mode]
+ *   php sync-xenforo-db-style.php <xenforo-root> <template-source-dir> <style-id> [full|bootstrap] [expected-designer-mode|auto]
+ *
+ *   Pass 'auto' as expected-designer-mode to accept the style's current
+ *   designer state either way (styles are migrating out of designer mode).
  */
 
 if (PHP_SAPI !== 'cli')
@@ -83,7 +86,17 @@ if (!$style)
 	fwrite(STDERR, "XenForo style {$styleId} does not exist\n");
 	exit(1);
 }
-if ($expectedDesignerMode !== '')
+if ($expectedDesignerMode === 'auto')
+{
+	// Designer-state agnostic: styles are migrating out of designer mode, and
+	// the scoped chat-template write is correct whether the flag is set or
+	// NULL. Only a mismatched binding would be suspicious.
+	if ($style->designer_mode !== null)
+	{
+		fwrite(STDOUT, "Style {$styleId} is designer-managed as '{$style->designer_mode}'; syncing anyway (auto mode).\n");
+	}
+}
+elseif ($expectedDesignerMode !== '')
 {
 	if ($style->designer_mode !== $expectedDesignerMode)
 	{

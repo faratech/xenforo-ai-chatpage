@@ -16,7 +16,7 @@ assert_link_target "$PUBLIC_LINK" "$local_release"
 assert_absent "$PEER_PUBLIC_LINK"
 assert_eq "$(stub_calls ssh 'remote=1')" 0 "peer ssh calls"
 assert_eq "$(stub_calls rsync 'remote=1')" 0 "peer rsync calls"
-assert_eq "$(stub_calls php 'remote=0 .*import-templates')" 2 "local designer imports"
+assert_eq "$(stub_calls php 'remote=0 .*sync-xenforo-style-wide.php')" 2 "local style-wide syncs"
 assert_eq "$(stub_calls curl 'purge_cache')" 1 "purge calls"
 assert_no_next_litter
 echo "OK"
