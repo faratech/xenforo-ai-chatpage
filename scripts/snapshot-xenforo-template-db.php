@@ -11,7 +11,11 @@ declare(strict_types=1);
  * deploy.sh.
  *
  * Usage:
- *   php snapshot-xenforo-template-db.php <xenforo-root> <output-root>
+ *   php snapshot-xenforo-template-db.php <xenforo-root> <output-root> <wf3-style-id> <wf3-domperf-style-id> <wf5-style-id>
+ *
+ * Styles are addressed by explicit id: designer mode was retired on
+ * 2026-08-22, so the old "resolve the designer-mode flag to a style" lookup
+ * has nothing left to resolve.
  */
 
 if (PHP_SAPI !== 'cli')
@@ -22,9 +26,14 @@ if (PHP_SAPI !== 'cli')
 
 $xenForoRoot = $argv[1] ?? '';
 $outputRoot = $argv[2] ?? '';
-if ($xenForoRoot === '' || $outputRoot === '')
+$styleIds = [
+	'wf3' => isset($argv[3]) ? (int)$argv[3] : 0,
+	'wf3_domperf' => isset($argv[4]) ? (int)$argv[4] : 0,
+	'wf5' => isset($argv[5]) ? (int)$argv[5] : 0,
+];
+if ($xenForoRoot === '' || $outputRoot === '' || in_array(0, $styleIds, true))
 {
-	fwrite(STDERR, "Usage: php snapshot-xenforo-template-db.php <xenforo-root> <output-root>\n");
+	fwrite(STDERR, "Usage: php snapshot-xenforo-template-db.php <xenforo-root> <output-root> <wf3-style-id> <wf3-domperf-style-id> <wf5-style-id>\n");
 	exit(2);
 }
 
@@ -60,17 +69,17 @@ $written = 0;
 
 foreach ($designers AS $designer => $templates)
 {
-	$styleRows = $db->fetchAll(
-		'SELECT style_id FROM xf_style WHERE designer_mode = ?',
-		$designer
+	$styleId = $styleIds[$designer];
+	$exists = $db->fetchOne(
+		'SELECT COUNT(*) FROM xf_style WHERE style_id = ?',
+		$styleId
 	);
-	if (count($styleRows) !== 1)
+	if (!$exists)
 	{
-		fwrite(STDERR, "Expected exactly one style for designer mode {$designer}\n");
+		fwrite(STDERR, "XenForo style {$styleId} for {$designer} does not exist\n");
 		exit(1);
 	}
 
-	$styleId = (int) $styleRows[0]['style_id'];
 	$designerOutput = rtrim($outputRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $designer;
 	if (!is_dir($designerOutput) && !mkdir($designerOutput, 0755, true) && !is_dir($designerOutput))
 	{

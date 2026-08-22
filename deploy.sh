@@ -1211,6 +1211,7 @@ snapshot_active_templates() {
 
   php "$APP_ROOT/scripts/snapshot-xenforo-template-db.php" \
     "$XENFORO_ROOT" "$TEMPLATE_SNAPSHOT_DIR" \
+    "$WF3_STYLE_ID" "$WF3_DOMPERF_STYLE_ID" "$WF5_STYLE_ID" \
     || return 1
 
   for style in "${XF_STYLES[@]}"; do
