@@ -71,8 +71,8 @@ ENV.MAX_CONVERSATIONS   // Conversation limit
 ```
 
 #### 3. State Management
-- **Conversations**: Stored in localStorage, managed in ChatWindow
-- **Current Conversation**: Wrapped in useMemo for performance
+- **Conversations**: Stored in localStorage, managed in ChatWindow. Live key is the per-user v4 envelope `chat_store:v4:<principal>` (see `storageKeys()` in `src/services/storage.ts`); `chat_conversations` is a legacy unscoped key that every load deletes.
+- **Current Conversation**: bare map lookup (`conversations[currentConversationId] || defaultConversation`); only `defaultConversation` is memoized
 - **Streaming Messages**: Separate state during active streaming
 - No global state library; component state + props
 
@@ -95,6 +95,7 @@ Message types handled:
 - `response.output_text.done` - Stream completion
 - `response.output_text.annotation.added` - File citations
 - `response.content_part.done` - Annotation metadata
+- `chat.stream.completed` - **The application terminal event** (chat.php synthesizes it; upstream `response.completed` is deliberately NOT terminal because the proxy may continue a tool chain). A bare `data: [DONE]` is also accepted as terminal defensively, though chat.php never sends one.
 
 #### CAPTCHA Flow (Cloudflare Turnstile)
 1. First message from guest triggers `captcha_required` error
@@ -116,16 +117,16 @@ Theme syncs with XenForo's light/dark mode:
 - Theme created in `src/index.tsx` before app render
 
 ### Conversation Management
-- **Storage**: localStorage with key `chat_conversations`
+- **Storage**: per-user v4 envelope `chat_store:v4:<principal>` (conversations + tombstones + pending server deletions); legacy v2/v3 keys are migrated once and removed only after the v4 write succeeds
 - **ID Format**: `conv_{timestamp}_{random}` (see `generateConversationId()`)
 - **Title Generation**: First 50 chars of first user message
-- **Limit**: Configurable via `ENV.MAX_CONVERSATIONS` (default 50)
-- **Current Conversation ID**: Tracked separately in localStorage
+- **Limit**: Configurable via `ENV.MAX_CONVERSATIONS` (default 50). Cap trims tombstone locally but never queue server-side deletions; server deletion is an explicit user action
+- **Current Conversation ID**: Tracked separately in localStorage (`current_conversation_id:v4:<principal>`)
 
 ### Message Processing Pipeline
-1. User input → sanitized via `sanitizeAndParse()`
+1. User input → sanitized via `sanitizeAndParse()` (citation extraction is assistant-only: `{ extractCitations: false }` for user messages)
 2. Markdown parsing with `marked` library
-3. Citation extraction (URL patterns converted to superscript refs)
+3. Citation extraction (URL patterns converted to superscript refs; answers only)
 4. HTML sanitization via `DOMPurify`
 5. Render with `dangerouslySetInnerHTML`
 
@@ -282,4 +283,8 @@ The Vite output contract supports XenForo integration without leaving dependency
 - Copies `public/.htaccess`, which serves stable entries with `no-cache, must-revalidate` and hashed assets with a one-year immutable policy
 - Validates every local reference in generated `dist/index.html`
 
-This is intentional for XenForo integration and should not be "fixed".
+This is intentional for XenForo integration and should not be "fixed". The
+`?v=2` pin (`RELEASE_ASSET_VERSION` in `vite.config.ts`) is a deliberate cache
+contract, not an oversight: correctness across deploys rests on the stable
+entries' `no-cache` headers plus the immediate Cloudflare purge, and the pin is
+never bumped as a routine release step.
