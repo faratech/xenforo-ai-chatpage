@@ -40,6 +40,11 @@ export class PWAUpdatePrompt {
     if (!installing || installing === this.observedInstalling) return;
     this.observedInstalling = installing;
     const handleState = () => {
+      // Terminal states end the watch; without removing the listener, every
+      // update cycle left one behind on a worker object that outlives it.
+      if (installing.state === 'installed' || installing.state === 'redundant') {
+        installing.removeEventListener('statechange', handleState);
+      }
       if (
         installing.state === 'installed'
         && 'serviceWorker' in navigator
@@ -48,6 +53,7 @@ export class PWAUpdatePrompt {
         this.refresh(registration);
       }
     };
+    if (installing.state === 'redundant') return;
     if (installing.state === 'installed') handleState();
     else installing.addEventListener('statechange', handleState);
   }
@@ -78,9 +84,19 @@ export class PWAUpdatePrompt {
 
   activate(): boolean {
     const worker = this.waiting;
-    if (!worker) return false;
-    this.waiting = null;
-    this.listeners.forEach(listener => listener(false));
+    if (!worker || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      return false;
+    }
+    // Keep `waiting` set until the worker actually takes control. Clearing it
+    // up front meant a dropped SKIP_WAITING message (worker idling out before
+    // handling it) left the UI reporting an update applied that never was,
+    // with the prompt unrecoverable.
+    const onControllerChange = () => {
+      this.waiting = null;
+      this.listeners.forEach(listener => listener(this.available));
+      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
     worker.postMessage({ type: 'SKIP_WAITING' });
     return true;
   }

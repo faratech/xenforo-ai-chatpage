@@ -170,6 +170,10 @@ describe('AudioService queue lifecycle', () => {
     class MockAudio extends EventTarget {
       pause = vi.fn();
       removeAttribute = vi.fn();
+      // Real elements reset their media element (aborting any in-flight
+      // fetch) when load() runs after src removal; AudioService.stop()
+      // relies on that contract.
+      load = vi.fn();
       constructor(_url: string) {
         super();
         const record = {

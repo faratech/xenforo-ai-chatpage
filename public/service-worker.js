@@ -1,5 +1,5 @@
 /* WindowsForum AI public-shell worker. Keep private pages and APIs network-only. */
-/* global self, caches, fetch, URL, Response */
+/* global self, caches, fetch, URL, Response, console */
 'use strict';
 
 const CACHE_NAME = 'wf-ai-public-shell-v1';
@@ -14,14 +14,27 @@ const PRECACHE_URLS = [
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(async cache => {
-    await cache.addAll(PRECACHE_URLS);
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    // Cache precache entries individually: one missing icon must not abort
+    // installation - an uninstalled worker can never serve the offline
+    // fallback, which is the only precache entry the fetch handler depends on.
+    await Promise.all(PRECACHE_URLS.map(async url => {
+      try {
+        await cache.add(url);
+      } catch (error) {
+        if (url === OFFLINE_URL) throw error;
+        console.warn('[sw] skipped precache entry', url, error);
+      }
+    }));
     await trimCache(cache);
-  }));
+  })());
 });
 
 self.addEventListener('message', event => {
-  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+  // waitUntil keeps the worker alive until the promise settles; a bare,
+  // unawaited skipWaiting() could be dropped if the worker idled out first.
+  if (event.data && event.data.type === 'SKIP_WAITING') event.waitUntil(self.skipWaiting());
 });
 
 const trimCache = async cache => {

@@ -284,6 +284,7 @@ describe('private conversation exports', () => {
   });
 
   it('downloads locally when Web Share is unavailable', async () => {
+    vi.useFakeTimers();
     const createObjectURL = vi.fn().mockReturnValue('blob:private-export');
     const revokeObjectURL = vi.fn();
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
@@ -295,7 +296,13 @@ describe('private conversation exports', () => {
       exportedAt: 500,
     })).resolves.toBe('download');
     expect(click).toHaveBeenCalledOnce();
+    // The revoke is deferred: revoking synchronously after click() races
+    // engines that start the save asynchronously (Safari defers until the
+    // user confirms) and can produce an empty download.
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(10_000);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:private-export');
+    vi.useRealTimers();
   });
 
   it('does not download when the user cancels the share sheet', async () => {

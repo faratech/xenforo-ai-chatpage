@@ -404,7 +404,11 @@ export class AudioService {
 
     if (this.currentAudio) {
       this.currentAudio.pause();
+      // Per spec, removing the src attribute alone does nothing until load()
+      // runs - without it Chromium keeps fetching a long TTS blob in the
+      // background after mute or navigation.
       this.currentAudio.removeAttribute('src');
+      this.currentAudio.load();
       this.currentAudio = null;
     }
 

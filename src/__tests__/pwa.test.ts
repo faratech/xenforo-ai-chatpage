@@ -94,6 +94,18 @@ describe('canonical PWA installation', () => {
 
   it('exposes a waiting update only through an explicit activation action', () => {
     const postMessage = vi.fn();
+    const serviceWorkerListeners: Array<() => void> = [];
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        controller: {},
+        addEventListener: (_type: string, listener: () => void) => serviceWorkerListeners.push(listener),
+        removeEventListener: (_type: string, listener: () => void) => {
+          const index = serviceWorkerListeners.indexOf(listener);
+          if (index !== -1) serviceWorkerListeners.splice(index, 1);
+        },
+      },
+    });
     const service = new PWAUpdatePrompt();
     const availability = vi.fn();
     service.subscribe(availability);
@@ -106,7 +118,15 @@ describe('canonical PWA installation', () => {
     expect(service.available).toBe(true);
     expect(service.activate()).toBe(true);
     expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' });
+    // The prompt survives until the worker actually takes control: a dropped
+    // SKIP_WAITING message must leave it re-triggerable, not silently gone.
+    expect(service.available).toBe(true);
+
+    serviceWorkerListeners.forEach(listener => listener());
     expect(service.available).toBe(false);
+    expect(availability).toHaveBeenLastCalledWith(false);
+
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: undefined });
   });
 
   it('observes an installer that already exists when registration resolves', () => {
@@ -117,6 +137,7 @@ describe('canonical PWA installation', () => {
       addEventListener: vi.fn((type: string, listener: () => void) => {
         if (type === 'statechange') stateChange = listener;
       }),
+      removeEventListener: vi.fn(),
     };
     const registration = {
       waiting: null as typeof installing | null,
