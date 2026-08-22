@@ -20,6 +20,9 @@ import Box from '@mui/material/Box';
  *    macro, and only for viewers the forum has decided get ads — stands in for
  *    "we are embedded in the forum at all". On the standalone /chatpage route
  *    there is no loader and this renders nothing.
+ *
+ * The forum copy is held collapsed until our own unit proves itself; see
+ * holdBreadcrumbCollapsed for why the decision is no longer made up front.
  */
 const AD_CLIENT = 'ca-pub-7455498979488414';
 const AD_SLOT = '6778196821';
@@ -30,6 +33,39 @@ const adsEnabledOnHost = (): boolean =>
 
 /** How long to wait for a creative before giving the space back to the chat. */
 const UNFILLED_GRACE_MS = 4_000;
+
+/**
+ * Hold the forum's breadcrumb copy collapsed (zero-height, not display:none)
+ * while our own unit decides whether it will fill.
+ *
+ * The old behaviour deleted the breadcrumb up front, before knowing our own
+ * fate; measured on production, ~5 cold sessions in 6 never reach
+ * data-ad-status within the grace period, so the band unmounted and the
+ * deleted breadcrumb left the guest with no unit at all. Holding instead of
+ * deleting keeps every ending covered:
+ *   - ours fills      -> the held copy is deleted outright (as before);
+ *   - ours unfills    -> this component unmounts and the cleanup un-collapses
+ *                        the breadcrumb, so the guest sees the forum's unit;
+ *   - app tears down  -> same cleanup path.
+ * Zero-height overflow-hidden keeps both units from being visually live at
+ * once without display:none-ing a serving <ins>, which is the thing AdSense
+ * asks you not to do.
+ */
+const holdBreadcrumbCollapsed = (): void => {
+  const bc = document.getElementById('wf-ad-breadcrumb');
+  if (!bc || bc.dataset.wfChatHeld) return;
+  bc.dataset.wfChatHeld = '1';
+  bc.style.cssText += ';height:0!important;overflow:hidden!important;margin:0!important;';
+};
+
+const releaseHeldBreadcrumb = (): void => {
+  const bc = document.getElementById('wf-ad-breadcrumb');
+  if (bc?.dataset.wfChatHeld) {
+    delete bc.dataset.wfChatHeld;
+    // The server-rendered wrapper carries no inline style of its own.
+    bc.removeAttribute('style');
+  }
+};
 
 export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
   const pushedRef = useRef(false);
@@ -44,13 +80,10 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
     // them" on a second push into the same <ins>.
     pushedRef.current = true;
 
-    // Take the forum's copy out of the document rather than leaving it hidden.
-    // PAGE_CONTAINER emits it above the chat and it is outside this repo's
-    // deployable template surface, so it cannot be suppressed at source from
-    // here; removing it keeps exactly one unit on the page and avoids leaving
-    // an ad rendering inside a display:none box, which is the thing AdSense
-    // asks you not to do.
-    document.getElementById('wf-ad-breadcrumb')?.remove();
+    // Hold the forum's breadcrumb copy collapsed while ours decides (see
+    // holdBreadcrumbCollapsed). It is outside this repo's deployable template
+    // surface, so it cannot be suppressed at source from here.
+    holdBreadcrumbCollapsed();
 
     try {
       (window.adsbygoogle = window.adsbygoogle || []).push({});
@@ -58,6 +91,8 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
       // A failed ad must never take the chat down with it.
       console.error('AdSense slot failed to initialise:', error);
     }
+
+    return () => releaseHeldBreadcrumb();
   }, [show]);
 
   /**
@@ -84,7 +119,12 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
     const settle = () => {
       const status = ins.getAttribute('data-ad-status');
       if (!status) return false;
-      if (status !== 'filled') setAbandoned(true);
+      if (status === 'filled') {
+        // Ours won: retire the forum's held copy for good.
+        document.getElementById('wf-ad-breadcrumb')?.remove();
+      } else {
+        setAbandoned(true);
+      }
       return true;
     };
 
