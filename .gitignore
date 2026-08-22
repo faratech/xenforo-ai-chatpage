@@ -14,6 +14,10 @@
 
 # misc
 .DS_Store
+# Local env files are never tracked. `.env` currently holds only public
+# values (see .env.example), but untracking it keeps a future edit from
+# committing purge-token-class secrets by accident.
+.env
 .env.local
 .env.development.local
 .env.test.local

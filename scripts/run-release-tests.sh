@@ -9,20 +9,40 @@
 
 set -u
 
-# The real deploy command may carry topology/dirty-tree overrides. Sandbox
+# The real deploy command may carry topology/path/retry overrides. Sandbox
 # scenarios set their own overrides deliberately and must never inherit the
-# caller's production values.
-unset DEPLOY_SINGLE_NODE DEPLOY_ALLOW_DIRTY \
-  DEPLOY_PUBLIC_RETRY_ATTEMPTS DEPLOY_ROLLBACK_PUBLIC_RETRY_ATTEMPTS
+# caller's production values - a stray DEPLOY_LOCK_FILE or PEER_SSH_KEY from a
+# wrapper script used to leak into every sandbox test. Mirrors the full
+# ${VAR:-default} list in deploy.sh.
+for _override in \
+  BACKEND_PRODUCT_CONTRACT_FILE BACKEND_PRODUCT_MIGRATION_FILE \
+  BACKEND_PRODUCT_PRUNER_FILE BACKEND_PRODUCT_TEST_FILE BACKEND_TEST_FILE \
+  CLOUDFLARE_ENV_FILE CLOUDFLARE_PURGE_TOKEN CLOUDFLARE_ZONE_ID \
+  DEPLOY_ALLOW_DIRTY DEPLOY_LOCK_FILE DEPLOY_OWNER DEPLOY_PRIVATE_ROOT \
+  DEPLOY_PROBE_ATTEMPTS DEPLOY_PUBLIC_RETRY_ATTEMPTS DEPLOY_PUBLIC_RETRY_DELAY \
+  DEPLOY_RECOVERY_ROOT DEPLOY_RETRY_DELAY DEPLOY_ROLLBACK_PUBLIC_RETRY_ATTEMPTS \
+  DEPLOY_SINGLE_NODE DEPLOY_SSH_CONNECT_TIMEOUT DEPLOY_STATE_FILE DIST_DIR \
+  LEGACY_CHAT_STYLE_ID LEGACY_REMOTE LIVE_ORIGIN ORIGIN_IP PEER_HOST \
+  PEER_ORIGIN_IP PEER_SSH_KEY PUBLIC_EDGE_IP PUBLIC_LINK RELEASE_ROOT \
+  REMOTE_PREVIOUS_TARGET RETAIN_RELEASES XENFORO_ROOT XENFORO_STYLES_ROOT; do
+  unset "$_override"
+done
+unset _override
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTS_DIR="$HERE/release-tests"
 
 declare -a tests=()
+declare -A seen_test=()
 if (($# > 0)); then
+  # Overlapping filters matched the same test twice, double-counting the
+  # summary and rerunning scenarios needlessly.
   for filter in "$@"; do
     for t in "$TESTS_DIR"/test-*"$filter"*.sh; do
-      [[ -f "$t" ]] && tests+=("$t")
+      if [[ -f "$t" && -z "${seen_test[$t]:-}" ]]; then
+        seen_test[$t]=1
+        tests+=("$t")
+      fi
     done
   done
 else

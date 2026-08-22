@@ -74,6 +74,15 @@ if [[ -z "$PUBLIC_EDGE_IP" ]] && command -v dig >/dev/null 2>&1; then
     | grep -Em1 '^[0-9]+(\.[0-9]+){3}$' || true)"
 fi
 readonly PUBLIC_EDGE_IP
+# The public-edge verification needs this address after the switch, purge, and
+# template import have already run; discovering a missing dig or a DNS hiccup
+# there forced a full rollback cycle that could not verify itself either. A
+# deploy without the edge IP is dead on arrival — say so before any staging.
+# (warn() is defined later in this file; this runs at source time.)
+if [[ -z "$PUBLIC_EDGE_IP" ]]; then
+  printf 'WARNING: %s\n' \
+    "PUBLIC_EDGE_IP is empty (no dig, or DNS lookup failed); set it explicitly to deploy." >&2
+fi
 readonly PEER_SSH_KEY="${PEER_SSH_KEY:-/web/.oci/id_rsa}"
 readonly DEPLOY_OWNER="${DEPLOY_OWNER:-nobody:nobody}"
 readonly RETAIN_RELEASES="${RETAIN_RELEASES:-5}"
@@ -374,7 +383,7 @@ peer_ssh() {
 peer_rsync() {
   peer_enabled || { fail "peer_rsync called in single-node mode"; return 1; }
   rsync -a --checksum "$@" \
-    -e "ssh -i $PEER_SSH_KEY -o BatchMode=yes -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT -o StrictHostKeyChecking=no"
+    -e "ssh -i \"$PEER_SSH_KEY\" -o BatchMode=yes -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT -o StrictHostKeyChecking=no"
 }
 
 # generate_inventory <public-release-dir> — sorted SHA-256 records for every
@@ -541,8 +550,16 @@ restore_peer_public_link() {
   local mode="link"
   if ((MIGRATED_REMOTE)); then
     mode="migrated"
-  elif ((FRESH_REMOTE)) || [[ -z "$REMOTE_PREVIOUS_TARGET" ]]; then
+  elif ((FRESH_REMOTE)); then
     mode="fresh"
+  elif [[ -z "$REMOTE_PREVIOUS_TARGET" ]]; then
+    # Prepare never recorded what the peer link pointed at (an ambiguous SSH
+    # failure, not a confirmed-empty peer). Classifying that as "fresh" made
+    # the recovery path delete the peer's intact symlink. Leave it untouched
+    # and flag it for manual reconcile instead.
+    PEER_STATE_NOTE="peer previous target unknown; left the peer public link untouched — reconcile manually against $DEPLOY_STATE_FILE"
+    warn "$PEER_STATE_NOTE"
+    return 0
   fi
   peer_ssh bash -s -- "$mode" "$PUBLIC_LINK" "${REMOTE_PREVIOUS_TARGET:--}" "${LEGACY_REMOTE:--}" "$INVENTORY_NAME" <<'REMOTE' || return 1
 # wf-peer-restore
@@ -1775,6 +1792,11 @@ record_previous_releases() {
   if [[ -n "$previous" ]]; then
     atomic_link "$previous" "$RELEASE_ROOT/previous" \
       || die "Cannot record the local previous release"
+  elif [[ -L "$RELEASE_ROOT/previous" ]]; then
+    # A fresh first deploy has no local previous release. Leaving a stale
+    # pointer from an earlier era made the next rollback die on a pruned
+    # target instead of reporting that there is nothing to roll back to.
+    rm -f -- "$RELEASE_ROOT/previous" || die "Cannot clear the stale previous-release pointer"
   fi
   if [[ -n "$remote_previous" ]] && peer_enabled; then
     peer_ssh bash -s -- "$remote_previous" "$RELEASE_ROOT/previous" <<'REMOTE' \
@@ -2079,6 +2101,10 @@ main() {
       ;;
     verify|--verify)
       ACTION=verify
+      # run_release_checks rebuilds dist/, and a concurrent deploy copies that
+      # same directory into its staged release. Take the lock so a verify can
+      # never race a deploy's inventory-generating build.
+      acquire_lock
       run_release_checks
       SUCCEEDED=1
       ;;

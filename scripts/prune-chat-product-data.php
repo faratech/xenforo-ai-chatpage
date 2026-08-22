@@ -197,6 +197,7 @@ $deletedFeedback = 0;
 $deletedEvents = 0;
 $deletedTombstones = 0;
 $failed = 0;
+$contestedClaims = 0;
 
 foreach ($attachments as $attachment) {
     $attachmentId = wfChatProductAttachmentId($attachment['attachment_id'] ?? null);
@@ -225,7 +226,14 @@ foreach ($attachments as $attachment) {
         ", [$nowMs, $attachmentId, $ownerUserId, $storageKey, $now, $pendingCutoffMs]);
         $db->commit();
         $transactionOpen = false;
-        if ($claimed->rowsAffected() !== 1) continue;
+        if ($claimed->rowsAffected() !== 1) {
+            // Another prune run claimed this row first. Not a failure, but
+            // silently swallowing the contest made the summary understate
+            // what happened to this candidate.
+            $contestedClaims++;
+            fwrite(STDERR, "attachment {$attachmentId}: claim lost to another runner\n");
+            continue;
+        }
 
         wfChatProductPruneFile($attachmentRoot, $storageKey, true);
         $db->beginTransaction();
@@ -309,12 +317,13 @@ if ($tombstones) {
 }
 
 printf(
-    "deleted_attachments=%d deleted_shares=%d deleted_feedback=%d deleted_events=%d deleted_tombstones=%d failed=%d\n",
+    "deleted_attachments=%d deleted_shares=%d deleted_feedback=%d deleted_events=%d deleted_tombstones=%d contested_claims=%d failed=%d\n",
     $deletedAttachments,
     $deletedShares,
     $deletedFeedback,
     $deletedEvents,
     $deletedTombstones,
+    $contestedClaims,
     $failed
 );
 exit($failed > 0 ? 1 : 0);

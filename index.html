@@ -4,15 +4,24 @@
     <meta charset="utf-8" />
     <link rel="icon" type="image/webp" href="/chatpage/bot-avatar.webp" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#111827" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#eff5f6" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1f2021" />
     <meta name="description" content="WindowsForum AI Chat" />
     <link rel="stylesheet" href="/chatpage/static/css/main.css" />
     <link rel="apple-touch-icon" href="/chatpage/bot-avatar.webp" />
     <link rel="manifest" href="/chatpage/manifest.json" />
     <title>AI Chat - WindowsForum</title>
     <!-- Standalone-page reset only. The bundled CSS is fully scoped to
-         #react-chat-container so the XenForo embed is unaffected. -->
-    <style>html, body { margin: 0; padding: 0; } #root { height: 100dvh; min-height: 100dvh; }</style>
+         #react-chat-container so the XenForo embed is unaffected.
+         The html backgrounds mirror makeTheme()'s page colors so first paint
+         matches the mounted shell instead of flashing UA white before React
+         resolves the color scheme. -->
+    <style>
+      html, body { margin: 0; padding: 0; }
+      #root { height: 100dvh; min-height: 100dvh; }
+      html { background: #eff5f6; }
+      @media (prefers-color-scheme: dark) { html { background: #1f2021; } }
+    </style>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>

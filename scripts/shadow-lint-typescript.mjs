@@ -31,7 +31,19 @@ const CONSUMERS = new Set([
 ]);
 
 const lintTypescriptDir = path.join(rootModules, 'typescript-lint');
+if (!existsSync(lintTypescriptDir)) {
+  // A production install (`npm ci --omit=dev`) has no lint toolchain at all.
+  // Failing postinstall there broke the whole install rather than just lint;
+  // skip quietly instead — this script only matters for `npm run lint`.
+  console.log(
+    'Lint toolchain typescript shadow: typescript-lint not installed '
+    + '(dev-only tooling absent); skipping.',
+  );
+  process.exit(0);
+}
 if (!existsSync(path.join(lintTypescriptDir, 'lib', 'typescript.js'))) {
+  // The alias directory exists but is incomplete — a dev-install anomaly that
+  // must stay loud.
   throw new Error('typescript-lint alias does not ship the JS compiler API; lint would break.');
 }
 

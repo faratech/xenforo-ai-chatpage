@@ -118,7 +118,14 @@ const server = createServer({
   }
 
   if (requestUrl.pathname === '/chat.php' && request.method === 'POST') {
-    assert(state, `API request arrived without a known smoke scenario: ${scenarioName}`);
+    if (!state) {
+      // A throw inside this async handler escapes as an unhandled rejection,
+      // killing the whole smoke run without saying which scenario broke.
+      console.error(`[smoke] API request arrived without a known smoke scenario: ${scenarioName}`);
+      response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      response.end(`unknown smoke scenario: ${scenarioName}`);
+      return;
+    }
     let body = '';
     for await (const chunk of request) body += chunk;
     const payload = JSON.parse(body || '{}');
@@ -336,8 +343,9 @@ try {
     const { context, page, state } = await createPage('cold-mobile', 'completion', {
       viewport: mobileViewport,
     });
-    await page.addInitScript(() => {
-      globalThis.__wfSmokeVitals = { cls: 0, lcp: 0 };
+    const debugCls = process.env.WF_SMOKE_DEBUG_CLS === '1';
+    await page.addInitScript(captureSources => {
+      globalThis.__wfSmokeVitals = { cls: 0, lcp: 0, shifts: [] };
       try {
         new PerformanceObserver(list => {
           const entries = list.getEntries();
@@ -346,13 +354,29 @@ try {
         }).observe({ type: 'largest-contentful-paint', buffered: true });
         new PerformanceObserver(list => {
           for (const entry of list.getEntries()) {
-            if (!entry.hadRecentInput) globalThis.__wfSmokeVitals.cls += entry.value || 0;
+            if (entry.hadRecentInput) continue;
+            globalThis.__wfSmokeVitals.cls += entry.value || 0;
+            // WF_SMOKE_DEBUG_CLS=1 makes a budget failure diagnosable: which
+            // nodes moved, when, and from where to where.
+            if (captureSources) {
+              globalThis.__wfSmokeVitals.shifts.push({
+                value: entry.value,
+                time: Math.round(entry.startTime),
+                sources: (entry.sources ?? []).map(source => ({
+                  node: source.node
+                    ? `${source.node.tagName}.${String(source.node.className ?? '').slice(0, 60)}`
+                    : 'null',
+                  prev: source.previousRect ? [source.previousRect.x, source.previousRect.y] : null,
+                  cur: source.currentRect ? [source.currentRect.x, source.currentRect.y] : null,
+                })),
+              });
+            }
           }
         }).observe({ type: 'layout-shift', buffered: true });
       } catch {
         // Startup timing below still provides coverage in older Chromium.
       }
-    });
+    }, debugCls);
     const cdp = await context.newCDPSession(page);
     await cdp.send('Network.enable');
     await cdp.send('Network.emulateNetworkConditions', {
@@ -374,8 +398,21 @@ try {
         cls: globalThis.__wfSmokeVitals?.cls ?? 0,
         fcp: firstContentfulPaint?.startTime ?? 0,
         lcp: globalThis.__wfSmokeVitals?.lcp ?? 0,
+        shifts: globalThis.__wfSmokeVitals?.shifts ?? [],
       };
     });
+    if (debugCls && vitals.cls > 0.05) {
+      console.log('[smoke] CLS budget exceeded; shift sources:');
+      for (const shift of vitals.shifts) {
+        console.log(`  v=${shift.value.toFixed(4)} at ${shift.time}ms`);
+        for (const source of shift.sources.slice(0, 5)) {
+          console.log(`    ${source.node} ${JSON.stringify(source.prev)} -> ${JSON.stringify(source.cur)}`);
+        }
+      }
+      const shotPrefix = process.env.WF_SMOKE_DEBUG_CLS_SHOT || '/tmp/cls-debug';
+      await page.screenshot({ path: `${shotPrefix}-after.png` });
+      console.log(`[smoke] saved post-shift screenshot to ${shotPrefix}-after.png`);
+    }
     assert.equal(state.identityCalls, 1, 'throttled cold load must still issue one identity request');
     assert(composerReadyMs < 10_000, `cold mobile composer took ${composerReadyMs} ms (budget 10000)`);
     assert(vitals.fcp > 0 && vitals.fcp < 6_000, `cold mobile FCP was ${vitals.fcp} ms (budget 6000)`);
