@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+/* global document -- page.evaluate() callbacks run in the browser context;
+   everything else in this file is Node. */
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
