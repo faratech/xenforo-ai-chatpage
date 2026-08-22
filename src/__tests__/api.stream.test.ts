@@ -78,6 +78,40 @@ describe('terminal event handling', () => {
     await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({ text: 'Hi' });
   });
 
+  it('treats an OpenAI-style [DONE] terminator as terminal', async () => {
+    const frames = [
+      sse({ type: 'response.output_text.delta', delta: 'Answer' }),
+      'data: [DONE]\n\n',
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame));
+        // Never closed: only the terminator ends this stream.
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(body)));
+
+    await expect(ChatAPI.sendMessage('hi')).resolves.toMatchObject({ text: 'Answer' });
+  });
+
+  it('classifies a transport-cut trailing frame as truncation, not a protocol error', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(sse({ type: 'response.output_text.delta', delta: 'Partial' })));
+        // The proxy died mid-frame; the connection then closed.
+        controller.enqueue(encoder.encode('data: {"type":"chat.stre'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(body)));
+
+    await expect(ChatAPI.sendMessage('hi')).rejects.toMatchObject({
+      name: 'IncompleteStreamError',
+      code: 'stream_truncated',
+      partialText: 'Partial',
+    });
+  });
+
   it('preserves streamed refusals as the completed assistant answer', async () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {

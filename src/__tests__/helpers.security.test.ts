@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
+import { normalizeAssistantMarkup, sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
 
 describe('sanitizeAndParse security boundary', () => {
   it('renders hostile raw HTML as inert text and blocks attacker-controlled image requests', () => {
@@ -453,5 +453,42 @@ describe('citation tokens mid-stream', () => {
     const combined = closed + trailing;
     expect(combined).not.toContain('cite');
     expect(combined).toContain('windowsforum.com');
+  });
+});
+
+describe('normalizeAssistantMarkup PUA-token hold-back', () => {
+  const OPEN = '\uE200';
+  const SEP = '\uE202';
+  const CLOSE = '\uE201';
+
+  it('holds back an unclosed token mid-stream even when its kind is not lowercase', () => {
+    // The end-of-string anchored hold-back used to miss this shape entirely:
+    // RESIDUAL stripping then removed just the markers and leaked the literal
+    // kind word plus payload into the visible sentence.
+    const streamed = normalizeAssistantMarkup(
+      `Answer text ${OPEN}Cite${SEP}https://windowsforum.com/a`,
+      true,
+    );
+    expect(streamed).toBe('Answer text ');
+    expect(streamed).not.toContain('Cite');
+    expect(streamed).not.toContain('windowsforum.com');
+  });
+
+  it('still converts a complete token while streaming', () => {
+    const streamed = normalizeAssistantMarkup(
+      `Twenty years.${OPEN}cite${SEP}https://windowsforum.com/a${CLOSE}`,
+      true,
+    );
+    expect(streamed).not.toContain(OPEN);
+    expect(streamed).toContain('windowsforum.com');
+  });
+
+  it('converts an unclosed cite as-is once the message is finished', () => {
+    const finished = normalizeAssistantMarkup(
+      `Twenty years. ${OPEN}cite${SEP}https://windowsforum.com/a`,
+      false,
+    );
+    expect(finished).not.toContain('cite');
+    expect(finished).toContain('windowsforum.com');
   });
 });

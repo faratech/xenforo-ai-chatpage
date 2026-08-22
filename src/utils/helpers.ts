@@ -105,7 +105,23 @@ export const normalizeAssistantMarkup = (content: string, streaming = false): st
   // because the streaming path re-runs this every animation frame.
   if (!content || !content.includes('\uE200')) return content;
 
-  let normalized = content.replace(
+  let normalized = content;
+
+  // While streaming, a token whose closing delimiter has not landed must be
+  // held back wholesale \u2014 whatever follows the opener is payload-in-progress.
+  // The end-of-string anchored pattern below only catches an opener that sits
+  // flush against the tail; anything else (an uppercase or odd kind, a stray
+  // extra marker) slipped past it and leaked literal internal markup
+  // mid-sentence until the closing delimiter arrived.
+  if (streaming) {
+    const lastOpen = normalized.lastIndexOf('\uE200');
+    if (lastOpen !== -1 && !normalized.includes('\uE201', lastOpen)) {
+      normalized = normalized.slice(0, lastOpen);
+      if (!normalized.includes('\uE200')) return normalized;
+    }
+  }
+
+  normalized = normalized.replace(
     CITATION_TOKEN,
     (_full, kind: string, payload: string) => citationTokenToMarkdown(kind, payload)
   );

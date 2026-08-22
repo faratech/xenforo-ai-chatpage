@@ -664,8 +664,23 @@ export class ChatAPI {
 
     if (!response.ok) {
       // Read the error body while the first-byte deadline still governs, so
-      // a stalled error body cannot hang here; then clear it.
-      const errorData = await readErrorResponse(response);
+      // a stalled error body cannot hang here; then clear it. An abort during
+      // this read (deadline expiry or the caller's Stop) must surface as a
+      // typed error and must always release the deadline listener.
+      let errorData;
+      try {
+        errorData = await readErrorResponse(response);
+      } catch (readError) {
+        firstByte.clear();
+        if (firstByte.timedOut()) {
+          throw new APIError('The AI service did not start responding in time', {
+            code: 'timeout',
+            retryable: true,
+          });
+        }
+        if (signal?.aborted || isAbortError(readError)) throw new StreamCancelledError();
+        throw readError;
+      }
       firstByte.clear();
       if (errorData.captcha_required) throw new CaptchaRequiredError();
       const code = errorCode(errorData);
@@ -798,7 +813,15 @@ export class ChatAPI {
       if (dataLines.length === 0) return;
 
       const json = dataLines.join('\n').trim();
-      if (!json || json === '[DONE]') return;
+      if (!json) return;
+      // The PHP proxy never forwards upstream `[DONE]` (it synthesizes its
+      // own `chat.stream.completed`), but a non-conforming intermediary may.
+      // An OpenAI-style terminator still means the stream is over — treating
+      // it as ignorable made an intact answer read back as `stream_no_terminal`.
+      if (json === '[DONE]') {
+        terminalReceived = true;
+        return;
+      }
 
       let parsedData: SSEEvent;
       try {
@@ -1046,7 +1069,17 @@ export class ChatAPI {
 
       if (!terminalReceived) {
         buffer += decoder.decode();
-        if (buffer.trim()) handleEvent(buffer);
+        if (buffer.trim()) {
+          try {
+            handleEvent(buffer);
+          } catch (error) {
+            if (!(error instanceof StreamProtocolError)) throw error;
+            // A transport cut can leave half an SSE frame in the buffer.
+            // That is truncation, not a protocol fault: fall through to the
+            // !terminalReceived handling below, which classifies it with
+            // full diagnostics instead of a misleading protocol error.
+          }
+        }
       }
 
       if (!terminalReceived && signal?.aborted) {
@@ -1498,7 +1531,25 @@ export class ChatAPI {
       }
 
       if (!response.ok) {
-        const errorData = await readErrorResponse(response);
+        // The error-body read still runs under the deadline: a stalled
+        // non-2xx response must surface as tts_timeout, not as a bare
+        // AbortError callers would mistake for a user cancellation.
+        let errorData;
+        try {
+          errorData = await readErrorResponse(response);
+        } catch (readError) {
+          if (options.signal?.aborted || isAbortError(readError)) throw readError;
+          if (deadline.timedOut()) {
+            throw new APIError('TTS request timed out', {
+              code: 'tts_timeout',
+              retryable: true,
+            });
+          }
+          throw new APIError('TTS network request failed', {
+            code: 'tts_network_error',
+            retryable: true,
+          });
+        }
         const code = errorCode(errorData) ?? 'tts_request_failed';
         if (isIdentityLockResponse(response.status, code)) notifyIdentityChanged();
         throw new APIError(errorMessage(errorData, 'TTS request failed'), {
