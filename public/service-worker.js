@@ -87,7 +87,7 @@ const isCacheablePublicAsset = url => (
   )
 );
 
-const isHashedAsset = pathname => /-[A-Za-z0-9_-]{8,}\.[^.]+$/.test(pathname);
+const isHashedAsset = pathname => /-[A-Za-z0-9_-]{8,}\.(?:chunk\.js|css|[a-z0-9]+)$/i.test(pathname);
 
 const networkFirst = async request => {
   const cache = await caches.open(CACHE_NAME);

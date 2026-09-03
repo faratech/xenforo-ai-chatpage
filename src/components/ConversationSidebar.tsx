@@ -46,8 +46,44 @@ interface ConversationSearchResult {
 
 const normalizeSearchText = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
-const countMatches = (value: string, normalizedQuery: string): number => {
-  const haystack = normalizeSearchText(value).toLocaleLowerCase();
+/**
+ * Pre-normalized search corpus for one conversation, built only when the
+ * conversation list changes. The title and every message are whitespace
+ * normalized once, then joined into `lower` with '\n' — a character a
+ * normalized query can never contain, so no match can span a segment boundary
+ * and one scan counts the whole conversation. `compactSegments` keeps each
+ * segment's original casing for excerpt slicing, addressed via `segmentStarts`.
+ */
+interface ConversationSearchIndex {
+  lower: string;
+  segmentStarts: number[];
+  compactSegments: string[];
+}
+
+const buildSearchIndex = (conversation: LibraryConversation): ConversationSearchIndex => {
+  let lower = '';
+  const segmentStarts: number[] = [];
+  const compactSegments: string[] = [];
+
+  for (const source of [conversation.title, ...conversation.messages.map(message => message.rawContent)]) {
+    const compact = normalizeSearchText(source);
+    if (segmentStarts.length) lower += '\n';
+    segmentStarts.push(lower.length);
+    compactSegments.push(compact);
+    lower += compact.toLocaleLowerCase();
+  }
+
+  return { lower, segmentStarts, compactSegments };
+};
+
+const segmentAt = (index: ConversationSearchIndex, offset: number): number => {
+  let segment = 0;
+  while (segment + 1 < index.segmentStarts.length && index.segmentStarts[segment + 1] <= offset) segment += 1;
+  return segment;
+};
+
+const countMatches = (index: ConversationSearchIndex, normalizedQuery: string): number => {
+  const haystack = index.lower;
   let count = 0;
   let offset = 0;
 
@@ -61,8 +97,7 @@ const countMatches = (value: string, normalizedQuery: string): number => {
   return count;
 };
 
-const excerptAroundMatch = (value: string, normalizedQuery: string): string | undefined => {
-  const compact = normalizeSearchText(value);
+const excerptAroundMatch = (compact: string, normalizedQuery: string): string | undefined => {
   const matchAt = compact.toLocaleLowerCase().indexOf(normalizedQuery);
   if (matchAt < 0) return undefined;
 
@@ -198,26 +233,36 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
 
   const normalizedQuery = normalizeSearchText(query).toLocaleLowerCase();
 
+  // Derived from conversations alone, so a keystroke scans cached text instead
+  // of re-normalizing the corpus.
+  const searchIndex = useMemo(() => new Map(conversations.map(conversationValue => {
+    const conversation = conversationValue as LibraryConversation;
+    return [conversation.id, buildSearchIndex(conversation)];
+  })), [conversations]);
+
   const matchingResults = useMemo<ConversationSearchResult[]>(() => conversations.flatMap(conversationValue => {
     const conversation = conversationValue as LibraryConversation;
     if (!normalizedQuery) return [{ conversation, matchCount: 0 }];
 
-    const titleMatches = countMatches(conversation.title, normalizedQuery);
-    let messageMatches = 0;
-    let excerpt: string | undefined;
-    for (const message of conversation.messages) {
-      const matches = countMatches(message.rawContent, normalizedQuery);
-      messageMatches += matches;
-      if (!excerpt && matches > 0) excerpt = excerptAroundMatch(message.rawContent, normalizedQuery);
-    }
+    const index = searchIndex.get(conversation.id);
+    if (!index) return [];
 
-    const matchCount = titleMatches + messageMatches;
-    return matchCount > 0 ? [{
+    const matchCount = countMatches(index, normalizedQuery);
+    if (!matchCount) return [];
+
+    // The excerpt comes from the first matching message, falling back to the
+    // title when every match lives in the title itself.
+    const firstMessageMatchAt = index.lower.indexOf(normalizedQuery, index.segmentStarts[1] ?? index.lower.length);
+    const excerptSegment = firstMessageMatchAt < 0
+      ? index.compactSegments[0]
+      : index.compactSegments[segmentAt(index, firstMessageMatchAt)];
+
+    return [{
       conversation,
-      excerpt: excerpt ?? excerptAroundMatch(conversation.title, normalizedQuery),
+      excerpt: excerptAroundMatch(excerptSegment, normalizedQuery),
       matchCount,
-    }] : [];
-  }), [conversations, normalizedQuery]);
+    }];
+  }), [conversations, normalizedQuery, searchIndex]);
 
   const visibleResults = useMemo(() => matchingResults.filter(({ conversation }) => {
     const isArchived = Boolean(conversation.archivedAt);

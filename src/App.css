@@ -119,6 +119,21 @@
   scrollbar-gutter: stable;
 }
 
+/* Window the transcript rows. Off-screen messages are skipped for layout and
+   paint, which is what keeps a long conversation from costing O(n) layout on
+   every streamed frame. `contain-intrinsic-size` reserves the row's remembered
+   height once it has rendered (240px before that) so the skipped rows still
+   contribute a predictable scrollHeight to the tail-follow write and to scroll
+   restoration.
+
+   Scoped to the `role="log"` region on purpose: the answer still being written
+   renders outside it, its height changes per frame, and estimating it would
+   make those tail-follow writes land short until it scrolled into view. */
+#react-chat-container .chat-messages-container [role='log'] article {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+
 /* The relocated forum ad, as the last row of the shell. extra.less reserves
    280px for every .adsense-wrapper on the site; inside a viewport-height app
    that is a quarter of the conversation, so the band is pinned to a fixed
@@ -493,6 +508,8 @@
   #react-chat-container .message-content,
   #react-chat-container .wf-assistant-bubble { break-inside: auto; }
   #react-chat-container .wf-user-bubble { break-inside: avoid-page; }
+  /* Nothing may be windowed away on paper: every row has to be laid out. */
+  #react-chat-container .chat-messages-container [role='log'] article { content-visibility: visible; }
   #react-chat-container .message-file-sources [data-source-collapsed="true"] {
     display: list-item !important;
   }

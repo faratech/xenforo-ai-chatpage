@@ -3718,10 +3718,19 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
     const frame = requestAnimationFrame(() => {
       const element = messagesContainerRef.current;
-      if (element) element.scrollTop = element.scrollHeight;
+      if (!element) return;
+      const before = element.scrollTop;
+      element.scrollTop = element.scrollHeight;
+      // The write emits a scroll event of its own every streamed frame; the
+      // guard keeps the scroll handler from reading it as the reader moving
+      // away and re-persisting the position each time. Only a write that
+      // actually moved the pane emits one, though — arming on a no-op guards
+      // nothing of ours and would suppress the reader's own scrolling for the
+      // settle window, which is precisely the mis-arm the guard warns about.
+      if (element.scrollTop !== before) armProgrammaticScrollGuard(element);
     });
     return () => cancelAnimationFrame(frame);
-  }, [autoFollow, currentConversation.messages, streamingState]);
+  }, [armProgrammaticScrollGuard, autoFollow, currentConversation.messages, streamingState]);
 
   useEffect(() => () => {
     const active = activeTurnRef.current;

@@ -637,12 +637,20 @@ export const saveStore = (
   }, trimmedIds);
 
   const evictedIds: string[] = [];
-  for (;;) {
+  // The disk state read before the loop is the one this synchronous save
+  // started from. saveStore never awaits, so no task — including a cross-tab
+  // storage event — can run before the first write; a re-read is only needed
+  // on a retry, after a quota error has yielded to other tasks.
+  let latestDisk: ChatStoreV4 | null = onDisk;
+  for (let attempt = 0; ; attempt += 1) {
     try {
-      // A storage event may land between React's state update and this save.
-      // Re-read immediately before each write and re-union deletions so a
-      // stale tab cannot overwrite a newer tombstone or retry marker.
-      const latestDisk = parseStore(localStorage.getItem(keys.store));
+      // A storage event may land while the quota retry sleeps nothing but
+      // still yields; re-read immediately before each retry write and
+      // re-union deletions so a stale tab cannot overwrite a newer tombstone
+      // or retry marker.
+      if (attempt > 0) {
+        latestDisk = parseStore(localStorage.getItem(keys.store));
+      }
       if (latestDisk) {
         prepared = mergeStores(prepared, latestDisk);
         if (evictedIds.length) {

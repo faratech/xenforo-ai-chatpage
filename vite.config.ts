@@ -137,7 +137,6 @@ export default defineConfig(({ command, mode }) => {
     build: {
       outDir: 'dist',
       sourcemap: false,
-      modulePreload: false,
       cssCodeSplit: false,
       rollupOptions: {
         output: {

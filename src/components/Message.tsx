@@ -152,8 +152,16 @@ const formatAttachmentSize = (bytes: number): string => {
  * Adds controlled code actions, keyboard-operable answer images, and citation
  * navigation after sanitization. The assistant cannot forge these controls:
  * sanitizeAndParse removes buttons and data attributes before this runs.
+ *
+ * Returns the parsed template itself, not a string: prepareAnswerContent lifts
+ * the Sources footer out of that same parse, so the pipeline serializes once at
+ * its end instead of once per stage. Empty input (or no DOM) returns the string
+ * untouched, and prepareAnswerContent passes a string through unmodified.
  */
-const enhanceRichContent = (html: string, interactiveCitations = true): string => {
+const enhanceRichContent = (
+  html: string,
+  interactiveCitations = true,
+): HTMLTemplateElement | string => {
   if (!html || typeof document === 'undefined') return html;
   const template = document.createElement('template');
   template.innerHTML = html;
@@ -211,7 +219,7 @@ const enhanceRichContent = (html: string, interactiveCitations = true): string =
     }
   }
 
-  return template.innerHTML;
+  return template;
 };
 
 interface RenderedAnswerContent {
@@ -243,15 +251,17 @@ const appendSafeLinkCitations = (root: ParentNode, citations: Annotation[]): voi
  * provenance panel. Some providers also append their own Markdown `Sources`
  * section. When structured citations exist, fold that trailing section into
  * the same panel instead of displaying two source lists.
+ *
+ * Takes the enhanced <template> from enhanceRichContent and serializes it once,
+ * at the return. A string input is an unenhanced pass-through (empty content,
+ * or no DOM to parse into) and carries no citations.
  */
 const prepareAnswerContent = (
-  html: string,
+  enhanced: HTMLTemplateElement | string,
   structuredAnnotations: readonly Annotation[] = [],
 ): RenderedAnswerContent => {
-  if (!html || typeof document === 'undefined') return { html, citations: [] };
-  const template = document.createElement('template');
-  template.innerHTML = html;
-  const footer = template.content.lastElementChild;
+  if (typeof enhanced === 'string') return { html: enhanced, citations: [] };
+  const footer = enhanced.content.lastElementChild;
   const label = footer?.querySelector(':scope > small:first-child')?.textContent?.trim().toLowerCase();
   const citations: Annotation[] = [];
 
@@ -262,7 +272,7 @@ const prepareAnswerContent = (
     if (separator?.tagName === 'HR') separator.remove();
   }
 
-  const topLevelElements = [...template.content.children];
+  const topLevelElements = [...enhanced.content.children];
   const authoredSources = [...topLevelElements].reverse().find(isAuthoredSourcesLabel);
   if (authoredSources) {
     const authoredTail = topLevelElements.slice(topLevelElements.indexOf(authoredSources));
@@ -292,7 +302,8 @@ const prepareAnswerContent = (
     }
   }
 
-  return { html: template.innerHTML, citations };
+  // The single serialization of the shared enhancement parse.
+  return { html: enhanced.innerHTML, citations };
 };
 
 const codeFilename = (code: HTMLElement): string => {
