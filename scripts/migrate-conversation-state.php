@@ -27,11 +27,29 @@ $hasDeleteStartedAt = (int)$db->fetchOne("
     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'openai_chatpage_conversations'
       AND COLUMN_NAME = 'delete_started_at'
 ", [$schema]) === 1;
+$hasAttempts = (int)$db->fetchOne("
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'openai_chatpage_conversations'
+      AND COLUMN_NAME = 'attempts'
+", [$schema]) === 1;
+$hasNextAttemptAt = (int)$db->fetchOne("
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'openai_chatpage_conversations'
+      AND COLUMN_NAME = 'next_attempt_at'
+", [$schema]) === 1;
 $hasDeleteIndex = (int)$db->fetchOne("
     SELECT COUNT(*)
     FROM information_schema.STATISTICS
     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'openai_chatpage_conversations'
       AND INDEX_NAME = 'idx_status_delete_started'
+", [$schema]) > 0;
+$hasBackoffIndex = (int)$db->fetchOne("
+    SELECT COUNT(*)
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'openai_chatpage_conversations'
+      AND INDEX_NAME = 'idx_delete_failed_next_attempt'
 ", [$schema]) > 0;
 $hasOutbox = (int)$db->fetchOne("
     SELECT COUNT(*)
@@ -41,7 +59,10 @@ $hasOutbox = (int)$db->fetchOne("
 
 $needed = [];
 if (!$hasDeleteStartedAt) $needed[] = 'add delete_started_at';
+if (!$hasAttempts) $needed[] = 'add delete attempts';
+if (!$hasNextAttemptAt) $needed[] = 'add delete next_attempt_at';
 if (!$hasDeleteIndex) $needed[] = 'add deletion retry index';
+if (!$hasBackoffIndex) $needed[] = 'add delete_failed backoff index';
 if (!$hasOutbox) $needed[] = 'create compensation outbox';
 
 if (!$needed) {
@@ -62,10 +83,31 @@ if (!$hasDeleteStartedAt) {
     ");
 }
 
+if (!$hasAttempts) {
+    $db->query("
+        ALTER TABLE openai_chatpage_conversations
+        ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER delete_started_at
+    ");
+}
+
+if (!$hasNextAttemptAt) {
+    $db->query("
+        ALTER TABLE openai_chatpage_conversations
+        ADD COLUMN next_attempt_at INT UNSIGNED NOT NULL DEFAULT 0 AFTER attempts
+    ");
+}
+
 if (!$hasDeleteIndex) {
     $db->query("
         ALTER TABLE openai_chatpage_conversations
         ADD KEY idx_status_delete_started (status, delete_started_at)
+    ");
+}
+
+if (!$hasBackoffIndex) {
+    $db->query("
+        ALTER TABLE openai_chatpage_conversations
+        ADD KEY idx_delete_failed_next_attempt (status, next_attempt_at)
     ");
 }
 

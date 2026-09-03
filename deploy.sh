@@ -255,6 +255,35 @@ backend_hashes_json() {
     "$(json_str "$BACKEND_PRODUCT_PRUNER_HASH")"
 }
 
+# The clean-worktree gate only guards $APP_ROOT, but the deploy lints, runs
+# and hashes backend PHP that lives outside that scope. Record, per file,
+# which repo owns it, that repo's HEAD, and whether the file matches a commit
+# — so a post-incident reader can tell whether the hashed backend state was
+# committed work.
+backend_provenance_json() {
+  local monorepo_root file repo head clean first=1
+  monorepo_root="$(dirname -- "$XENFORO_ROOT")"
+  printf '{'
+  for file in "${BACKEND_PHP_FILES[@]}"; do
+    ((first)) || printf ','
+    first=0
+    if [[ "$file" == "$APP_ROOT"/* ]]; then
+      repo="$APP_ROOT"
+    else
+      repo="$monorepo_root"
+    fi
+    if [[ -z "$(git -C "$repo" status --porcelain -- "$file" 2>/dev/null || true)" ]]; then
+      clean=true
+    else
+      clean=false
+    fi
+    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+    printf '"%s": {"repo": %s, "head": %s, "clean": %s}' \
+      "$(basename -- "$file")" "$(json_str "$repo")" "$(json_str "$head")" "$clean"
+  done
+  printf '}'
+}
+
 capture_backend_hashes() {
   local file hash
   for file in "${BACKEND_REQUIRED_PHP_FILES[@]}"; do
@@ -812,7 +841,8 @@ write_release_metadata() {
     printf '  "frontend_commit": %s,\n' "$(json_str "$commit")"
     printf '  "working_tree_dirty": %s,\n' "$dirty_json"
     printf '  "created_at": %s,\n' "$(json_str "$created_at")"
-    printf '  "backend_hashes": %s\n' "$(backend_hashes_json)"
+    printf '  "backend_hashes": %s,\n' "$(backend_hashes_json)"
+    printf '  "backend_provenance": %s\n' "$(backend_provenance_json)"
     printf '}\n'
   } >"$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$RELEASE_METADATA_FILE"
@@ -1435,6 +1465,7 @@ apply_template_bundle() {
   # target styles to be designer-managed. Each tree self-resolves its target
   # style (designer_mode binding if present, else its .wf-style-id marker).
   local wide_syncer="$APP_ROOT/scripts/sync-xenforo-style-wide.php"
+  local remote_wide_syncer="$XENFORO_ROOT/internal_data/.wf-chat-$$-sync-xenforo-style-wide.php"
   for style in "${XF_STYLES[@]}"; do
     php "$wide_syncer" "$XENFORO_ROOT" "$style" \
       || { fail "Style-wide template sync failed for $style"; return 1; }
@@ -1447,12 +1478,19 @@ apply_template_bundle() {
         || { fail "Cannot push $style template metadata to $PEER_HOST"; return 1; }
     done
 
-    peer_ssh bash -s -- "$XENFORO_ROOT" "$wide_syncer" <<'REMOTE' || { fail "Peer style-wide template sync failed"; return 1; }
+    # Stage the helper like the scoped syncers do: the local $APP_ROOT path
+    # does not exist on the peer.
+    peer_rsync "$wide_syncer" "$PEER_HOST:$remote_wide_syncer" \
+      || { fail "Cannot stage the style-wide sync helper on the peer"; return 1; }
+
+    peer_ssh bash -s -- "$XENFORO_ROOT" "$remote_wide_syncer" <<'REMOTE' \
+      || { peer_ssh rm -f -- "$remote_wide_syncer" >/dev/null 2>&1 || true; fail "Peer style-wide template sync failed"; return 1; }
 # wf-peer-sync-styles
 set -Eeuo pipefail
-cd "$1"
-php "$2" "$1" wf3
-php "$2" "$1" wf3_domperf
+xenforo_root="$1"; syncer="$2"
+trap 'rm -f -- "$syncer"' EXIT
+php "$syncer" "$xenforo_root" wf3
+php "$syncer" "$xenforo_root" wf3_domperf
 REMOTE
   else
     skip_peer "the peer template push and style-wide sync"

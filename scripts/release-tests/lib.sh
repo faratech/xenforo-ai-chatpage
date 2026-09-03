@@ -56,6 +56,7 @@ setup_sandbox() {
     "$SB/peer/releases" \
     "$SB/peer/releases/.private" \
     "$SB/peer/public_html" \
+    "$SB/peer/public_html/internal_data" \
     "$SB/bin" "$SB/control" "$SB/app/scripts" "$SB/dist" "$SB/env"
 
   export SANDBOX_LOCAL="$SB/local"
@@ -121,6 +122,7 @@ make_app_repo() {
   cp "$RT_APP_SRC/scripts/prune-chat-product-data.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/snapshot-xenforo-template-db.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/sync-xenforo-db-style.php" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/sync-xenforo-style-wide.php" "$SB/app/scripts/"
   chmod 755 "$SB/app/deploy.sh"
   git -C "$SB/app" init -q
   git -C "$SB/app" config user.email release-tests@sandbox.invalid
@@ -183,6 +185,12 @@ TEMPLATE
 TEMPLATE
   done
   write_style_metadata "$root/wf5/templates"
+
+  # The xf_style id each tree feeds (scripts/lib/xenforo-style-id.php); the
+  # compiled-template verifier fails closed without it.
+  printf '40' >"$root/wf3/.wf-style-id"
+  printf '47' >"$root/wf3_domperf/.wf-style-id"
+  printf '51' >"$root/wf5/.wf-style-id"
 }
 
 # Rebuild _metadata.json so verify-xenforo-templates.mjs sees a clean baseline.

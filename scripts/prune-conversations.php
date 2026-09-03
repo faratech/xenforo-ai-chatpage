@@ -39,14 +39,14 @@ $now = time();
 $staleDeleteCutoff = $now - DELETE_STALE_AFTER;
 $rows = $db->fetchAll("
     SELECT owner_user_id, client_conversation_id, conversation_id, last_used_at,
-           status, delete_started_at
+           status, delete_started_at, attempts
     FROM openai_chatpage_conversations
-    WHERE (last_used_at < ? OR status = 'delete_failed')
+    WHERE (last_used_at < ? OR (status = 'delete_failed' AND next_attempt_at <= ?))
       AND conversation_id LIKE 'conv\\_%'
       AND (status <> 'deleting' OR delete_started_at IS NULL OR delete_started_at <= ?)
     ORDER BY last_used_at ASC
     LIMIT {$limit}
-", [$cutoff, $staleDeleteCutoff]);
+", [$cutoff, $now, $staleDeleteCutoff]);
 
 $outboxRows = $db->fetchAll("
     SELECT conversation_id, owner_user_id, client_conversation_id, attempts
@@ -80,6 +80,17 @@ try {
 if ($secretKey === '') {
     fwrite(STDERR, "XenForo secretKey unavailable\n");
     exit(1);
+}
+
+// Provider deletes are the whole point of this run; if the AI API is
+// unreachable, claiming rows would only stamp delete_failed poison that
+// starves later runs. Probe before claiming anything: unreachable means
+// claim nothing and let the next run retry.
+try {
+    $client->get('http://127.0.0.1:8001/healthz', ['timeout' => 5]);
+} catch (Throwable $probeError) {
+    fwrite(STDERR, 'provider unavailable, nothing claimed: ' . $probeError->getMessage() . "\n");
+    exit(0);
 }
 
 function acquireLease(Redis $redis, string $identityId, string $clientConversationId, string $owner): ?array
@@ -170,7 +181,7 @@ foreach ($rows as $row) {
             WHERE owner_user_id = ?
               AND client_conversation_id = ?
               AND conversation_id = ?
-              AND (last_used_at < ? OR status = 'delete_failed')
+              AND (last_used_at < ? OR (status = 'delete_failed' AND next_attempt_at <= ?))
               AND (status <> 'deleting' OR delete_started_at IS NULL OR delete_started_at <= ?)
         ", [
             $deleteStartedAt,
@@ -178,6 +189,7 @@ foreach ($rows as $row) {
             $row['client_conversation_id'],
             $row['conversation_id'],
             $cutoff,
+            time(),
             time() - DELETE_STALE_AFTER,
         ])->rowsAffected();
         if ($claimed !== 1) {
@@ -205,16 +217,23 @@ foreach ($rows as $row) {
         if ($removed !== 1) throw new RuntimeException('final local delete did not affect exactly one row');
         $deleted++;
     } catch (Throwable $error) {
+        // Same backoff contract as the outbox loop below: a row that keeps
+        // failing must leave the candidate head for a while instead of
+        // consuming one of the unit's slots every single run.
+        $attempts = (int)($row['attempts'] ?? 0) + 1;
+        $delay = min(3600, 60 * (2 ** min(6, $attempts - 1)));
         $db->query("
             UPDATE openai_chatpage_conversations
-            SET status = 'delete_failed', last_error = ?
+            SET status = 'delete_failed', attempts = ?, last_error = ?, next_attempt_at = ?
             WHERE owner_user_id = ?
               AND client_conversation_id = ?
               AND conversation_id = ?
               AND status = 'deleting'
               AND delete_started_at = ?
         ", [
+            $attempts,
             substr($error->getMessage(), 0, 500),
+            time() + $delay,
             $row['owner_user_id'],
             $row['client_conversation_id'],
             $row['conversation_id'],

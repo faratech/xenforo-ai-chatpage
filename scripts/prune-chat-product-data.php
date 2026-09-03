@@ -8,6 +8,10 @@ declare(strict_types=1);
  * Dry-run is the default; the systemd unit invokes the explicit --apply mode.
  */
 
+// A `deleting` claim older than this is stale and re-claimable: above the unit's
+// 20-minute TimeoutStartSec, far inside the daily run cadence.
+const ATTACHMENT_DELETE_STALE_AFTER = 3600;
+
 if (PHP_SAPI !== 'cli') {
     fwrite(STDERR, "CLI only\n");
     exit(1);
@@ -79,6 +83,7 @@ $nowMs = (int)$now * 1000;
 $eventCutoffMs = ((int)$now - $eventDays * 86400) * 1000;
 $feedbackCutoffMs = ((int)$now - $feedbackDays * 86400) * 1000;
 $pendingCutoffMs = ((int)$now - $pendingMinutes * 60) * 1000;
+$deletingCutoffMs = ((int)$now - ATTACHMENT_DELETE_STALE_AFTER) * 1000;
 $attachmentRoot = '/web/private/chat-attachments';
 
 $xfRoot = '/web/public_html';
@@ -141,11 +146,12 @@ if ($missingIndexes) {
 $attachments = $db->fetchAll("
     SELECT attachment_id, owner_user_id, storage_key
     FROM openai_chatpage_attachments
-    WHERE expires_at <= ? OR status IN ('expired', 'deleted', 'deleting')
+    WHERE expires_at <= ? OR status IN ('expired', 'deleted')
        OR (status = 'pending' AND updated_at_ms < ?)
+       OR (status = 'deleting' AND updated_at_ms < ?)
     ORDER BY expires_at ASC
     LIMIT {$fileLimit}
-", [$now, $pendingCutoffMs]);
+", [$now, $pendingCutoffMs, $deletingCutoffMs]);
 $shares = $db->fetchAll("
     SELECT share_id, owner_user_id
     FROM openai_chatpage_shares
@@ -214,16 +220,18 @@ foreach ($attachments as $attachment) {
     $transactionOpen = false;
     try {
         // Claim the exact owner/id/storage row before touching its file. A
-        // failed unlink leaves a non-readable `deleting` row for a later retry.
+        // failed unlink leaves a non-readable `deleting` row that only becomes
+        // claimable again once ATTACHMENT_DELETE_STALE_AFTER has passed.
         $db->beginTransaction();
         $transactionOpen = true;
         $claimed = $db->query("
             UPDATE openai_chatpage_attachments
             SET status = 'deleting', updated_at_ms = ?
             WHERE attachment_id = ? AND owner_user_id = ? AND storage_key = ?
-              AND (expires_at <= ? OR status IN ('expired', 'deleted', 'deleting')
-                   OR (status = 'pending' AND updated_at_ms < ?))
-        ", [$nowMs, $attachmentId, $ownerUserId, $storageKey, $now, $pendingCutoffMs]);
+              AND (expires_at <= ? OR status IN ('expired', 'deleted')
+                   OR (status = 'pending' AND updated_at_ms < ?)
+                   OR (status = 'deleting' AND updated_at_ms < ?))
+        ", [$nowMs, $attachmentId, $ownerUserId, $storageKey, $now, $pendingCutoffMs, $deletingCutoffMs]);
         $db->commit();
         $transactionOpen = false;
         if ($claimed->rowsAffected() !== 1) {

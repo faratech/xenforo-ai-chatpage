@@ -39,6 +39,66 @@ if (!/Service-Worker-Allowed\s+"\/pages\/ai\/"/.test(htaccess)) {
   throw new Error('service-worker.js cannot register the canonical /pages/ai/ scope.');
 }
 
+// The cache-control contract keeps the stable entrypoints revalidating against
+// XenForo and the hashed assets immutable. Asserting it textually here means a
+// .htaccess regression fails preflight; deploy.sh only re-proves it in
+// verify_live_release, after the symlink has switched, when rollback is the
+// only remedy. FilesMatch patterns are POSIX ERE, and the ones in use are also
+// valid JavaScript RegExp, so they are evaluated as written rather than by
+// exact name comparison.
+const STABLE_CACHE_CONTROL = 'no-cache, must-revalidate';
+const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+const htaccessRules = [];
+for (const match of htaccess.matchAll(/<FilesMatch\s+"([^"]*)">([\s\S]*?)<\/FilesMatch>/g)) {
+  const header = /Header\s+always\s+set\s+Cache-Control\s+"([^"]*)"/.exec(match[2]);
+  if (header) {
+    htaccessRules.push({ pattern: new RegExp(match[1]), cacheControl: header[1] });
+  }
+}
+const stableRules = htaccessRules.filter(rule => rule.cacheControl === STABLE_CACHE_CONTROL);
+const immutableRules = htaccessRules.filter(rule => rule.cacheControl === IMMUTABLE_CACHE_CONTROL);
+
+// FilesMatch sees the final path component only, so nested entrypoints are
+// checked by basename. .htaccess itself is configuration that Apache refuses
+// to serve, and the manifest icons are stable install assets the hashed
+// matcher would otherwise capture.
+const stableFiles = [...requiredFiles, ...(manifest.icons || []).map(icon => icon.src)];
+for (const file of stableFiles) {
+  if (file === '.htaccess') {
+    continue;
+  }
+  if (!stableRules.some(rule => rule.pattern.test(path.basename(file)))) {
+    throw new Error(
+      `.htaccess never sets "${STABLE_CACHE_CONTROL}" for stable artifact ${file}.`,
+    );
+  }
+}
+
+// One representative per hashed artifact class: a lazy chunk and bundled media.
+for (const name of ['foo-ABCDEFGH.chunk.js', 'media-ABCDEFGH.webp']) {
+  if (!immutableRules.some(rule => rule.pattern.test(name))) {
+    throw new Error(
+      `.htaccess never sets "${IMMUTABLE_CACHE_CONTROL}" for hashed artifact ${name}.`,
+    );
+  }
+  // The inverse also matters: a broadened stable pattern (e.g. `.*`) would
+  // keep every check above green while serving hashed assets no-cache.
+  if (stableRules.some(rule => rule.pattern.test(name))) {
+    throw new Error(
+      `.htaccess matches hashed artifact ${name} with a stable "${STABLE_CACHE_CONTROL}" rule.`,
+    );
+  }
+}
+
+// Order is load-bearing: pwa-icon-192.png satisfies both matchers and the later
+// rule must win, so the hashed-immutable block has to come first.
+if (htaccessRules.indexOf(stableRules[stableRules.length - 1])
+  < htaccessRules.indexOf(immutableRules[0])) {
+  throw new Error(
+    '.htaccess must put the hashed-immutable FilesMatch block before the stable no-cache one.',
+  );
+}
+
 const serviceWorker = await readFile(path.join(dist, 'service-worker.js'), 'utf8');
 if (
   !serviceWorker.includes("request.method !== 'GET'")
