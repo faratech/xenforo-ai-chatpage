@@ -1031,6 +1031,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       conversations: conversationsRef.current,
       tombstones: tombstonesRef.current,
       pendingServerDeletions: pendingDeletionsRef.current,
+      trimmed: {},
     }, currentConversationIdRef.current);
 
     if (!result.persisted) {
@@ -1038,18 +1039,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       queueMicrotask(() => setStorageUnavailable(true));
     }
 
-    // Cap trims are local-only: tombstone them so another tab cannot merge
-    // them straight back from its own disk state, but never queue a server
-    // deletion — hitting the history limit is not the user asking to delete
-    // their account's copy.
-    if (result.trimmedIds.length) {
-      const trimmedAt = Date.now();
-      tombstonesRef.current = { ...tombstonesRef.current };
-      for (const id of result.trimmedIds) {
-        tombstonesRef.current[id] = trimmedAt;
-      }
-    }
-
+    // Cap trims are local-only: saveStore has already folded `trimmed`
+    // markers into the written envelope, so another tab cannot merge the
+    // excess straight back, and no server deletion is queued — hitting the
+    // history limit is not the user asking to delete their account's copy.
     if (result.evictedIds.length) {
       const evictedAt = Date.now();
       tombstonesRef.current = { ...tombstonesRef.current };
@@ -1164,29 +1157,22 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     return () => window.removeEventListener('wf-chat-save-before-update', saveBeforeUpdate);
   }, [persistScrollPositions, persistStore]);
 
-  const enforceCapAndQueueDeletion = useCallback((
+  const enforceCapWithLocalTrim = useCallback((
     next: ConversationMap,
     keepId: string,
-    options: { queueServerDeletions?: boolean } = {},
   ): ConversationMap => {
-    // Server deletion is an explicit user action. A passive cross-tab merge
-    // that happens to exceed the cap must tombstone locally only — queueing
-    // irreversible server cleanup from a storage event deleted account data
-    // no one asked to delete.
-    const queueServerDeletions = options.queueServerDeletions ?? true;
+    // Cap eviction is purely local. The trimmed ids stay in the account and
+    // carry no tombstone — only an explicit user delete may delete server
+    // data, and queueing irreversible cleanup from a passive overflow (new
+    // chat, a merge, an optimistic insert) deleted account data no one asked
+    // to delete. Cross-tab resurrection is prevented by the `trimmed`
+    // markers saveStore persists in the envelope itself.
     const capped = enforceConversationCap(next, keepId);
     const evicted = Object.keys(next).filter(id => !capped[id]);
     if (evicted.length) {
-      const evictedAt = Date.now();
-      tombstonesRef.current = { ...tombstonesRef.current };
-      if (queueServerDeletions) pendingDeletionsRef.current = { ...pendingDeletionsRef.current };
-      for (const id of evicted) {
-        tombstonesRef.current[id] = evictedAt;
-        if (queueServerDeletions) pendingDeletionsRef.current[id] = evictedAt;
-      }
-      queueMicrotask(() => setErrorMessage(queueServerDeletions
-        ? 'Your oldest conversation was removed from this browser and queued for secure server cleanup.'
-        : 'Your oldest conversation was removed from this browser to stay within the history limit.'));
+      queueMicrotask(() => setErrorMessage(
+        'Your oldest conversation was removed from this browser to stay within the history limit.',
+      ));
     }
     return capped;
   }, []);
@@ -1196,12 +1182,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       const existing = previous[conversationId];
       if (!existing) return previous;
       const changes = typeof update === 'function' ? update(existing) : update;
-      return enforceCapAndQueueDeletion({
+      return enforceCapWithLocalTrim({
         ...previous,
         [conversationId]: { ...existing, ...changes, updatedAt: Date.now() },
       }, conversationId);
     });
-  }, [enforceCapAndQueueDeletion]);
+  }, [enforceCapWithLocalTrim]);
 
   /** Draft edits persist without changing updatedAt, so typing does not reorder history. */
   const setConversationDraft = useCallback((conversationId: string, value: string) => {
@@ -1359,11 +1345,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           cloudUpdatedAt: saved.updated_at,
           ...(!preserveLocalMetadata ? savedMetadata(saved) : {}),
         };
-      const next = enforceCapAndQueueDeletion({ ...previous, [saved.id]: winner }, currentConversationIdRef.current);
+      const next = enforceCapWithLocalTrim({ ...previous, [saved.id]: winner }, currentConversationIdRef.current);
       conversationsRef.current = next;
       return next;
     });
-  }, [enforceCapAndQueueDeletion]);
+  }, [enforceCapWithLocalTrim]);
 
   const syncMetadataAfterSave = useCallback(async (
     local: Conversation,
@@ -1617,6 +1603,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
     setActiveRequestId(null);
     setStreamingState(null);
+    setActivities([]);
     AudioService.stop();
     setSpeakingMessageId(null);
   }, [cancelStreamingFrame, updateConversationById]);
@@ -1657,7 +1644,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     const id = generateConversationId();
     const conversation = createNewConversation(id, welcomeMessage);
     setConversations(previous => {
-      const next = enforceCapAndQueueDeletion({ ...previous, [id]: conversation }, id);
+      const next = enforceCapWithLocalTrim({ ...previous, [id]: conversation }, id);
       conversationsRef.current = next;
       return next;
     });
@@ -1670,7 +1657,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     setShowExamples(true);
     setAutoFollow(true);
     writeConversationUrl(id, 'push');
-  }, [enforceCapAndQueueDeletion, welcomeMessage]);
+  }, [enforceCapWithLocalTrim, welcomeMessage]);
 
   const handleNewConversation = useCallback(() => {
     stopListening();
@@ -2174,6 +2161,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       conversations: nextConversations,
       tombstones,
       pendingServerDeletions: {},
+      trimmed: {},
     }, conversationId);
     try {
       localStorage.removeItem(keys.legacyStoreV3);
@@ -2351,7 +2339,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             ? selectedBeforeRefresh
             : Object.keys(merged)[0];
         if (!selectedId) throw new Error('Cloud history returned no selectable conversation');
-        merged = enforceCapAndQueueDeletion(merged, selectedId);
+        merged = enforceCapWithLocalTrim(merged, selectedId);
         conversationsRef.current = merged;
         setConversations(merged);
         if (applyInitialSelection || selectedId !== selectedBeforeRefresh) {
@@ -2412,7 +2400,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       controller.abort();
       if (cloudBootstrapAbortRef.current === controller) cloudBootstrapAbortRef.current = null;
     };
-  }, [cloudRefreshGeneration, cloudSyncPaused, enforceCapAndQueueDeletion, initialChatState.createdFallback, initialChatState.currentId, isGuest, removeRemotelyDeletedConversation, reportCloudFailure, reportCloudRecovery, syncConversationToCloud, userId]);
+  }, [cloudRefreshGeneration, cloudSyncPaused, enforceCapWithLocalTrim, initialChatState.createdFallback, initialChatState.currentId, isGuest, removeRemotelyDeletedConversation, reportCloudFailure, reportCloudRecovery, syncConversationToCloud, userId]);
 
   const cloudDirtySignature = useMemo(() => Object.values(conversations)
     .filter(conversation => !isGuest
@@ -2519,12 +2507,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           conversations: previous,
           tombstones: tombstonesRef.current,
           pendingServerDeletions: pendingDeletionsRef.current,
+          trimmed: {},
         }, remote);
         tombstonesRef.current = merged.tombstones;
         pendingDeletionsRef.current = merged.pendingServerDeletions;
-        return enforceCapAndQueueDeletion(merged.conversations, currentConversationIdRef.current, {
-          queueServerDeletions: false,
-        });
+        return enforceCapWithLocalTrim(merged.conversations, currentConversationIdRef.current);
       });
       if (currentTombstoned) {
         if (activeTurnRef.current?.conversationId === currentConversationIdRef.current) {
@@ -2535,7 +2522,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
-  }, [abortActiveTurn, createAndSelectConversation, enforceCapAndQueueDeletion, userId]);
+  }, [abortActiveTurn, createAndSelectConversation, enforceCapWithLocalTrim, userId]);
 
   useEffect(() => {
     if (isGuest) return;
@@ -2783,7 +2770,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     const isFirstQuestion = !baseMessages.some(message => message.role === 'user');
     setConversations(previous => {
       const conversation = previous[conversationId] || existingConversation;
-      return enforceCapAndQueueDeletion({
+      return enforceCapWithLocalTrim({
         ...previous,
         [conversationId]: {
           ...conversation,
@@ -2791,8 +2778,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             ? `${content.slice(0, 50)}${content.length > 50 ? '…' : ''}`
             : conversation.title,
           messages: [...baseMessages, userMessage],
-          draft: '',
-          draftUpdatedAt: Date.now(),
+          // Only a send consumes the composer; edit/regenerate/retry must
+          // keep whatever draft is still sitting in the input box.
+          ...(params.kind === 'send' ? { draft: '', draftUpdatedAt: Date.now() } : {}),
           updatedAt: Date.now(),
         },
       }, conversationId);
@@ -3064,7 +3052,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   }, [
     clearActiveTurn,
     clearSentAttachments,
-    enforceCapAndQueueDeletion,
+    enforceCapWithLocalTrim,
     getErrorText,
     handleUsageCommand,
     requestClearConversation,
@@ -3178,7 +3166,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       needsServerResync: true,
     };
     setConversations(previous => {
-      const next = enforceCapAndQueueDeletion({ ...previous, [id]: branched }, id);
+      const next = enforceCapWithLocalTrim({ ...previous, [id]: branched }, id);
       conversationsRef.current = next;
       return next;
     });
@@ -3198,7 +3186,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       outcome: 'branch',
       value: branched.messages.length,
     });
-  }, [branchGuard, enforceCapAndQueueDeletion]);
+  }, [branchGuard, enforceCapWithLocalTrim]);
 
   const handleEditMessage = useCallback((id: string, newContent: string) => {
     if (!isOnlineRef.current) {
@@ -3788,6 +3776,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         },
         tombstones: tombstonesRef.current,
         pendingServerDeletions: pendingDeletionsRef.current,
+        trimmed: {},
       }, currentConversationIdRef.current);
     }
     cleanupTurnstileWidget();

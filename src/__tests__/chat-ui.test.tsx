@@ -575,6 +575,50 @@ describe('ChatWindow state ownership', () => {
     expect(apiMocks.deleteSavedConversation).not.toHaveBeenCalled();
   });
 
+  it('keeps cap eviction local when New chat overflows the history limit', async () => {
+    const history = Object.fromEntries(Array.from({ length: 50 }, (_, index) => {
+      const id = `conv_hist_${String(index).padStart(2, '0')}`;
+      return [id, {
+        id,
+        title: `History ${index}`,
+        createdAt: 1_000 + index,
+        updatedAt: 2_000 + index,
+        messages: [{ id: `hist_ai_${index}`, role: 'ai', rawContent: `History answer ${index}`, timestamp: 2_000 + index }],
+      }];
+    }));
+    window.localStorage.setItem('chat_store:v4:guest_newchat_cap', JSON.stringify({
+      version: 4,
+      conversations: history,
+      tombstones: {},
+      pendingServerDeletions: {},
+      trimmed: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_newchat_cap', 'conv_hist_49');
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_newchat_cap" />);
+    await screen.findByText('History answer 49');
+    fireEvent.click(screen.getAllByRole('button', { name: 'New chat' })[0]);
+
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_newchat_cap') ?? '{}') as {
+        conversations: Record<string, unknown>;
+        tombstones: Record<string, number>;
+        pendingServerDeletions: Record<string, number>;
+        trimmed: Record<string, number>;
+      };
+      expect(Object.keys(stored.conversations)).toHaveLength(50);
+      expect(stored.conversations.conv_hist_00).toBeUndefined();
+      // The eviction is guarded by a trimmed marker, never a tombstone: the
+      // evicted chat still exists in the account.
+      expect(stored.trimmed.conv_hist_00).toEqual(expect.any(Number));
+      expect(stored.tombstones).toEqual({});
+      expect(stored.pendingServerDeletions).toEqual({});
+    });
+    expect(apiMocks.deleteConversation).not.toHaveBeenCalled();
+    expect(apiMocks.deleteSavedConversation).not.toHaveBeenCalled();
+    expect(await screen.findByText(/removed from this browser to stay within the history limit/)).toBeInTheDocument();
+  });
+
   it('uses capability-led starters and records only the selected action id', async () => {
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_starters" />);
 
@@ -2954,6 +2998,43 @@ describe('composer and message integrity', () => {
 
     expect(screen.getByText('Searching WindowsForum')).toBeInTheDocument();
     expect(screen.getByText('Preparing the answer…')).toBeInTheDocument();
+  });
+
+  /** Stopping used to leave the dead turn's step list in state, so the next
+   * turn rendered the previous turn's steps and duration until its own first
+   * activity event arrived. */
+  it('does not carry the stopped turn\'s steps into the next turn', async () => {
+    let emitActivity: ((activities: { id: string; label: string; state: 'active' | 'done' }[]) => void) | undefined;
+    apiMocks.sendMessage.mockImplementation((_message: string, options: {
+      onActivity?: (activities: { id: string; label: string; state: 'active' | 'done' }[]) => void;
+    }) => new Promise(() => {
+      emitActivity = options.onActivity;
+    }));
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'First question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByText('Thinking…');
+
+    await act(async () => {
+      emitActivity?.([
+        { id: 'a', label: 'Searching WindowsForum', state: 'done' },
+        { id: 'b', label: 'Reading a thread', state: 'active' },
+      ]);
+    });
+    expect(screen.getByText('Searching WindowsForum')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }));
+    await waitFor(() => expect(screen.queryByText('Searching WindowsForum')).not.toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Second question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    // The new turn starts from an empty step list: the generic wait, not the
+    // stopped turn's trail.
+    expect(await screen.findByText('Thinking…')).toBeInTheDocument();
+    expect(screen.queryByText('Searching WindowsForum')).not.toBeInTheDocument();
+    expect(screen.queryByText('Reading a thread')).not.toBeInTheDocument();
   });
 
   it('collapses the finished steps above the answer once it starts streaming', async () => {

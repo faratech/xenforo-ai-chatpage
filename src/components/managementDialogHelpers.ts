@@ -33,7 +33,11 @@ export const downloadJSONArtifact = (
   targetDocument.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(objectUrl);
+  // The URL used to be revoked synchronously after click(); engines that
+  // start the save asynchronously (Safari defers until the user confirms)
+  // could then resolve a dead URL and produce an empty download. A deferred
+  // revoke leaves the blob alive long enough for the save to read it.
+  targetDocument.defaultView?.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
 };
 
 export const canonicalConversationShareUrl = (

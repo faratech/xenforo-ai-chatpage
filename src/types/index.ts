@@ -113,6 +113,12 @@ export interface ChatStoreV4 {
   tombstones: Record<string, number>;
   /** conversationId → latest queued timestamp (ms) for server deletions not yet confirmed. */
   pendingServerDeletions: Record<string, number>;
+  /**
+   * conversationId → cap-trim timestamp (ms). Resurrection guard only: a
+   * trimmed conversation still exists in the account, so this map must never
+   * be read as deletion intent — no server deletes, no hydration exclusion.
+   */
+  trimmed: Record<string, number>;
 }
 
 /**

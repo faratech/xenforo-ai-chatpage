@@ -294,6 +294,7 @@ export const parseStore = (raw: string | null): ChatStoreV4 | null => {
       conversations,
       tombstones: parseTimestampMap(parsed.tombstones),
       pendingServerDeletions: parseTimestampMap(parsed.pendingServerDeletions),
+      trimmed: parseTimestampMap(parsed.trimmed),
     };
   } catch {
     return null;
@@ -330,6 +331,7 @@ const upgradeV3Store = (store: ChatStoreV3): ChatStoreV4 => ({
   conversations: store.conversations,
   tombstones: store.tombstones,
   pendingServerDeletions: store.pendingServerDeletions,
+  trimmed: {},
 });
 
 export const emptyStore = (): ChatStoreV4 => ({
@@ -337,13 +339,18 @@ export const emptyStore = (): ChatStoreV4 => ({
   conversations: {},
   tombstones: {},
   pendingServerDeletions: {},
+  trimmed: {},
 });
 
-/** Removes every conversation that has a tombstone. Tombstones always win. */
+/**
+ * Removes every conversation that has a tombstone or a cap-trim marker. Both
+ * always win over an older conversation copy, but only a tombstone means
+ * deletion — a trimmed conversation still exists in the account.
+ */
 export const applyTombstones = (store: ChatStoreV4): ChatStoreV4 => {
   const conversations: ConversationMap = {};
   for (const [id, conversation] of Object.entries(store.conversations)) {
-    if (!(id in store.tombstones)) conversations[id] = conversation;
+    if (!(id in store.tombstones) && !(id in store.trimmed)) conversations[id] = conversation;
   }
   return { ...store, conversations };
 };
@@ -419,6 +426,10 @@ export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV
   for (const [id, timestamp] of Object.entries(remote.pendingServerDeletions)) {
     pendingServerDeletions[id] = Math.max(pendingServerDeletions[id] ?? 0, timestamp);
   }
+  const trimmed: Record<string, number> = { ...local.trimmed };
+  for (const [id, timestamp] of Object.entries(remote.trimmed)) {
+    trimmed[id] = Math.max(trimmed[id] ?? 0, timestamp);
+  }
   // Confirmation advances the tombstone beyond the queued-at timestamp. That
   // lets an acknowledgement clear an old pending marker without allowing a
   // stale tab to re-add it during the union above. Equal timestamps still mean
@@ -426,7 +437,7 @@ export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV
   for (const [id, timestamp] of Object.entries(pendingServerDeletions)) {
     if ((tombstones[id] ?? 0) > timestamp) delete pendingServerDeletions[id];
   }
-  return applyTombstones({ version: 4, conversations, tombstones, pendingServerDeletions });
+  return applyTombstones({ version: 4, conversations, tombstones, pendingServerDeletions, trimmed });
 };
 
 const sortedByKey = <T>(map: Record<string, T>): Record<string, T> => {
@@ -447,6 +458,7 @@ export const serializeStore = (store: ChatStoreV4): string => JSON.stringify({
   conversations: sortedByKey(store.conversations),
   tombstones: sortedByKey(store.tombstones),
   pendingServerDeletions: sortedByKey(store.pendingServerDeletions),
+  trimmed: sortedByKey(store.trimmed),
 });
 
 // DOMException does not extend Error in every runtime; match on shape.
@@ -535,6 +547,7 @@ export const loadStore = (userId: string): LoadResult => {
           reduced.conversations = enforceConversationCap(store.conversations, currentId);
           reduced.tombstones = store.tombstones;
           reduced.pendingServerDeletions = store.pendingServerDeletions;
+          reduced.trimmed = store.trimmed;
           localStorage.setItem(keys.store, serializeStore(reduced));
           store = reduced;
           persisted = true;
@@ -562,9 +575,10 @@ export interface SaveResult {
   /** Conversation ids evicted under quota pressure, oldest first. */
   evictedIds: string[];
   /**
-   * Conversation ids dropped by cap enforcement (not quota eviction). Callers
-   * tombstone these in the same commit; leaving them merely absent let another
-   * tab merge them straight back from its own disk state.
+   * Conversation ids dropped by cap enforcement (not quota eviction). Their
+   * `trimmed` markers are folded into the written envelope itself — these are
+   * resurrection guards, never deletion intent, so callers must not mirror
+   * them into the tombstone map.
    */
   trimmedIds: string[];
   /** The store as actually persisted (post cap, GC, and eviction). */
@@ -573,10 +587,12 @@ export interface SaveResult {
 
 /**
  * Persists the store: merges the latest on-disk envelope before every write,
- * enforces the cap exactly, and on quota pressure evicts unpinned conversations
- * before pinned ones (oldest first within each group). Deletion markers are not
- * aged out locally: an offline tab can return long after a fixed TTL, and an
- * unconfirmed server deletion must still defeat that stale transcript.
+ * enforces the cap exactly (marking what it trims in `trimmed`), and on quota
+ * pressure evicts unpinned conversations before pinned ones (oldest first
+ * within each group). Deletion markers are not aged out locally: an offline
+ * tab can return
+ * long after a fixed TTL, and an unconfirmed server deletion must still defeat
+ * that stale transcript.
  */
 export const saveStore = (
   userId: string,
@@ -599,11 +615,26 @@ export const saveStore = (
     if (Object.keys(kept).length === Object.keys(before).length) return [];
     return Object.keys(before).filter(id => !(id in kept));
   };
+  /**
+   * Folds cap-trim markers into the envelope about to be written. The excess
+   * can come from the on-disk merge or from this tab's own stale map, so no
+   * later in-memory save is guaranteed to persist them — leaving them merely
+   * absent let trimmed conversations resurrect on reload. Markers live in the
+   * `trimmed` map, never in `tombstones`: a trimmed conversation still exists
+   * in the account, and only a tombstone may read as deletion intent.
+   */
+  const markTrimmed = (target: ChatStoreV4, ids: string[]): ChatStoreV4 => {
+    if (!ids.length) return target;
+    const trimmedAt = Date.now();
+    const trimmed = { ...target.trimmed };
+    for (const id of ids) trimmed[id] = trimmedAt;
+    return { ...target, trimmed };
+  };
   let trimmedIds = collectTrimmed(prepared.conversations);
-  prepared = {
+  prepared = markTrimmed({
     ...prepared,
     conversations: enforceConversationCap(prepared.conversations, currentId),
-  };
+  }, trimmedIds);
 
   const evictedIds: string[] = [];
   for (;;) {
@@ -620,10 +651,10 @@ export const saveStore = (
           prepared = { ...prepared, conversations };
         }
         trimmedIds = [...new Set([...trimmedIds, ...collectTrimmed(prepared.conversations)])];
-        prepared = {
+        prepared = markTrimmed({
           ...prepared,
           conversations: enforceConversationCap(prepared.conversations, currentId),
-        };
+        }, trimmedIds);
       }
       const serialized = serializeStore(prepared);
       // No-op guard: skip the write (and the storage event it would fire in

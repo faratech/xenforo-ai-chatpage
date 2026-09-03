@@ -98,6 +98,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   cleanup();
 });
@@ -108,6 +109,9 @@ describe('AccountDataDialog', () => {
     const onExportDownloaded = vi.fn();
     renderDialog({ onExportDownloaded });
 
+    // shouldAdvanceTime keeps the dialog's async steps (waitFor/findByRole)
+    // running on real time while the deferred revoke still lands on the clock.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     fireEvent.click(screen.getByRole('button', { name: 'Download JSON' }));
 
     await waitFor(() => expect(apiMocks.exportSavedChatData).toHaveBeenCalledWith({
@@ -115,6 +119,11 @@ describe('AccountDataDialog', () => {
     }));
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(anchorClick).toHaveBeenCalledTimes(1);
+    // The revoke is deferred: revoking synchronously after click() races
+    // engines that start the save asynchronously (Safari defers until the
+    // user confirms) and can produce an empty download.
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(10_000);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:account-export');
     expect(onExportDownloaded).toHaveBeenCalledWith(generatedAt);
     expect(await screen.findByRole('status')).toHaveTextContent('export was downloaded');

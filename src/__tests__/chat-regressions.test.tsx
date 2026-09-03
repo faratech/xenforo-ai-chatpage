@@ -474,6 +474,7 @@ describe('cross-tab deletion propagation', () => {
       conversations: {},
       tombstones: { [conversationId]: Date.now() },
       pendingServerDeletions: {},
+      trimmed: {},
     };
     act(() => {
       window.dispatchEvent(new StorageEvent('storage', {

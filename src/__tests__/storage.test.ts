@@ -642,32 +642,68 @@ describe('storage data-loss guards', () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it('reports cap-trimmed ids from saveStore and honors their tombstones', () => {
+  it('reports cap-trimmed ids from saveStore and persists their trimmed markers', () => {
+    const keys = storageKeys('42');
     const conversations: Record<string, Conversation> = {};
     for (let index = 0; index < 52; index += 1) {
       const id = `conv_${String(index).padStart(2, '0')}`;
       conversations[id] = conversation(id, 1_000 + index);
     }
+    const savedAt = Date.now();
     const result = saveStore('42', { ...emptyStore(), conversations }, 'conv_51');
 
     expect(result.persisted).toBe(true);
     expect(result.trimmedIds.length).toBe(2);
     expect(Object.keys(result.store.conversations)).toHaveLength(50);
 
-    // Tombstoning the trimmed ids (as persistStore does) must survive a merge
-    // against a disk state — or another tab — that still holds them.
-    const tombstoned = {
+    // The written envelope itself must carry the trim markers: the excess can
+    // come from the on-disk merge or from this tab's own stale map, so no
+    // later in-memory save is guaranteed to persist them. They land in
+    // `trimmed` — a trimmed conversation still exists in the account, so the
+    // tombstone map (deletion intent) must stay empty.
+    const written = parseStore(storage.getItem(keys.store));
+    expect(Object.keys(written?.trimmed ?? {}).sort()).toEqual(['conv_00', 'conv_01']);
+    expect(written?.tombstones).toEqual({});
+    for (const id of result.trimmedIds) {
+      expect(written?.trimmed[id]).toBeGreaterThanOrEqual(savedAt);
+      expect(written?.conversations[id]).toBeUndefined();
+    }
+
+    // The trimmed markers must survive a merge against a disk state — or
+    // another tab — that still holds the excess conversations.
+    const trimmed = {
       ...emptyStore(),
       conversations: { conv_current: conversation('conv_current', Date.now()) },
-      tombstones: Object.fromEntries(result.trimmedIds.map(id => [id, Date.now()])),
+      trimmed: Object.fromEntries(result.trimmedIds.map(id => [id, Date.now()])),
     };
     const resurrected = {
       ...emptyStore(),
       conversations: Object.fromEntries(result.trimmedIds.map(id => [id, conversation(id, 999)])),
     };
-    const merged = mergeStores(tombstoned, resurrected);
+    const merged = mergeStores(trimmed, resurrected);
     for (const id of result.trimmedIds) {
       expect(merged.conversations[id]).toBeUndefined();
     }
+  });
+
+  it('persists trim markers so a tab that never trimmed cannot merge the excess back', () => {
+    const keys = storageKeys('42');
+    const conversations: Record<string, Conversation> = {};
+    for (let index = 0; index < 52; index += 1) {
+      const id = `conv_${String(index).padStart(2, '0')}`;
+      conversations[id] = conversation(id, 1_000 + index);
+    }
+    const result = saveStore('42', { ...emptyStore(), conversations }, 'conv_51');
+    expect(result.trimmedIds).toEqual(['conv_00', 'conv_01']);
+
+    // A second tab holding the same untrimmed map re-reads disk before its own
+    // write, so the persisted tombstones — not its stale excess — decide.
+    const stale = saveStore('42', { ...emptyStore(), conversations }, 'conv_51');
+    expect(stale.trimmedIds).toEqual([]);
+
+    const persisted = parseStore(storage.getItem(keys.store));
+    expect(Object.keys(persisted?.conversations ?? {})).toHaveLength(50);
+    expect(persisted?.conversations.conv_00).toBeUndefined();
+    expect(persisted?.conversations.conv_01).toBeUndefined();
   });
 });
