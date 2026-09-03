@@ -2,18 +2,34 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.19', '24']
+        # '20' floats to the newest Node 20.x — the pinned '20.19' leg failed
+        # with "TypeError: object.stream is not a function" (older bundled
+        # undici). If '20' still fails, the code needs >=22 and the matrix
+        # should collapse to '24' with engines.node bumped.
+        node-version: ['20', '24']
+    env:
+      # Production-build values (vite.config.ts requires them for `build`;
+      # mirrors .env.example). VITE_API_BASE stays unset = same-origin.
+      VITE_DOMAIN: https://windowsforum.com
+      VITE_TEST_DOMAIN: https://test.windowsforum.com
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
