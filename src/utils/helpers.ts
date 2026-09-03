@@ -563,6 +563,41 @@ export const sanitizeAndParse = (
   return sanitized;
 };
 
+const ENHANCED_HTML_TAGS = [...ALLOWED_MARKDOWN_TAGS, 'button', 'div'];
+const ENHANCED_HTML_ATTRIBUTES = [
+  ...ALLOWED_MARKDOWN_ATTRIBUTES,
+  'type',
+  'role',
+  'tabindex',
+  'aria-label',
+  'aria-pressed',
+  'data-code-action',
+  'data-source-index',
+];
+
+/**
+ * Second pass over POST-ENHANCEMENT html: sanitizeAndParse output that
+ * Message.tsx has re-serialized through a live <template> while adding the
+ * app's code-tool and citation controls. sanitizeAndParse has already
+ * stripped everything hostile, so this pass exists to keep a future
+ * enhancement regression — or clobbering during re-serialization — from
+ * reaching dangerouslySetInnerHTML. It allows exactly the app-generated
+ * markup on top of the markdown set (div/button plus the control
+ * attributes). ALLOWED_ATTR takes precedence over ALLOW_DATA_ATTR and
+ * ALLOW_ARIA_ATTR in DOMPurify, so the data-* and aria-* entries survive
+ * with both flags still false.
+ */
+export const sanitizeEnhancedHtml = (html: string): string => (html
+  ? DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ENHANCED_HTML_TAGS,
+    ALLOWED_ATTR: ENHANCED_HTML_ATTRIBUTES,
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    FORBID_ATTR: ['style'],
+    FORBID_TAGS: ['form', 'iframe', 'input', 'object', 'style', 'svg'],
+  })
+  : html);
+
 /** An opening or closing code fence, allowing CommonMark's 3-space indent. */
 const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
 

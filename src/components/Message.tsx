@@ -34,6 +34,7 @@ import {
   canonicalHttpUrlKey,
   parseHttpUrl,
   sanitizeAndParse,
+  sanitizeEnhancedHtml,
   splitStreamingMarkdown,
 } from '../utils/helpers';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
@@ -492,10 +493,14 @@ export const Message = memo<MessageComponentProps>(({ msg,
       // sanitizeAndParse): user text keeps plain links, no [n] markers, and no
       // Sources footer to fold.
       const sanitized = sanitizeAndParse(msg.rawContent, { extractCitations: !isUser });
-      return prepareAnswerContent(
+      const prepared = prepareAnswerContent(
         enhanceRichContent(sanitized, !isUser),
         msg.annotations,
       );
+      // The enhancement pipeline re-serialized sanitized markup through a live
+      // <template> and added app controls; sanitize once more so nothing that
+      // slipped in during that round trip reaches dangerouslySetInnerHTML.
+      return { html: sanitizeEnhancedHtml(prepared.html), citations: prepared.citations };
     },
     [msg.rawContent, msg.annotations, isStreaming, isUser]
   );
@@ -543,7 +548,9 @@ export const Message = memo<MessageComponentProps>(({ msg,
   const streamingClosed = streamingSplit?.closed ?? '';
   const renderedStreamingPrefix = useMemo(
     () => (streamingClosed
-      ? prepareAnswerContent(enhanceRichContent(sanitizeAndParse(streamingClosed), false)).html
+      ? sanitizeEnhancedHtml(
+        prepareAnswerContent(enhanceRichContent(sanitizeAndParse(streamingClosed), false)).html,
+      )
       : ''),
     [streamingClosed]
   );

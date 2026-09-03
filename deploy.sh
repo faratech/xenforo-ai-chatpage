@@ -684,10 +684,15 @@ verify_private_release_boundary() {
     || { fail "Private release metadata is missing"; return 1; }
   [[ -d "$private/xenforo-templates" ]] \
     || { fail "Private XenForo template bundle is missing"; return 1; }
-  grep -Fq 'RELEASE-INVENTORY\.sha256' "$release/.htaccess" \
-    || { fail "Public .htaccess does not deny legacy release inventories"; return 1; }
-  grep -Fq 'xenforo-templates' "$release/.htaccess" \
-    || { fail "Public .htaccess does not deny legacy template bundles"; return 1; }
+  # Grep a copy with whole <IfModule> blocks deleted, not just the guard lines:
+  # a deny rule parked inside a guard disappears with the module and would
+  # otherwise still match here while silently protecting nothing.
+  local htaccess_rules
+  htaccess_rules="$(sed '/^[[:space:]]*<[Ii]f[M]odule[^>]*>$/,/^[[:space:]]*<\/[Ii]f[M]odule[^>]*>$/d' "$release/.htaccess")"
+  grep -Fq 'RELEASE-INVENTORY\.sha256' <<<"$htaccess_rules" \
+    || { fail "Public .htaccess does not deny legacy release inventories outside any <IfModule> guard"; return 1; }
+  grep -Fq 'xenforo-templates' <<<"$htaccess_rules" \
+    || { fail "Public .htaccess does not deny legacy template bundles outside any <IfModule> guard"; return 1; }
 }
 
 verify_rollback_release() {
@@ -842,10 +847,13 @@ purge_chat_surfaces() {
 
   response_file="$(mktemp)" || return 1
   TEMP_FILES+=("$response_file")
-  curl --fail-with-body --silent --show-error \
+  # The token rides in on stdin (--header @-) so it never lands in
+  # /proc/*/cmdline, where any local account could read it for the life of the
+  # request.
+  printf 'Authorization: Bearer %s\n' "$token" | curl --fail-with-body --silent --show-error \
     --request POST \
     "https://api.cloudflare.com/client/v4/zones/$zone/purge_cache" \
-    --header "Authorization: Bearer $token" \
+    --header @- \
     --header 'Content-Type: application/json' \
     --data '{"prefixes":["windowsforum.com/chatpage","windowsforum.com/pages/ai"]}' \
     --output "$response_file" \
@@ -1498,8 +1506,11 @@ test ! -e "$release/xenforo-templates"
 test -f "$private/$inv"
 test -f "$private/$metadata"
 test -f "$private/xenforo-templates/wf5/_page_node.313"
-grep -Fq 'RELEASE-INVENTORY\.sha256' "$release/.htaccess"
-grep -Fq 'xenforo-templates' "$release/.htaccess"
+# Same contract as verify_private_release_boundary: the deny rules must sit
+# outside any <IfModule> guard, so grep a copy with whole blocks deleted.
+htaccess_rules="$(sed '/^[[:space:]]*<[Ii]f[M]odule[^>]*>$/,/^[[:space:]]*<\/[Ii]f[M]odule[^>]*>$/d' "$release/.htaccess")"
+grep -Fq 'RELEASE-INVENTORY\.sha256' <<<"$htaccess_rules"
+grep -Fq 'xenforo-templates' <<<"$htaccess_rules"
 expected=0
 declare -A seen=()
 while IFS=' ' read -r hash virtual; do

