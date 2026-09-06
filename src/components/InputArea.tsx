@@ -118,7 +118,7 @@ export const InputArea = memo<InputAreaProps>(({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about Windows, drivers, updates…"
+            placeholder="Ask about Windows, drivers, updates, or an authorized managed task…"
             multiline
             maxRows={6}
             variant="standard"

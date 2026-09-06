@@ -784,8 +784,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const theme = useTheme();
   const isGuest = userId.startsWith('guest_');
   const welcomeMessage = useMemo(() => isGuest
-    ? 'Welcome to WindowsForum.com! Ask me anything about Windows or technology. For the best results, [register](/register) or [log in](/login).'
-    : 'Welcome to WindowsForum.com! Ask me anything about Windows or technology.',
+    ? 'Welcome to WindowsForum.com! Ask me anything about Windows or technology. Authorized managed-Windows tasks may be available. For the best results, [register](/register) or [log in](/login).'
+    : 'Welcome to WindowsForum.com! Ask me anything about Windows or technology. Authorized managed-Windows tasks may be available.',
   [isGuest]);
 
   const initialChatState = useMemo(() => {

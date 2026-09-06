@@ -125,6 +125,8 @@ const ACTIVITY_LABELS: Record<string, string> = {
   generateImage: 'Creating an image',
   processAttachments: 'Reading attachments',
   getYouTubeTranscript: 'Reading a video transcript',
+  windows_screenshot: 'Capturing a verified Windows screen',
+  windows_computer_task: 'Working in managed Windows',
 };
 
 const activityLabel = (key: string | undefined): string | null => {
