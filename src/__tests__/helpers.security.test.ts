@@ -567,3 +567,14 @@ describe('sanitizeEnhancedHtml second pass', () => {
     expect(rendered.querySelector('button[data-code-action="copy"]')).not.toBeNull();
   });
 });
+
+
+describe('managed Windows task screenshots', () => {
+  it('renders the task artifact while rejecting lookalike hosts and other folders', () => {
+    const url = 'https://data.windowsforum.com/images/ai/w365-tasks/42ce778a5ec57de785e51a16176d3a4f-exact.png';
+    const container = document.createElement('div');
+    container.innerHTML = sanitizeAndParse(`![Desktop](${url})\n\n![Bad](${url.replace('data.windowsforum.com', 'windowsforum.com.evil.example')})\n\n![Other](${url.replace('w365-tasks', 'private')})`);
+    expect(container.querySelectorAll('img')).toHaveLength(1);
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(url);
+  });
+});

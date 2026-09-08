@@ -61,7 +61,7 @@ const CITATION_LABEL_PATTERN = /(?:^|\b)(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+
  */
 const CITATION_LABEL_MAX_LENGTH = 256;
 const BARE_CITATION_PATTERN = /^\(((?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+(?:com|org|net|io|gov|edu)(?:\/[^\s<>()]*)?)\)/i;
-const AI_IMAGE_PATH_PATTERN = /^\/images\/ai\/(?:answers|walkthroughs|screenshots)\/.+\.(?:avif|gif|jpe?g|png|webp)$/i;
+const AI_IMAGE_PATH_PATTERN = /^\/images\/ai\/(?:answers|walkthroughs|screenshots|w365-tasks)\/.+\.(?:avif|gif|jpe?g|png|webp)$/i;
 // Approved image host: the windowsforum.com apex and any of its subdomains
 // (data./test./cdn./…) over HTTPS. The leading dot in the suffix check is
 // what rejects look-alikes like notwindowsforum.com and

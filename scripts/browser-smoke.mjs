@@ -68,6 +68,17 @@ const streamAnswer = async (request, response, state, { slow = false } = {}) => 
     'content-type': 'text/event-stream; charset=utf-8',
     'x-accel-buffering': 'no',
   });
+  if (state.mode === 'desktop-screenshot') {
+    const emit = event => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const item = { id: 'desktop_1', type: 'function_call', name: 'windows_computer_task' };
+    emit({ type: 'response.output_item.added', item });
+    emit({ type: 'response.output_item.done', item });
+    emit({ type: 'response.completed' });
+    emit({ type: 'response.output_text.delta', delta: 'Desktop captured.\n\n![Desktop](https://data.windowsforum.com/images/ai/w365-tasks/browser-exact.png)' });
+    emit({ type: 'chat.stream.completed' });
+    response.end();
+    return;
+  }
   response.write('data: {"type":"response.output_text.delta","delta":"Browser smoke"}\n\n');
 
   if (slow) {
@@ -282,6 +293,28 @@ try {
   assert.equal(manifest.id, '/pages/ai/');
   assert.equal(manifest.start_url, '/pages/ai/');
   assert.equal(manifest.scope, '/pages/ai/');
+
+  {
+    const { context, page } = await createPage('desktop-screenshot', 'desktop-screenshot');
+    await page.route('https://data.windowsforum.com/images/ai/w365-tasks/browser-exact.png', route => route.fulfill({
+      contentType: 'image/png',
+      body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64'),
+    }));
+    await page.goto(`${origin}/pages/ai/`);
+    await waitForComposer(page);
+    await page.getByRole('textbox', { name: 'Type your message' }).fill('Capture the desktop');
+    await page.getByRole('textbox', { name: 'Type your message' }).press('Enter');
+    const screenshot = page.locator('img[src*="/w365-tasks/"]');
+    await screenshot.waitFor();
+    await page.waitForFunction(() => {
+      const image = document.querySelector('img[src*="/w365-tasks/"]');
+      return image?.complete && image.naturalWidth > 0;
+    });
+    await page.reload();
+    await waitForComposer(page);
+    await page.locator('img[src*="/w365-tasks/"]').waitFor();
+    await context.close();
+  }
 
   {
     const { context, page } = await createPage('pwa-canonical', 'completion');
@@ -620,7 +653,7 @@ try {
     await context.close();
   }
 
-  process.stdout.write('browser smoke: PWA, completion, cold mobile, abort, Turnstile, lazy recovery, chunk failure, manifest, and axe checks passed\n');
+  process.stdout.write('browser smoke: desktop screenshot/reload, PWA, completion, cold mobile, abort, Turnstile, lazy recovery, chunk failure, manifest, and axe checks passed\n');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

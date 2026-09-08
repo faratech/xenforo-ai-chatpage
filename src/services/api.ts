@@ -73,7 +73,7 @@ const apiBase = ENV.getApiBase();
 /** Bootstrap/JSON endpoints must answer quickly or the UI stalls. */
 export const JSON_REQUEST_TIMEOUT_MS = 15_000;
 /** The chat backend may queue behind tool calls before the first byte. */
-export const CHAT_FIRST_BYTE_TIMEOUT_MS = 130_000;
+export const CHAT_FIRST_BYTE_TIMEOUT_MS = 180_000;
 /** Between-chunk inactivity limit once the stream has started. */
 export const READ_INACTIVITY_TIMEOUT_MS = 45_000;
 /** TTS is the one call that used to run unbounded; a stalled worker muted every later reply. */
@@ -948,6 +948,7 @@ export class ChatAPI {
           break;
 
         case 'chat.stream.completed':
+          activities.forEach(activity => completeActivity(activity.id));
           terminalReceived = true;
           break;
 
@@ -977,6 +978,9 @@ export class ChatAPI {
           break;
 
         case 'response.output_item.done': {
+          // Function arguments are complete here; local execution starts only
+          // after this event. Keep the step active until application completion.
+          if (parsedData.item?.type === 'function_call') break;
           const id = parsedData.item?.id
             ?? `item_${typeof parsedData.output_index === 'number' ? parsedData.output_index : -1}`;
           completeActivity(id);
@@ -1019,7 +1023,7 @@ export class ChatAPI {
           callback();
         };
         const handleAbort = () => finish(() => reject(makeAbortError()));
-        // Before the first byte the 130s request deadline governs; after
+        // Before the first byte the 180s request deadline governs; after
         // it, the between-chunk inactivity limit takes over.
         const timeoutId = firstByteReceived
           ? setTimeout(() => {

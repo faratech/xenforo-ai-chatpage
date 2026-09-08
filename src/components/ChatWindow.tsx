@@ -563,7 +563,7 @@ interface PendingCaptchaTurn {
 const getMessageText = (message: Message): string => message.rawContent.trim();
 
 /** Trailing markers appended to stopped/interrupted responses are UI, not context. */
-const INTERRUPTION_MARKER = /\n\n_(?:Generation stopped|Response interrupted)\._$/;
+const INTERRUPTION_MARKER = /(?:^|\n\n)_(?:Generation stopped|Response interrupted)\._$/;
 const HISTORY_TRUNCATION_MARKER = '\n[truncated]';
 
 const truncateHistoryContent = (content: string): string => {
@@ -1574,7 +1574,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     cancelStreamingFrame();
     if (conversationsRef.current[turn.conversationId]) {
       // The server may have consumed this turn; resync it next time.
-      if (persistPartial && turn.partialText.trim()) {
+      if (persistPartial && (turn.partialText.trim() || !turn.rollbackMessages)) {
         updateConversationById(turn.conversationId, conversation => ({
           needsServerResync: true,
           messages: [...conversation.messages, {
@@ -1604,6 +1604,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     setActiveRequestId(null);
     setStreamingState(null);
     setActivities([]);
+    if (persistPartial && turn.activities.some(activity => activity.label === 'Working in managed Windows')) {
+      setErrorMessage('The response stream stopped. The Windows task may still be running. Ask for its status or cancellation before starting it again.');
+    }
     AudioService.stop();
     setSpeakingMessageId(null);
   }, [cancelStreamingFrame, updateConversationById]);
@@ -2883,9 +2886,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       try {
         result = await send(turn.turnId);
       } catch (error) {
-        // Retry once, but only when the failure is transient AND nothing was
-        // consumed: with no output delivered the server has not committed a
-        // turn, so a second attempt cannot duplicate or interleave an answer.
+        // No answer text does not imply that server work never started.
+        // Reuse this turn id so the backend can replay its completed answer
+        // or reject a retry while the original still holds the conversation.
         const retryDelayMs = automaticRetryDelayMs(error);
         if (retryDelayMs === null || controller.signal.aborted) throw error;
         const active = activeTurnRef.current;
@@ -3037,7 +3040,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           }],
         }));
       } else {
-        updateMessage(conversationId, userMessage.id, { status: 'failed' });
+        updateMessage(conversationId, userMessage.id, { status: 'failed', turnId: turn.turnId });
+        updateConversationById(conversationId, () => ({ needsServerResync: true }));
       }
       reportChatLifecycle('chat_failed', {
         eventId: turn.turnId,
@@ -3760,23 +3764,21 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           needsServerResync: true,
           updatedAt: Date.now(),
         }
-        : hasPartial
-          ? {
-            ...conversation,
-            needsServerResync: true,
-            updatedAt: Date.now(),
-            messages: [...conversation.messages, {
-              id: messageId('_stopped'),
-              role: 'ai' as const,
-              rawContent: `${active.partialText.trimEnd()}\n\n_Generation stopped._`,
-              timestamp: Date.now(),
-              status: 'stopped' as const,
-              annotations: active.annotations,
-              turnId: active.turnId,
-              activities: active.activities,
-            }],
-          }
-          : { ...conversation, needsServerResync: true, updatedAt: Date.now() };
+        : {
+          ...conversation,
+          needsServerResync: true,
+          updatedAt: Date.now(),
+          messages: [...conversation.messages, {
+            id: messageId('_stopped'),
+            role: 'ai' as const,
+            rawContent: `${active.partialText.trimEnd()}\n\n_Generation stopped._`,
+            timestamp: Date.now(),
+            status: 'stopped' as const,
+            annotations: active.annotations,
+            turnId: active.turnId,
+            activities: active.activities,
+          }],
+        };
       saveStore(userId, {
         version: 4,
         conversations: {

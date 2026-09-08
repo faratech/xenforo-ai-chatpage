@@ -131,7 +131,22 @@ describe('terminal event handling', () => {
 });
 
 describe('request deadlines', () => {
-  it('fails a chat request that produces no first byte within 130 seconds', async () => {
+  it('accepts a first byte after the old 130-second deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse(new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => {
+          controller.enqueue(encoder.encode(sse({ type: 'response.output_text.delta', delta: 'Delayed answer' }) + sse({ type: 'chat.stream.completed' })));
+          controller.close();
+        }, 150_000);
+      },
+    }))));
+    const result = ChatAPI.sendMessage('hi');
+    await vi.advanceTimersByTimeAsync(150_001);
+    await expect(result).resolves.toMatchObject({ text: 'Delayed answer' });
+  });
+
+  it('fails a chat request that produces no first byte within 180 seconds', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', hangingFetch());
 
@@ -468,10 +483,10 @@ describe('activity progress events', () => {
     });
 
     expect(updates[0]).toEqual(['Searching WindowsForum:active']);
-    expect(updates[1]).toEqual(['Searching WindowsForum:done']);
+    expect(updates[1]).toEqual(['Searching WindowsForum:active', 'Searching WindowsForum:active']);
     expect(updates[updates.length - 1]).toEqual([
       'Searching WindowsForum:done',
-      'Searching WindowsForum:active',
+      'Searching WindowsForum:done',
     ]);
   });
 
@@ -517,7 +532,7 @@ describe('activity progress events', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(payload)));
 
     await ChatAPI.sendMessage('hi', { onActivity });
-    expect(onActivity).toHaveBeenCalledTimes(1);
+    expect(onActivity).toHaveBeenCalledTimes(2); // Start and application completion only.
   });
 });
 

@@ -433,6 +433,38 @@ describe('/clear', () => {
 });
 
 describe('interrupted-turn resynchronization', () => {
+  it('records a stop before text arrives and keeps that marker out of recovery history', async () => {
+    apiMocks.sendMessage.mockImplementationOnce((_message, options) => new Promise((_resolve, reject) => {
+      options.onActivity?.([{ id: 'desktop', label: 'Working in managed Windows', state: 'active' }]);
+      options.signal.addEventListener('abort', () => reject(new StreamCancelledError()), { once: true });
+    }));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByPlaceholderText(/Ask about Windows/);
+    sendText('Open Notepad');
+    fireEvent.click(await screen.findByLabelText('Stop generation'));
+    await screen.findByText(/Generation stopped/);
+    expect(screen.getByText(/Windows task may still be running/)).toBeInTheDocument();
+    apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Status checked', annotations: [] });
+    sendText('Check its status');
+    await screen.findByText('Status checked');
+    expect(apiMocks.sendMessage.mock.calls[1][1]).toMatchObject({ resetConversation: true });
+    expect(apiMocks.sendMessage.mock.calls[1][1].history).toEqual([{ role: 'user', content: 'Open Notepad' }]);
+  });
+
+  it('resynchronizes after a failure without text and retains its support reference', async () => {
+    apiMocks.sendMessage.mockRejectedValue(new APIError('Lost connection', { code: 'network_error', retryable: true }));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByPlaceholderText(/Ask about Windows/);
+    sendText('Uncertain question');
+    await screen.findByText(/Network error/, undefined, { timeout: 3000 });
+    await waitFor(() => {
+      const conversation = Object.values(readStore('42').conversations).find(c => c.messages.some(m => m.rawContent === 'Uncertain question'));
+      expect(conversation?.needsServerResync).toBe(true);
+      expect(conversation?.messages.find(m => m.rawContent === 'Uncertain question')?.turnId).toBe(apiMocks.sendMessage.mock.calls[0][1].turnId);
+    });
+    expect(apiMocks.sendMessage.mock.calls[1][1].turnId).toBe(apiMocks.sendMessage.mock.calls[0][1].turnId);
+  });
+
   it('marks a stopped turn and resyncs the server on the next turn', async () => {
     apiMocks.sendMessage.mockImplementationOnce((_message: string, options: {
       signal: AbortSignal;
