@@ -6,6 +6,7 @@ const xenForoRoot = path.resolve(process.argv[2] || '/web/public_html');
 const stylesRoot = path.resolve(
   process.argv[3] || path.join(xenForoRoot, 'src/styles'),
 );
+const manifest = process.env.WF_CHAT_STYLE_MANIFEST ? JSON.parse(process.env.WF_CHAT_STYLE_MANIFEST) : null;
 const requireChatContract = process.argv.includes('--require-chat-contract');
 
 const templates = [
@@ -84,6 +85,7 @@ const readPrimaryStyleId = async (designer) => {
 let sourceCount = 0;
 let compiledConsumerCount = 0;
 for (const { designer, sourceTemplates, verifyMetadata } of styleSpecs) {
+  if (manifest && !manifest.styles[designer]) continue;
   const templatesRoot = path.join(stylesRoot, designer, 'templates');
   const metadata = verifyMetadata
     ? JSON.parse(await readFile(path.join(templatesRoot, '_metadata.json'), 'utf8'))
@@ -93,7 +95,7 @@ for (const { designer, sourceTemplates, verifyMetadata } of styleSpecs) {
     throw new Error(`${designer} has no KNOWN_INHERITING_STYLE_IDS entry`);
   }
   const compiledStyleIds = [
-    ...new Set([await readPrimaryStyleId(designer), ...inheritingStyleIds]),
+    ...new Set([await readPrimaryStyleId(designer), ...inheritingStyleIds.filter(id => !manifest || manifest.existing.includes(id))]),
   ];
 
   for (const template of sourceTemplates) {

@@ -128,13 +128,13 @@ readonly -a ROLLBACK_COMPAT_ARTIFACTS=(
   bot-avatar.webp
 )
 
-readonly -a XF_STYLES=(wf3 wf3_domperf)
+declare -a XF_STYLES=(wf3 wf3_domperf)
 # Each src/styles/<dir> tree resolves its own xf_style id at deploy time (see
 # scripts/lib/xenforo-style-id.php); no hardcoded dir-to-id map lives here.
 readonly -a XF_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html react_chat_container.html)
 readonly WF5_STYLE="wf5"
 readonly WF5_STYLE_ID="${WF5_STYLE_ID:-51}"
-readonly -a WF5_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html)
+declare -a WF5_CHAT_TEMPLATES=(_page_node.313 _widget_ai_chat.html)
 readonly LEGACY_CHAT_STYLE_ID="${LEGACY_CHAT_STYLE_ID:-17}"
 readonly BACKEND_TEST_FILE="${BACKEND_TEST_FILE:-$(dirname "$XENFORO_ROOT")/tests/test_chat_predicates.php}"
 readonly BACKEND_PRODUCT_TEST_FILE="${BACKEND_PRODUCT_TEST_FILE:-$(dirname "$XENFORO_ROOT")/tests/test_chat_product_contract.php}"
@@ -732,6 +732,20 @@ verify_rollback_release() {
   [[ -f "$release/static/css/main.css" ]] || { fail "Rollback release is missing main.css"; return 1; }
 }
 
+configure_live_styles() {
+  local manifest
+  manifest="$(php "$APP_ROOT/scripts/discover-xenforo-chat-styles.php" "$XENFORO_ROOT")" \
+    || die "Cannot discover live chat styles"
+  export WF_CHAT_STYLE_MANIFEST="$manifest"
+  node -e 'const m=JSON.parse(process.env.WF_CHAT_STYLE_MANIFEST); if(!m.styles?.wf3 || !Array.isArray(m.existing)) process.exit(1)' \
+    || die "Invalid live chat style manifest"
+  mapfile -t XF_STYLES < <(node -e 'const m=JSON.parse(process.env.WF_CHAT_STYLE_MANIFEST); console.log(Object.keys(m.styles).filter(s=>s!=="wf5").join("\n"))')
+  if ! node -e 'process.exit(JSON.parse(process.env.WF_CHAT_STYLE_MANIFEST).styles.wf5 ? 0 : 1)'; then
+    WF5_CHAT_TEMPLATES=()
+  fi
+  log "Discovered live chat styles: $manifest"
+}
+
 verify_xenforo_templates() {
   node "$APP_ROOT/scripts/verify-xenforo-templates.mjs" "$XENFORO_STYLES_ROOT"
 }
@@ -812,6 +826,7 @@ run_backend_checks() {
 run_release_checks() {
   local backend_before backend_after
   cd "$APP_ROOT" || die "Cannot cd to $APP_ROOT"
+  verify_xenforo_templates || die "XenForo template verification failed"
   run_backend_checks
   capture_backend_hashes || die "Cannot hash the chat backend files after validation"
   backend_before="$(backend_hashes_json)"
@@ -1294,7 +1309,7 @@ restore_pending_template_sources() {
     cp -f -- "$source" "$dest" || return 1
     payloads+=("$dest")
   done
-  if peer_enabled; then
+  if ((${#payloads[@]})) && peer_enabled; then
     peer_rsync "${payloads[@]}" \
       "$PEER_HOST:$XENFORO_STYLES_ROOT/$WF5_STYLE/templates/public/" \
       || { fail "Cannot restore pending $WF5_STYLE sources on $PEER_HOST"; return 1; }
@@ -1326,11 +1341,12 @@ verify_compiled_template_runtime() {
   peer_rsync "$verifier" "$PEER_HOST:$remote_verifier" \
     || { fail "Cannot stage the compiled-template verifier on $PEER_HOST"; return 1; }
 
-  peer_ssh bash -s -- "$remote_verifier" "$XENFORO_ROOT" "$XENFORO_STYLES_ROOT" "$require_chat_contract" <<'REMOTE' \
+  peer_ssh bash -s -- "$remote_verifier" "$XENFORO_ROOT" "$XENFORO_STYLES_ROOT" "$require_chat_contract" "$WF_CHAT_STYLE_MANIFEST" <<'REMOTE' \
     || { peer_ssh rm -f -- "$remote_verifier" >/dev/null 2>&1 || true; fail "Peer compiled XenForo chat templates are stale"; return 1; }
 # wf-peer-verify-chat-templates
 set -Eeuo pipefail
 verifier="$1"; xenforo_root="$2"; styles_root="$3"; require_chat_contract="$4"
+export WF_CHAT_STYLE_MANIFEST="$5"
 trap 'rm -f -- "$verifier"' EXIT
 args=()
 [[ "$require_chat_contract" == 1 ]] && args+=(--require-chat-contract)
@@ -1417,7 +1433,8 @@ REMOTE
 # contexts.
 apply_template_bundle() {
   local bundle_root="$1" verify_chat_contract="${2:-1}" style template source dest
-  local wf5_available=1
+  local wf5_available=0
+  ((${#WF5_CHAT_TEMPLATES[@]})) && wf5_available=1
   local -a payloads
 
   for style in "${XF_STYLES[@]}"; do
@@ -1483,14 +1500,14 @@ apply_template_bundle() {
     peer_rsync "$wide_syncer" "$PEER_HOST:$remote_wide_syncer" \
       || { fail "Cannot stage the style-wide sync helper on the peer"; return 1; }
 
-    peer_ssh bash -s -- "$XENFORO_ROOT" "$remote_wide_syncer" <<'REMOTE' \
+    peer_ssh bash -s -- "$XENFORO_ROOT" "$remote_wide_syncer" "${XF_STYLES[@]}" <<'REMOTE' \
       || { peer_ssh rm -f -- "$remote_wide_syncer" >/dev/null 2>&1 || true; fail "Peer style-wide template sync failed"; return 1; }
 # wf-peer-sync-styles
 set -Eeuo pipefail
 xenforo_root="$1"; syncer="$2"
 trap 'rm -f -- "$syncer"' EXIT
-php "$syncer" "$xenforo_root" wf3
-php "$syncer" "$xenforo_root" wf3_domperf
+shift 2
+for style in "$@"; do php "$syncer" "$xenforo_root" "$style"; done
 REMOTE
   else
     skip_peer "the peer template push and style-wide sync"
@@ -2132,6 +2149,7 @@ REMOTE
 
 main() {
   local command="${1:-deploy}"
+  configure_live_styles
 
   case "$command" in
     deploy)

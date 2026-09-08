@@ -63,9 +63,12 @@ $written = 0;
 
 require __DIR__ . '/lib/xenforo-style-id.php';
 
+$manifest = wf_chat_style_manifest($xenForoRoot . '/src/styles');
+
 foreach ($designers AS $designer => $templates)
 {
-	$styleId = wf_resolve_style_id($xenForoRoot . '/src/styles', $designer);
+	if (!isset($manifest['styles'][$designer])) continue;
+	$styleId = $manifest['styles'][$designer];
 
 	$designerOutput = rtrim($outputRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $designer;
 	if (!is_dir($designerOutput) && !mkdir($designerOutput, 0755, true) && !is_dir($designerOutput))

@@ -5,7 +5,8 @@ import path from 'node:path';
 const stylesRoot = path.resolve(
   process.argv[2] || '/web/public_html/src/styles',
 );
-const styles = ['wf3', 'wf3_domperf'];
+const liveStyles = process.env.WF_CHAT_STYLE_MANIFEST ? JSON.parse(process.env.WF_CHAT_STYLE_MANIFEST).styles : null;
+const styles = ['wf3', 'wf3_domperf'].filter(style => !liveStyles || liveStyles[style]);
 const chatTemplates = ['_page_node.313', '_widget_ai_chat.html', 'react_chat_container.html'];
 const betaChatTemplates = ['_page_node.313', '_widget_ai_chat.html'];
 const allowedContentChanges = new Set(
@@ -82,7 +83,7 @@ try {
   if (error?.code === 'ENOENT') betaTemplatesPresent = false;
   else throw error;
 }
-if (betaTemplatesPresent) {
+if (betaTemplatesPresent && (!liveStyles || liveStyles.wf5)) {
   for (const template of betaChatTemplates) {
     const content = await readFile(path.join(betaTemplatesRoot, template), 'utf8');
     for (const markup of [

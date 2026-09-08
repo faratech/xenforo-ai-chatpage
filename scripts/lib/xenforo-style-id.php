@@ -58,3 +58,22 @@ function wf_resolve_style_id(string $stylesRoot, string $dir): int
 
 	return $styleId;
 }
+
+/** Derive deploy consumers from live styles, ignoring retired source trees. */
+function wf_chat_style_manifest(string $stylesRoot): array
+{
+	$rows = \XF::db()->fetchAll('SELECT style_id, designer_mode FROM xf_style');
+	$existing = array_map(static fn(array $row): int => (int)$row['style_id'], $rows);
+	$styles = [];
+	foreach (['wf3', 'wf3_domperf', 'wf5'] as $dir)
+	{
+		$marker = $stylesRoot . '/' . $dir . '/.wf-style-id';
+		$raw = is_file($marker) ? trim((string)file_get_contents($marker)) : '';
+		$bound = array_filter($rows, static fn(array $row): bool => $row['designer_mode'] === $dir);
+		// An unbound directory whose style was deleted is historical input.
+		if (!$bound && preg_match('/^\d+$/', $raw) && !in_array((int)$raw, $existing, true)) continue;
+		$styles[$dir] = wf_resolve_style_id($stylesRoot, $dir);
+	}
+	if (!isset($styles['wf3'])) throw new \RuntimeException('Canonical wf3 chat style is missing');
+	return ['styles' => $styles, 'existing' => $existing];
+}

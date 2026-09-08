@@ -44,6 +44,7 @@ fail_test() {
 # ---------------------------------------------------------------------------
 
 setup_sandbox() {
+  unset WF_CHAT_STYLE_MANIFEST WF_CHAT_TEST_STYLE_MANIFEST
   SB="$(mktemp -d "${RELEASE_TEST_TMP:-${TMPDIR:-/tmp}}/chatpage-release-test.XXXXXX")"
   trap rt_cleanup EXIT
 
@@ -120,6 +121,7 @@ make_app_repo() {
   cp "$RT_APP_SRC/scripts/chat-product-contract.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/migrate-chat-product-foundation.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/prune-chat-product-data.php" "$SB/app/scripts/"
+  cp "$RT_APP_SRC/scripts/discover-xenforo-chat-styles.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/snapshot-xenforo-template-db.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/sync-xenforo-db-style.php" "$SB/app/scripts/"
   cp "$RT_APP_SRC/scripts/sync-xenforo-style-wide.php" "$SB/app/scripts/"
@@ -644,6 +646,15 @@ case "$mode" in
     exit "${mode#skip:}"
     ;;
 esac
+
+if [[ "${1:-}" == *discover-xenforo-chat-styles.php ]]; then
+  if [[ -n "${WF_CHAT_TEST_STYLE_MANIFEST:-}" ]]; then
+    printf '%s\n' "$WF_CHAT_TEST_STYLE_MANIFEST"
+  else
+    printf '%s\n' '{"styles":{"wf3":40,"wf3_domperf":47,"wf5":51},"existing":[17,40,46,47,50,51]}'
+  fi
+  exit 0
+fi
 
 if [[ "${1:-}" == *snapshot-xenforo-template-db.php ]]; then
   output_root="${3:-}"

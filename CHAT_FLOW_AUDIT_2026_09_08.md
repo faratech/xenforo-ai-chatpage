@@ -67,3 +67,16 @@ The connected browser failed navigation with ERR_PROXY_CONNECTION_FAILED and
 had no signed-in session. Consequently a live member browser-to-PHP-to-Windows
 round trip was not verified in this pass. Earlier direct desktop-worker tests
 are separate evidence and must not be described as member UI coverage.
+
+## Deployment findings
+
+Deployment exposed two additional stale assumptions. The `wf4_container.css`
+source already matched its live database row byte-for-byte but its recorded
+metadata hash was old; only that hash was repaired in the parent repository.
+The deploy also required retired styles 46, 47 and 51, while the live database
+contains only 17, 40 and 50. Deployment now discovers active source styles and
+filters compiled consumers using the live style set, preserving the required
+canonical style and conflicting-marker checks. Snapshot/import/rollback all use
+that selection. A release regression exercises deployment and rollback with the
+retired directories still present. Template preflight runs before the expensive
+release gate as well as afterward to detect drift during the checks.
