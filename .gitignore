@@ -34,3 +34,23 @@ yarn-error.log*
 *.png
 !public/pwa-icon-192.png
 !public/pwa-icon-512.png
+
+# Private operator guidance and production operations. These files may exist
+# in the deployment checkout but are not part of the public source tree.
+/AGENTS.md
+/CLAUDE.md
+/.claude/
+/CHAT_FLOW_AUDIT_*.md
+/deploy.sh
+/ops/systemd/
+/scripts/migrate-chat-product-foundation.php
+/scripts/migrate-conversation-state.php
+/scripts/prune-chat-product-data.php
+/scripts/prune-conversations.php
+/scripts/snapshot-xenforo-template-db.php
+/scripts/sync-xenforo-db-style.php
+/scripts/sync-xenforo-style-wide.php
+/scripts/update-cloudflare-chatpage-cache.mjs
+/scripts/verify-xenforo-compiled-templates.mjs
+/scripts/verify-xenforo-templates.mjs
+/scripts/release-tests/
