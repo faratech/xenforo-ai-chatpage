@@ -159,6 +159,11 @@ export default defineConfig(({ command, mode }) => {
             if (id === '\0vite/preload-helper.js') {
               return 'preload-runtime';
             }
+            // Vite 8.3 folds shared formatting code into ChatWindow by
+            // default, pushing that lazy chunk past the release size cap.
+            if (id.endsWith('/src/utils/helpers.ts')) {
+              return 'helpers';
+            }
             if (id.includes('node_modules/@mui/icons-material/')) {
               return 'mui-icons';
             }
