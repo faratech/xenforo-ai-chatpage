@@ -156,11 +156,11 @@ for (const file of jsFiles.filter(name => name.endsWith('.js'))) {
 const totalJsGzipBytes = [...jsGzipSizes.values()].reduce((total, size) => total + size, 0);
 // This aggregate deliberately counts every optional route chunk, including
 // member-only support/share/account/export dialogs that are never fetched on
-// the core path. Raised 2026-08-22 from 265 KiB when the storage data-loss
-// guards (salvage-not-drop parsing, migration ordering, quarantine) consumed
-// the last of the previous headroom. The strict 4 KiB bootstrap and 50 KiB
-// ChatWindow caps below still protect startup cost.
-const totalJsGzipBudget = 268 * 1024;
+// the core path. Raised 2026-08-22 from 265 KiB for storage data-loss guards,
+// and 2026-09-28 to 282 KiB for React 19.3, MUI 9.4, and Marked 18 updates.
+// The strict 4 KiB bootstrap and 50 KiB ChatWindow caps below still protect
+// startup cost.
+const totalJsGzipBudget = 282 * 1024;
 if (totalJsGzipBytes > totalJsGzipBudget) {
   throw new Error(
     `Compressed JavaScript budget exceeded: ${totalJsGzipBytes} bytes gzip > ${totalJsGzipBudget}.`,
