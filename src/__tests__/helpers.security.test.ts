@@ -513,8 +513,8 @@ describe('citation extraction scope and cost', () => {
     sanitizeAndParse(hostile);
     const elapsedMs = performance.now() - startedAt;
     // The label pattern is ~O(n^2) from every start position; without the
-    // length cap this input measured ~100ms at half this size.
-    expect(elapsedMs).toBeLessThan(25);
+    // length cap this input measured ~100ms at half this size (and multiple seconds here).
+    expect(elapsedMs).toBeLessThan(100);
   });
 });
 

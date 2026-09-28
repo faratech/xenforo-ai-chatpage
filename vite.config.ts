@@ -121,7 +121,7 @@ export default defineConfig(({ command, mode }) => {
     base: '/chatpage/',
     resolve: {
       alias: {
-        src: path.resolve(__dirname, 'src'),
+        src: path.resolve(import.meta.dirname, 'src'),
       },
     },
     server: {
@@ -135,6 +135,7 @@ export default defineConfig(({ command, mode }) => {
       },
     },
     build: {
+      target: 'es2022',
       outDir: 'dist',
       sourcemap: false,
       cssCodeSplit: false,
@@ -157,6 +158,9 @@ export default defineConfig(({ command, mode }) => {
             }
             if (id === '\0vite/preload-helper.js') {
               return 'preload-runtime';
+            }
+            if (id.includes('node_modules/@mui/icons-material/')) {
+              return 'mui-icons';
             }
             if (id.includes('node_modules/@mui/')) {
               return 'mui';
