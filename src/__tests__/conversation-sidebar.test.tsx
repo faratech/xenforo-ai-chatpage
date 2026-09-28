@@ -273,7 +273,9 @@ describe('ConversationSidebar search', () => {
 
     const drawerPapers = container.ownerDocument.querySelectorAll('.MuiDrawer-paper');
     const mobilePaper = drawerPapers[drawerPapers.length - 1];
-    expect(mobilePaper).toHaveStyle({ width: '92vw', maxWidth: '360px' });
+    const style = getComputedStyle(mobilePaper);
+    expect(parseFloat(style.width)).toBeCloseTo(window.innerWidth * 0.92);
+    expect(style.maxWidth).toBe('360px');
   });
 
   it('gives the open mobile history dialog an accessible name', async () => {
