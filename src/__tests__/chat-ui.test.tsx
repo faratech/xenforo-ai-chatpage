@@ -2171,6 +2171,8 @@ describe('authenticated history, feedback, and sharing', () => {
     }));
     window.localStorage.setItem('current_conversation_id:v4:42', 'conv_old');
     window.localStorage.setItem('chat_scroll_positions:v1:42', JSON.stringify({ conv_old: 375 }));
+    // #8: an earlier unreadable envelope quarantined by loadStore() (raw text).
+    window.localStorage.setItem('chat_store_corrupt:v1:42', '{"version":4,"conversations":{"conv_q":{"messages":[{"rawContent":"Quarantined private question"');
     apiMocks.deleteAllSavedChatData.mockResolvedValue({
       success: true,
       deleted_scope: 'saved_chat_product_data',
@@ -2210,6 +2212,7 @@ describe('authenticated history, feedback, and sharing', () => {
       expect(window.localStorage.getItem('current_conversation_id:v4:42')).not.toBe('conv_old');
       expect(window.localStorage.getItem('chat_cloud_bootstrap:v1:42')).toBeNull();
       expect(window.localStorage.getItem('chat_scroll_positions:v1:42')).toBeNull();
+      expect(window.localStorage.getItem('chat_store_corrupt:v1:42')).toBeNull();
     });
     expect(apiMocks.deleteConversation).not.toHaveBeenCalled();
     expect(screen.queryByText('Old private answer')).not.toBeInTheDocument();

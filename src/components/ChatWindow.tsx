@@ -2167,6 +2167,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       trimmed: {},
     }, conversationId);
     try {
+      // The quarantine holds a raw copy of an earlier unreadable envelope
+      // (plaintext history); "deleted from this browser" must include it (#8).
+      localStorage.removeItem(keys.corrupt);
       localStorage.removeItem(keys.legacyStoreV3);
       localStorage.removeItem(keys.legacyCurrentV3);
       localStorage.removeItem(keys.legacyConversations);
