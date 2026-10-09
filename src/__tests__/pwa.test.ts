@@ -180,7 +180,8 @@ describe('canonical PWA installation', () => {
     expect(serviceWorkerSource).toContain("url.search === ''");
     expect(serviceWorkerSource).toContain('PRECACHE_URLS.includes(url.pathname)');
     expect(serviceWorkerSource).toContain('evictable.slice(0, overflow)');
-    expect(serviceWorkerSource.match(/await trimCache\(cache\)/g)).toHaveLength(3);
+    // install + networkFirst; cacheFirst was removed with executable caching (#9).
+    expect(serviceWorkerSource.match(/await trimCache\(cache\)/g)).toHaveLength(2);
     expect(serviceWorkerSource).toContain("event.data.type === 'SKIP_WAITING'");
   });
 });
