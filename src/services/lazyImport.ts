@@ -23,6 +23,18 @@ export const shouldRecoverLazyImport = (
   && (lastAttemptAt === null || now - lastAttemptAt >= LAZY_IMPORT_RELOAD_COOLDOWN_MS)
 );
 
+const isChunkLoadError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const { name: rawName, message: rawMessage } = error as { name?: unknown; message?: unknown };
+  const name = typeof rawName === 'string' ? rawName : '';
+  const message = typeof rawMessage === 'string' ? rawMessage : '';
+  return name === 'ChunkLoadError'
+    || /failed to fetch dynamically imported module/i.test(message)
+    || /importing a module script failed/i.test(message)
+    || /loading chunk .+ failed/i.test(message)
+    || /chunkloaderror/i.test(message);
+};
+
 const browserRuntime = (): LazyImportRecoveryRuntime | null => {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return null;
 
@@ -70,7 +82,7 @@ export const loadLazyModule = async <T>(
   try {
     return await loader();
   } catch (error) {
-    if (!runtime || !claimRecoveryReload(runtime)) throw error;
+    if (!isChunkLoadError(error) || !runtime || !claimRecoveryReload(runtime)) throw error;
 
     try {
       runtime.reload();

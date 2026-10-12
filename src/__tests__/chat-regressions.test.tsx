@@ -519,6 +519,51 @@ describe('cross-tab deletion propagation', () => {
     expect(await screen.findByText(/Welcome to WindowsForum\.com/)).toBeInTheDocument();
     await waitFor(() => expect(readStore('42').conversations[conversationId]).toBeUndefined());
   });
+
+  it('cancels a parked CAPTCHA turn when another tab deletes the chat', async () => {
+    await bootWithExchange();
+    const conversationId = apiMocks.sendMessage.mock.calls[0][1].conversationId as string;
+    await waitFor(() => expect(readStore('42').conversations[conversationId]).toBeDefined());
+
+    let turnstileConfig: Record<string, unknown> | undefined;
+    window.turnstile = {
+      render: vi.fn((_selector: string, config: Record<string, unknown>) => {
+        turnstileConfig = config;
+        return 'widget-1';
+      }),
+      reset: vi.fn(),
+      remove: vi.fn(),
+    };
+    apiMocks.sendMessage.mockRejectedValueOnce(new CaptchaRequiredError());
+    sendText('Second question');
+    await screen.findByText('Complete the security check to send your message.');
+    await waitFor(() => expect(window.turnstile?.render).toHaveBeenCalledTimes(1));
+    const callsBeforeDelete = apiMocks.sendMessage.mock.calls.length;
+
+    const remote: ChatStoreV4 = {
+      version: 4,
+      conversations: {},
+      tombstones: { [conversationId]: Date.now() },
+      pendingServerDeletions: {},
+      trimmed: {},
+    };
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'chat_store:v4:42',
+        newValue: JSON.stringify(remote),
+      }));
+    });
+
+    // The parked turn is cancelled (widget torn down), mirroring same-tab delete.
+    await waitFor(() => expect(window.turnstile?.remove).toHaveBeenCalled());
+
+    // Completing the stale check must not re-send for the deleted chat.
+    const callback = turnstileConfig?.callback as ((token: string) => void) | undefined;
+    expect(typeof callback).toBe('function');
+    await act(async () => { callback?.('fresh-token'); });
+    expect(apiMocks.sendMessage).toHaveBeenCalledTimes(callsBeforeDelete);
+    await waitFor(() => expect(readStore('42').conversations[conversationId]).toBeUndefined());
+  });
 });
 
 describe('server deletion retries', () => {

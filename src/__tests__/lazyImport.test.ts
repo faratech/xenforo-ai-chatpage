@@ -41,7 +41,7 @@ describe('lazy release import recovery', () => {
 
   it('does not reload while offline', async () => {
     const { runtime, reload } = createRuntime({ online: false });
-    const failure = new TypeError('chunk unavailable');
+    const failure = new TypeError('Failed to fetch dynamically imported module');
 
     await expect(loadLazyModule(() => Promise.reject(failure), runtime)).rejects.toBe(failure);
     expect(reload).not.toHaveBeenCalled();
@@ -50,7 +50,7 @@ describe('lazy release import recovery', () => {
   it('claims one online recovery and keeps the lazy promise pending during reload', async () => {
     const { runtime, reload, storedValue } = createRuntime({ now: 42_000 });
     const pending = loadLazyModule(
-      () => Promise.reject(new TypeError('stale release chunk')),
+      () => Promise.reject(new TypeError('Failed to fetch dynamically imported module: stale chunk')),
       runtime,
     );
 
@@ -68,10 +68,31 @@ describe('lazy release import recovery', () => {
       now,
       stored: String(now - LAZY_IMPORT_RELOAD_COOLDOWN_MS + 1),
     });
-    const failure = new TypeError('still unavailable');
+    const failure = new TypeError('Failed to fetch dynamically imported module: still unavailable');
 
     await expect(loadLazyModule(() => Promise.reject(failure), runtime)).rejects.toBe(failure);
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-chunk module errors without reloading (#17)', async () => {
+    const { runtime, reload } = createRuntime();
+    const failure = new Error('eval bug in module');
+
+    await expect(loadLazyModule(() => Promise.reject(failure), runtime)).rejects.toBe(failure);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('recovers for ChunkLoadError-shaped failures (#17)', async () => {
+    const { runtime, reload } = createRuntime();
+    const failure = new Error('loading failed');
+    failure.name = 'ChunkLoadError';
+    const pending = loadLazyModule(() => Promise.reject(failure), runtime);
+
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+    expect(await Promise.race([
+      pending.then(() => 'settled', () => 'settled'),
+      Promise.resolve('pending'),
+    ])).toBe('pending');
   });
 
   it('allows a later release recovery after the bounded cooldown', () => {

@@ -130,8 +130,12 @@ const networkFirst = async request => {
   try {
     const response = await fetch(request);
     if (response.ok) {
-      await cache.put(request, response.clone());
-      await trimCache(cache);
+      try {
+        await cache.put(request, response.clone());
+        await trimCache(cache);
+      } catch (cacheError) {
+        console.warn('[sw] failed to cache response', cacheError);
+      }
     }
     return response;
   } catch (error) {

@@ -175,7 +175,8 @@ export const AccountDataDialog = ({
         await onDeleteAllFinished?.({ serverDeleted, localResetSucceeded });
       } catch (resumeError) {
         if (!controller.signal.aborted) {
-          setDeleteError(errorText(resumeError, 'Cloud history could not resume automatically. Reload this page to resume syncing.'));
+          const resumeText = errorText(resumeError, 'Cloud history could not resume automatically. Reload this page to resume syncing.');
+          setDeleteError(current => (current ? `${current} ${resumeText}` : resumeText));
         }
       }
       if (operationControllerRef.current === controller) operationControllerRef.current = null;
@@ -187,8 +188,12 @@ export const AccountDataDialog = ({
     if (operation) return;
     setDeleteConfirmOpen(false);
     setConfirmation('');
-    setDeleteError(null);
-    setServerDeletionComplete(false);
+    // A partial delete (server gone, local cleanup failed) must stay visible
+    // in the main dialog; only clear it when a new operation starts.
+    if (!serverDeletionComplete) {
+      setDeleteError(null);
+      setServerDeletionComplete(false);
+    }
   };
 
   const requestClose = () => {
@@ -237,6 +242,9 @@ export const AccountDataDialog = ({
             <Stack spacing={2.25}>
               {error && <Alert severity="error" role="alert">{error}</Alert>}
               {success && <Alert severity="success" role="status">{success}</Alert>}
+              {deleteError && !deleteConfirmOpen && (
+                <Alert severity={serverDeletionComplete ? 'warning' : 'error'} role="alert">{deleteError}</Alert>
+              )}
 
               <Box
                 component="section"

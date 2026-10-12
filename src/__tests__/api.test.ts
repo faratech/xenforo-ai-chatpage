@@ -5,6 +5,7 @@ import {
   IncompleteStreamError,
   StreamCancelledError,
   StreamProtocolError,
+  TTS_REQUEST_TIMEOUT_MS,
 } from '../services/api';
 
 const encoder = new TextEncoder();
@@ -31,6 +32,7 @@ function streamResponse(chunks: string[]): Response {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -150,5 +152,68 @@ describe('TTS request validation', () => {
       name: 'APIError',
       code: 'invalid_tts_content_type',
     });
+  });
+
+  const hangingOnAbort = (signal: AbortSignal | null | undefined) => new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, { once: true });
+  });
+
+  it('maps the TTS fetch deadline to tts_timeout, not a caller AbortError (#12)', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => hangingOnAbort(init.signal)));
+    const promise = ChatAPI.requestTTS('hello');
+    const expectation = expect(promise).rejects.toMatchObject({
+      name: 'APIError', code: 'tts_timeout', retryable: true,
+    });
+    await vi.advanceTimersByTimeAsync(TTS_REQUEST_TIMEOUT_MS + 1);
+    await expectation;
+    await expect(promise).rejects.toBeInstanceOf(APIError);
+  });
+
+  it('keeps a caller abort as a bare AbortError (#12)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => hangingOnAbort(init.signal)));
+    const controller = new AbortController();
+    const promise = ChatAPI.requestTTS('hello', { signal: controller.signal });
+    controller.abort();
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(promise).rejects.not.toBeInstanceOf(APIError);
+  });
+
+  it('maps a deadline abort during the TTS blob read to tts_timeout (#12)', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => Promise.resolve({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'audio/mpeg' }),
+      blob: () => hangingOnAbort(init.signal),
+    } as unknown as Response)));
+    const promise = ChatAPI.requestTTS('hello');
+    const expectation = expect(promise).rejects.toMatchObject({
+      name: 'APIError', code: 'tts_timeout', retryable: true,
+    });
+    await vi.advanceTimersByTimeAsync(TTS_REQUEST_TIMEOUT_MS + 1);
+    await expectation;
+  });
+
+  it('maps a deadline abort during the TTS error-body read to tts_timeout (#12)', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url: string, init: RequestInit) => Promise.resolve({
+      ok: false,
+      status: 500,
+      statusText: 'Server Error',
+      headers: new Headers(),
+      json: () => hangingOnAbort(init.signal),
+    } as unknown as Response)));
+    const promise = ChatAPI.requestTTS('hello');
+    const expectation = expect(promise).rejects.toMatchObject({
+      name: 'APIError', code: 'tts_timeout', retryable: true,
+    });
+    await vi.advanceTimersByTimeAsync(TTS_REQUEST_TIMEOUT_MS + 1);
+    await expectation;
   });
 });

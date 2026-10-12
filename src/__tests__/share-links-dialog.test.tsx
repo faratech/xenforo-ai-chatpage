@@ -182,6 +182,43 @@ describe('ShareLinksDialog', () => {
     expect(screen.queryByText(expectedURL)).not.toBeInTheDocument();
   });
 
+  it('uses the server created_at for the optimistic row when provided', async () => {
+    const serverCreatedAt = now - 60_000;
+    apiMocks.createConversationShare.mockResolvedValue({
+      success: true,
+      share: {
+        id: 'share_new',
+        token: 'token_abcdefghijklmnopqrstuvwxyz123456',
+        expires_at: now + 604_800_000,
+        created_at: serverCreatedAt,
+      },
+    });
+    const onSharesChange = vi.fn();
+    renderDialog({ onSharesChange });
+    expect(await screen.findByText('No share links yet')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create link' }));
+
+    await waitFor(() => expect(onSharesChange).toHaveBeenLastCalledWith([
+      expect.objectContaining({ id: 'share_new', created_at: serverCreatedAt }),
+    ]));
+  });
+
+  it('refreshes expiry status on focus while the dialog stays open', async () => {
+    apiMocks.listConversationShares.mockResolvedValue({
+      success: true,
+      shares: [share('share_soon', { expires_at: now + 1_000 })],
+      next_cursor: null,
+    });
+    renderDialog();
+    expect(await screen.findByText('Active')).toBeInTheDocument();
+
+    vi.spyOn(Date, 'now').mockReturnValue(now + 2_000);
+    fireEvent.focus(window);
+
+    expect(await screen.findByText('Expired')).toBeInTheDocument();
+  });
+
   it('paginates older links and reloads after a list error', async () => {
     apiMocks.listConversationShares
       .mockResolvedValueOnce({ success: true, shares: [share('share_first')], next_cursor: 'next_1' })

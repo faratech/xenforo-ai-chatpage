@@ -918,6 +918,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     metadataRevision: number;
   }>>({});
   const storageUnavailableRef = useRef(initialChatState.unavailable);
+  /**
+   * Load-time unavailability (localStorage unusable at startup) latches
+   * persistence off for the session. A mid-session save failure must not:
+   * it only marks the current state unavailable until a later save succeeds.
+   */
+  const storageLoadUnavailableRef = useRef(initialChatState.unavailable);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const pendingCaptchaRef = useRef<PendingCaptchaTurn | null>(null);
   const turnstileWidgetRef = useRef<string | null>(null);
@@ -1025,7 +1031,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
 
   /** Persists the composed v4 store and reflects quota evictions in memory. */
   const persistStore = useCallback(() => {
-    if (storageUnavailableRef.current) return;
+    if (storageLoadUnavailableRef.current) return;
     const result = saveStore(userId, {
       version: 4,
       conversations: conversationsRef.current,
@@ -1037,6 +1043,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     if (!result.persisted) {
       storageUnavailableRef.current = true;
       queueMicrotask(() => setStorageUnavailable(true));
+    } else if (storageUnavailableRef.current) {
+      storageUnavailableRef.current = false;
+      queueMicrotask(() => setStorageUnavailable(false));
     }
 
     // Cap trims are local-only: saveStore has already folded `trimmed`
@@ -1107,10 +1116,9 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     return () => {
       document.removeEventListener('visibilitychange', flushOnHide);
       window.removeEventListener('pagehide', flushPersistTimer);
-      if (persistTimerRef.current !== null) {
-        window.clearTimeout(persistTimerRef.current);
-        persistTimerRef.current = null;
-      }
+      // Unmount (e.g. identity-change remount) must flush the pending draft
+      // save, not just drop the timer, or the last 300 ms of typing is lost.
+      flushPersistTimer();
     };
   }, [flushPersistTimer]);
 
@@ -1140,15 +1148,21 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         setAnnouncement('Finish the current chat action or remove staged attachments before reloading the update.');
         return;
       }
-      if (storageUnavailableRef.current) {
+      if (storageLoadUnavailableRef.current) {
         event.preventDefault();
         setAnnouncement('This browser cannot safely save the current chat before an update reload.');
         return;
       }
+      // Retry even after a transient failure: it may succeed now (e.g. after
+      // deletions shrank the map) and clear the unavailable state. Only a
+      // retry that still fails vetoes the reload.
+      const wasUnavailable = storageUnavailableRef.current;
       persistStore();
       if (storageUnavailableRef.current) {
         event.preventDefault();
-        setAnnouncement('The current chat could not be saved, so the update reload was cancelled.');
+        setAnnouncement(wasUnavailable
+          ? 'This browser cannot safely save the current chat before an update reload.'
+          : 'The current chat could not be saved, so the update reload was cancelled.');
         return;
       }
       persistScrollPositions();
@@ -2519,6 +2533,17 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         pendingDeletionsRef.current = merged.pendingServerDeletions;
         return enforceCapWithLocalTrim(merged.conversations, currentConversationIdRef.current);
       });
+      // Mirror the same-tab delete path: a tombstoned conversation's parked
+      // CAPTCHA turn must be cancelled, or completing the check would replay
+      // runTurn for a chat the user deliberately deleted.
+      const pendingCaptchaConversationId = pendingCaptchaRef.current?.params.conversationId;
+      if (
+        pendingCaptchaConversationId
+        && (remote.tombstones[pendingCaptchaConversationId] !== undefined
+          || tombstonesRef.current[pendingCaptchaConversationId] !== undefined)
+      ) {
+        cancelPendingCaptcha(false);
+      }
       if (currentTombstoned) {
         if (activeTurnRef.current?.conversationId === currentConversationIdRef.current) {
           abortActiveTurn(false);
@@ -2528,7 +2553,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
-  }, [abortActiveTurn, createAndSelectConversation, enforceCapWithLocalTrim, userId]);
+  }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, enforceCapWithLocalTrim, userId]);
 
   useEffect(() => {
     if (isGuest) return;
@@ -2725,6 +2750,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
 
     const conversationId = params.conversationId;
+    // Defense in depth: never resurrect a tombstoned conversation via the
+    // create-new fallback below (e.g. a CAPTCHA replay racing a cross-tab
+    // delete that already cancelled the parked turn).
+    if (tombstonesRef.current[conversationId] !== undefined) return;
     const existingConversation = conversationsRef.current[conversationId]
       || createNewConversation(conversationId, welcomeMessage);
     const baseMessages = params.baseMessages ?? existingConversation.messages;
@@ -3750,7 +3779,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     for (const timerId of cosmeticTimersRef.current) window.clearTimeout(timerId);
     cosmeticTimersRef.current.clear();
     persistScrollPositions();
-    if (active && conversationsRef.current[active.conversationId] && !storageUnavailableRef.current) {
+    if (active && conversationsRef.current[active.conversationId] && !storageLoadUnavailableRef.current) {
       // Unmount (navigation/account switch) interrupted a turn; persist the
       // result directly since no further renders will run. This mirrors what
       // the Stop button produces: partial output becomes an interrupted

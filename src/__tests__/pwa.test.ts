@@ -129,6 +129,39 @@ describe('canonical PWA installation', () => {
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: undefined });
   });
 
+  it('makes activate() idempotent while activation is pending (#22)', () => {
+    const postMessage = vi.fn();
+    const serviceWorkerListeners: Array<() => void> = [];
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        controller: {},
+        addEventListener: (_type: string, listener: () => void) => serviceWorkerListeners.push(listener),
+        removeEventListener: (_type: string, listener: () => void) => {
+          const index = serviceWorkerListeners.indexOf(listener);
+          if (index !== -1) serviceWorkerListeners.splice(index, 1);
+        },
+      },
+    });
+    const service = new PWAUpdatePrompt();
+    service.watch({
+      waiting: { postMessage } as unknown as ServiceWorker,
+      installing: null,
+      addEventListener: vi.fn(),
+    } as unknown as ServiceWorkerRegistration);
+
+    expect(service.activate()).toBe(true);
+    expect(service.activate()).toBe(true);
+    expect(postMessage).toHaveBeenCalledOnce();
+    expect(serviceWorkerListeners).toHaveLength(1);
+
+    serviceWorkerListeners.forEach(listener => listener());
+    expect(service.available).toBe(false);
+    expect(serviceWorkerListeners).toHaveLength(0);
+
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: undefined });
+  });
+
   it('observes an installer that already exists when registration resolves', () => {
     let stateChange: (() => void) | undefined;
     const installing = {

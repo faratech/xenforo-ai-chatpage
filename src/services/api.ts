@@ -84,7 +84,7 @@ export const UPLOAD_REQUEST_TIMEOUT_MS = 60_000;
 export const CHAT_STREAM_MAX_BYTES = 2 * 1024 * 1024;
 
 /** SSE frame separator. Kept module-level so the stream loop does not recompile it per frame. */
-const SSE_FRAME_SEPARATOR = /\r?\n\r?\n/;
+const SSE_FRAME_SEPARATOR = /(?:\r\n|\r|\n){2}/;
 
 const notifyIdentityChanged = (): void => {
   if (typeof window !== 'undefined') {
@@ -807,7 +807,7 @@ export class ChatAPI {
 
     const handleEvent = (rawEvent: string): void => {
       const dataLines = rawEvent
-        .split(/\r?\n/)
+        .split(/\r\n|\r|\n/)
         .filter((line) => line.startsWith('data:'))
         .map((line) => line.substring(5).trimStart());
 
@@ -1523,13 +1523,13 @@ export class ChatAPI {
           signal: deadline.signal,
         });
       } catch (error) {
-        if (options.signal?.aborted || isAbortError(error)) throw error;
         if (deadline.timedOut()) {
           throw new APIError('TTS request timed out', {
             code: 'tts_timeout',
             retryable: true,
           });
         }
+        if (options.signal?.aborted || isAbortError(error)) throw error;
         throw new APIError('TTS network request failed', {
           code: 'tts_network_error',
           retryable: true,
@@ -1544,15 +1544,23 @@ export class ChatAPI {
         try {
           errorData = await readErrorResponse(response);
         } catch (readError) {
-          if (options.signal?.aborted || isAbortError(readError)) throw readError;
           if (deadline.timedOut()) {
             throw new APIError('TTS request timed out', {
               code: 'tts_timeout',
               retryable: true,
             });
           }
+          if (options.signal?.aborted || isAbortError(readError)) throw readError;
           throw new APIError('TTS network request failed', {
             code: 'tts_network_error',
+            retryable: true,
+          });
+        }
+        // readErrorResponse swallows body-read failures (including a deadline
+        // abort) into {}; the deadline check must still win over the status.
+        if (deadline.timedOut()) {
+          throw new APIError('TTS request timed out', {
+            code: 'tts_timeout',
             retryable: true,
           });
         }
@@ -1575,7 +1583,17 @@ export class ChatAPI {
         });
       }
 
-      return await response.blob();
+      try {
+        return await response.blob();
+      } catch (error) {
+        if (deadline.timedOut()) {
+          throw new APIError('TTS request timed out', {
+            code: 'tts_timeout',
+            retryable: true,
+          });
+        }
+        throw error;
+      }
     } finally {
       deadline.clear();
     }

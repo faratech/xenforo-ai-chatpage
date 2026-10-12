@@ -29,8 +29,17 @@ export class PWAUpdatePrompt {
   private listeners = new Set<UpdateListener>();
   private watchedRegistration: ServiceWorkerRegistration | null = null;
   private observedInstalling: ServiceWorker | null = null;
+  private activationPending = false;
+  private controllerChangeHandler: (() => void) | null = null;
 
   private readonly refresh = (registration: ServiceWorkerRegistration): void => {
+    if (registration.waiting !== this.waiting && this.activationPending) {
+      this.activationPending = false;
+      if (this.controllerChangeHandler && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('controllerchange', this.controllerChangeHandler);
+      }
+      this.controllerChangeHandler = null;
+    }
     this.waiting = registration.waiting;
     this.listeners.forEach(listener => listener(this.available));
   };
@@ -87,15 +96,20 @@ export class PWAUpdatePrompt {
     if (!worker || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
       return false;
     }
+    if (this.activationPending) return true;
     // Keep `waiting` set until the worker actually takes control. Clearing it
     // up front meant a dropped SKIP_WAITING message (worker idling out before
     // handling it) left the UI reporting an update applied that never was,
     // with the prompt unrecoverable.
     const onControllerChange = () => {
+      this.activationPending = false;
+      this.controllerChangeHandler = null;
       this.waiting = null;
       this.listeners.forEach(listener => listener(this.available));
       navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
     };
+    this.activationPending = true;
+    this.controllerChangeHandler = onControllerChange;
     navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
     worker.postMessage({ type: 'SKIP_WAITING' });
     return true;

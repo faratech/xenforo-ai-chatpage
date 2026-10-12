@@ -482,6 +482,40 @@ describe('quota pressure', () => {
     expect(parseStore(storage.getItem(keys.store))?.conversations.conv_pinned).toBeDefined();
   });
 
+  it('folds quota evictions into trimmed markers so another tab cannot resurrect them', () => {
+    const keys = storageKeys('42');
+    const store: ChatStoreV4 = {
+      ...emptyStore(),
+      conversations: {
+        conv_old: conversation('conv_old', 1_000),
+        conv_current: conversation('conv_current', 3_000),
+      },
+    };
+    storage.failWrites(keys.store, 1);
+
+    const result = saveStore('42', store, 'conv_current');
+    expect(result.persisted).toBe(true);
+    expect(result.evictedIds).toEqual(['conv_old']);
+
+    // The marker lives in the written envelope itself (like cap trims), so a
+    // caller that discards the SaveResult — e.g. the unmount save — still
+    // leaves a resurrection guard behind.
+    const written = parseStore(storage.getItem(keys.store));
+    expect(written?.trimmed.conv_old).toEqual(expect.any(Number));
+    expect(written?.conversations.conv_old).toBeUndefined();
+    expect(result.store.trimmed.conv_old).toEqual(expect.any(Number));
+
+    // A stale tab still holding the evicted conversation cannot merge it back.
+    const stale: ChatStoreV4 = {
+      ...emptyStore(),
+      conversations: { conv_old: conversation('conv_old', 1_000) },
+    };
+    expect(mergeStores(stale, written!).conversations.conv_old).toBeUndefined();
+    const resaved = saveStore('42', stale, 'conv_current');
+    expect(resaved.store.conversations.conv_old).toBeUndefined();
+    expect(parseStore(storage.getItem(keys.store))?.conversations.conv_old).toBeUndefined();
+  });
+
   it('reports failure when nothing evictable remains', () => {
     const keys = storageKeys('42');
     const store: ChatStoreV4 = {

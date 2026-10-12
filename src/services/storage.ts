@@ -693,7 +693,14 @@ export const saveStore = (
       evictedIds.push(oldest.id);
       const conversations = { ...prepared.conversations };
       delete conversations[oldest.id];
-      prepared = { ...prepared, conversations };
+      // Fold the eviction into the envelope's `trimmed` markers (as cap
+      // trims do) so no caller can forget: without a marker, absence is not
+      // deletion in this store's merge model, and another tab still holding
+      // the evicted conversation would merge it straight back. Callers that
+      // treat quota eviction as deletion (persistStore) additionally
+      // tombstone these ids; the trimmed marker alone already defeats
+      // cross-tab resurrection for callers that discard the SaveResult.
+      prepared = markTrimmed({ ...prepared, conversations }, [oldest.id]);
     }
   }
 };

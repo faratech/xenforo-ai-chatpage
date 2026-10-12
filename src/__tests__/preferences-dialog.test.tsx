@@ -93,6 +93,31 @@ describe('chat preferences dialog', () => {
     ]);
   });
 
+  it('shows an error notice when the install prompt rejects', async () => {
+    mocks.prompt.mockRejectedValueOnce(new Error('prompt already showing'));
+    render(
+      <ThemeProvider theme={theme}>
+        <PreferencesDialog open onClose={vi.fn()} voiceEnabled />
+      </ThemeProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Install WindowsForum AI' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/install prompt could not be opened/i);
+    expect(screen.getByRole('button', { name: 'Install WindowsForum AI' })).toBeEnabled();
+  });
+
+  it('shows an error notice when notification permission request rejects', async () => {
+    mocks.requestNotifications.mockRejectedValueOnce(new Error('permission failed'));
+    render(
+      <ThemeProvider theme={theme}>
+        <PreferencesDialog open onClose={vi.fn()} voiceEnabled={false} />
+      </ThemeProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on notifications' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Notification permission could not be requested/i);
+  });
+
   it('requests notification permission only from the explicit settings action', async () => {
     render(
       <ThemeProvider theme={theme}>

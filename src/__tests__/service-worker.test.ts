@@ -146,6 +146,29 @@ describe('public-shell service worker (#9)', () => {
     expect(await (await worker.dispatch('fetch', icon) as Response).text()).toBe(`network ${icon.url}`);
   });
 
+  it('returns the fresh network response when cache.put rejects (#16)', async () => {
+    const worker = loadWorker();
+    await worker.dispatch('install');
+    const cache = worker.stores.get('wf-ai-public-shell-v2') as FakeCache;
+    const icon = get('/chatpage/pwa-icon-192.png');
+    cache.entries.set(icon.url, 'stale cached icon');
+    cache.put = async () => { throw new Error('QuotaExceeded'); };
+
+    const response = await worker.dispatch('fetch', icon) as Response;
+    expect(await response.text()).toBe(`network ${icon.url}`);
+  });
+
+  it('returns the fresh network response when trimCache rejects (#16)', async () => {
+    const worker = loadWorker();
+    await worker.dispatch('install');
+    const cache = worker.stores.get('wf-ai-public-shell-v2') as FakeCache;
+    const icon = get('/chatpage/pwa-icon-192.png');
+    cache.keys = async () => { throw new Error('QuotaExceeded'); };
+
+    const response = await worker.dispatch('fetch', icon) as Response;
+    expect(await response.text()).toBe(`network ${icon.url}`);
+  });
+
   it('installs without an offline precache and drops the v1 cache on activate', async () => {
     const worker = loadWorker();
     await worker.poison('/chatpage/static/js/ChatWindow-a1b2c3d4e5.chunk.js');

@@ -322,7 +322,10 @@ const downloadText = (text: string, filename: string): void => {
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  // Deferred like the export helpers: Safari may resolve the URL only after
+  // the user confirms the save, so revoking on the next tick can yield an
+  // empty file.
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 };
 
 const sourceKind = (annotation: Annotation): SourceKind => {

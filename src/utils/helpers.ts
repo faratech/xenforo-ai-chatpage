@@ -78,9 +78,9 @@ const AI_IMAGE_HOST = 'windowsforum.com';
  * (`navlist`, and whatever gets added next) is internal markup that was never
  * meant to be displayed, so it is dropped rather than guessed at.
  */
-const CITATION_TOKEN = /\uE200([a-z]*)\uE202([\s\S]*?)\uE201/g;
+const CITATION_TOKEN = /\uE200([A-Za-z]*)\uE202([\s\S]*?)\uE201/g;
 /** The same token still arriving — no closing delimiter yet. */
-const OPEN_CITATION_TOKEN = /\uE200([a-z]*)(?:\uE202([\s\S]*))?$/;
+const OPEN_CITATION_TOKEN = /\uE200([A-Za-z]*)(?:\uE202([\s\S]*))?$/;
 /** Any delimiter that outlived the rules above must not reach the reader. */
 const RESIDUAL_MARKER = /[\uE200-\uE20F]/g;
 
@@ -193,6 +193,24 @@ const RAW_FORMAT_OPEN = /^<(b|code|del|em|i|strong)\s*>/i;
 const RAW_LIST_BLOCK = /^<(ol|ul)\s*>([\s\S]*?)<\/\1\s*>/i;
 const RAW_LIST_ITEM = /<li\s*>([\s\S]*?)<\/li\s*>/gi;
 
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  quot: '"',
+};
+
+/** Decodes HTML entities in a single pass, so `&amp;amp;` becomes `&amp;`. */
+const decodeHtmlEntities = (value: string): string => value.replace(
+  /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|(amp|apos|gt|lt|quot));/g,
+  (_entity, decimal: string | undefined, hex: string | undefined, named: string | undefined) => {
+    if (named) return NAMED_ENTITIES[named];
+    const codePoint = decimal ? Number.parseInt(decimal, 10) : Number.parseInt(hex ?? '', 16);
+    return codePoint >= 0 && codePoint <= 0x10FFFF ? String.fromCodePoint(codePoint) : _entity;
+  },
+);
+
 const escapeHtml = (value: string): string => value
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -234,6 +252,8 @@ export const canonicalHttpUrlKey = (value: string): string | null => {
 
 const isSafeLink = (href: string): boolean => {
   if (href.startsWith('#') || href.startsWith('?')) return true;
+  // Browsers treat `\` as `/` in special-scheme URLs, so `/\` is `//` in disguise.
+  if (/^\/[\\/]/.test(href)) return false;
   if (href.startsWith('/') && !href.startsWith('//')) return true;
   if (/^(?:mailto:|tel:)/i.test(href)) return true;
   return parseHttpUrl(href) !== null;
@@ -258,7 +278,7 @@ const parseTagAttributes = (attributeSource: string): Map<string, string> => {
   while (match) {
     const name = match[1].toLowerCase();
     if (!attributes.has(name)) {
-      attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '');
+      attributes.set(name, decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? ''));
     }
     match = TAG_ATTRIBUTE.exec(attributeSource);
   }
@@ -357,8 +377,8 @@ export const sanitizeAndParse = (
       },
       image({ href, text, title }) {
         if (!isApprovedAiImage(href)) return escapeHtml(text || href);
-        const titleAttribute = title ? ` title="${escapeHtml(title)}"` : '';
-        return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${titleAttribute}>`;
+        const titleAttribute = title ? ` title="${escapeHtml(decodeHtmlEntities(title))}"` : '';
+        return `<img src="${escapeHtml(href)}" alt="${escapeHtml(decodeHtmlEntities(text))}"${titleAttribute}>`;
       },
     },
     extensions: [

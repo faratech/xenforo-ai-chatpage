@@ -464,6 +464,62 @@ describe('ChatWindow state ownership', () => {
     expect(await screen.findByLabelText('Type your message')).toHaveValue('Keep this unfinished question');
   });
 
+  it('flushes a pending draft save when the chat unmounts within the debounce window', async () => {
+    const first = renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    fireEvent.change(await screen.findByLabelText('Type your message'), {
+      target: { value: 'Draft typed just before unmount' },
+    });
+    // Unmount before the 300 ms trailing debounce fires: the cleanup must
+    // flush the pending save instead of only clearing the timer.
+    first.unmount();
+    expect(window.localStorage.getItem('chat_store:v4:42')).toContain('Draft typed just before unmount');
+  });
+
+  it('retries persistence after a transient quota failure so later edits still save', async () => {
+    window.localStorage.setItem('chat_store:v4:guest_quota_retry', JSON.stringify({
+      version: 4,
+      conversations: {
+        conv_solo: {
+          id: 'conv_solo',
+          title: 'Solo chat',
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          messages: [{ id: 'solo_ai', role: 'ai', rawContent: 'Solo answer', timestamp: 2_000 }],
+        },
+      },
+      tombstones: {},
+      pendingServerDeletions: {},
+      trimmed: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v4:guest_quota_retry', 'conv_solo');
+    const realSetItem = window.localStorage.setItem.bind(window.localStorage);
+    let failStoreWrites = true;
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation((key: string, value: string) => {
+      if (failStoreWrites && key === 'chat_store:v4:guest_quota_retry') {
+        throw new DOMException('quota exceeded', 'QuotaExceededError');
+      }
+      realSetItem(key, value);
+    });
+
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_quota_retry" />);
+    expect(await screen.findByText('Solo answer')).toBeInTheDocument();
+    expect(await screen.findByText(/will not persist after reload/)).toBeInTheDocument();
+
+    failStoreWrites = false;
+    fireEvent.change(screen.getByLabelText('Type your message'), {
+      target: { value: 'Recovered draft after quota' },
+    });
+    await waitFor(() => {
+      expect(window.localStorage.getItem('chat_store:v4:guest_quota_retry'))
+        .toContain('Recovered draft after quota');
+    });
+
+    // The unavailable state cleared, so an update reload is no longer vetoed.
+    const saveEvent = new Event('wf-chat-save-before-update', { cancelable: true });
+    act(() => { window.dispatchEvent(saveEvent); });
+    expect(saveEvent.defaultPrevented).toBe(false);
+  });
+
   it('keeps chat B and its draft selected when an in-flight clear of chat A completes', async () => {
     window.localStorage.setItem('chat_store:v4:guest_clear_switch', JSON.stringify({
       version: 4,

@@ -132,6 +132,7 @@ export const ShareLinksDialog = ({
   const [announcement, setAnnouncement] = useState('');
   const [newLink, setNewLink] = useState<NewShareLink | null>(null);
   const [revokeCandidate, setRevokeCandidate] = useState<ManagedConversationShare | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const canCreate = Boolean(
     conversationId
     && Number.isInteger(conversationRevision)
@@ -213,6 +214,18 @@ export const ShareLinksDialog = ({
     mutationControllerRef.current?.abort();
   }, []);
 
+  useEffect(() => {
+    if (!open) return undefined;
+    setNow(Date.now());
+    const refresh = () => setNow(Date.now());
+    const interval = window.setInterval(refresh, 30_000);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [open ]);
+
   const loadMore = async () => {
     if (!conversationId || !nextCursor || listLoading) return;
     const controller = new AbortController();
@@ -269,11 +282,14 @@ export const ShareLinksDialog = ({
         { expiresIn: expirySeconds, signal: controller.signal },
       );
       if (controller.signal.aborted) return;
+      const serverCreatedAt = (response.share as unknown as { created_at?: unknown }).created_at;
       const created: ManagedConversationShare = {
         id: response.share.id,
         client_conversation_id: conversationId,
         source_revision: conversationRevision,
-        created_at: Date.now(),
+        created_at: typeof serverCreatedAt === 'number' && Number.isFinite(serverCreatedAt)
+          ? serverCreatedAt
+          : Date.now(),
         expires_at: response.share.expires_at,
         revoked_at: null,
       };
@@ -528,7 +544,7 @@ export const ShareLinksDialog = ({
                   ) : (
                     <Stack component="ul" spacing={1} sx={{ p: 0, m: 0, listStyle: 'none' }}>
                       {shares.map(share => {
-                        const status = shareStatus(share);
+                        const status = shareStatus(share, now);
                         return (
                           <Box
                             component="li"

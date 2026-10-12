@@ -284,7 +284,11 @@ export const SupportCasesDialog = ({
   useEffect(() => () => mutationControllerRef.current?.abort(), []);
 
   useEffect(() => {
-    if (!open) mutationControllerRef.current?.abort();
+    if (!open) {
+      mutationControllerRef.current?.abort();
+      mutationControllerRef.current = null;
+      setBusy(false);
+    }
   }, [open]);
 
   const loadMore = async () => {

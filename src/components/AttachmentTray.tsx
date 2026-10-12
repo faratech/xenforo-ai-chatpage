@@ -73,15 +73,35 @@ const fileExtension = (name: string): string => {
   return dot < 0 ? '' : name.slice(dot + 1).toLocaleLowerCase();
 };
 
-const attachmentKind = (file: File): AttachmentKind | null => {
-  const mime = file.type.toLocaleLowerCase();
-  const extension = fileExtension(file.name);
-  if (IMAGE_MIMES.has(mime) || IMAGE_EXTENSIONS.has(extension)) return 'image';
-  if (TEXT_MIMES.has(mime) || TEXT_EXTENSIONS.has(extension)) return 'text';
+const kindForMime = (mime: string): AttachmentKind | null => {
+  if (IMAGE_MIMES.has(mime)) return 'image';
+  if (TEXT_MIMES.has(mime)) return 'text';
   return null;
 };
 
+const kindForExtension = (extension: string): AttachmentKind | null => {
+  if (IMAGE_EXTENSIONS.has(extension)) return 'image';
+  if (TEXT_EXTENSIONS.has(extension)) return 'text';
+  return null;
+};
+
+const attachmentKind = (file: File): AttachmentKind | null => {
+  const mimeKind = kindForMime(file.type.toLocaleLowerCase());
+  const extensionKind = kindForExtension(fileExtension(file.name));
+  if (mimeKind && extensionKind && mimeKind !== extensionKind) return null;
+  return mimeKind ?? extensionKind;
+};
+
+const hasKindMismatch = (file: File): boolean => {
+  const mimeKind = kindForMime(file.type.toLocaleLowerCase());
+  const extensionKind = kindForExtension(fileExtension(file.name));
+  return mimeKind !== null && extensionKind !== null && mimeKind !== extensionKind;
+};
+
 const validateFile = (file: File): string | null => {
+  if (hasKindMismatch(file)) {
+    return `${file.name}: file type and extension mismatch — the content type and filename extension point to different file kinds. Rename the file or choose a file whose type and extension agree.`;
+  }
   const kind = attachmentKind(file);
   if (!kind) return `${file.name}: choose a JPG, PNG, WebP, TXT, CSV, or JSON file.`;
   if (file.size < 1) return `${file.name}: empty files cannot be uploaded.`;

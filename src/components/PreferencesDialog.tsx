@@ -110,6 +110,7 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
   );
   const [requestingNotifications, setRequestingNotifications] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeIsError, setNoticeIsError] = useState(false);
 
   useEffect(() => {
     pwaInstallPrompt.start();
@@ -120,6 +121,7 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
     const next = saveStoredTTSPreferences({ ...preferences, ...patch });
     AudioService.configure(next);
     setPreferences(next);
+    setNoticeIsError(false);
     setNotice('Voice preferences saved on this device.');
   };
 
@@ -127,8 +129,12 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
     if (installing) return;
     setInstalling(true);
     setNotice(null);
+    setNoticeIsError(false);
     try {
       setNotice(installOutcomeText(await pwaInstallPrompt.prompt()));
+    } catch {
+      setNoticeIsError(true);
+      setNotice('The install prompt could not be opened. Try again or use your browser’s install menu.');
     } finally {
       setInstalling(false);
     }
@@ -138,6 +144,7 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
     if (requestingNotifications) return;
     setRequestingNotifications(true);
     setNotice(null);
+    setNoticeIsError(false);
     try {
       if (notificationsEnabled) {
         setCompletionNotificationPreference('disabled');
@@ -154,6 +161,9 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
       } else {
         setNotice('Completion notifications are not supported by this browser.');
       }
+    } catch {
+      setNoticeIsError(true);
+      setNotice('Notification permission could not be requested. Check your browser settings and try again.');
     } finally {
       setRequestingNotifications(false);
     }
@@ -162,6 +172,7 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
   const closeDialog = () => {
     if (installing || requestingNotifications) return;
     setNotice(null);
+    setNoticeIsError(false);
     onClose();
   };
 
@@ -182,7 +193,7 @@ export const PreferencesDialog = ({ open, onClose, voiceEnabled }: PreferencesDi
       </DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2.25}>
-          {notice && <Alert severity="info" role="status">{notice}</Alert>}
+          {notice && <Alert severity={noticeIsError ? 'error' : 'info'} role={noticeIsError ? 'alert' : 'status'}>{notice}</Alert>}
 
           <Box component="section" aria-labelledby="wf-install-heading">
             <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.75 }}>

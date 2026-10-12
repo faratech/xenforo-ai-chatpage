@@ -258,6 +258,7 @@ describe('raw HTML the assistant emits', () => {
       'javascript:alert(1)',
       'data:text/html,<script>alert(1)</script>',
       '//evil.example/x',
+      '/\\evil.example/x',
       'vbscript:msgbox(1)',
     ];
 
@@ -265,6 +266,21 @@ describe('raw HTML the assistant emits', () => {
       const rendered = render(`<a href="${href}">Continue</a>`);
       expect(rendered.querySelector('a')).toBeNull();
     }
+  });
+
+  it('rejects a backslash protocol-relative href on a Markdown link', () => {
+    const rendered = render('[click](/\\evil.example/x)');
+
+    expect(rendered.querySelector('a')).toBeNull();
+    expect(rendered.textContent).toContain('click');
+  });
+
+  it('decodes entities once in a raw-anchor href and a Markdown image alt', () => {
+    const link = render('<a href="https://example.com/?a=1&amp;b=2">label</a>').querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://example.com/?a=1&b=2');
+
+    const image = render('![Tom &amp; Jerry](https://windowsforum.com/images/ai/answers/x.webp)').querySelector('img');
+    expect(image?.getAttribute('alt')).toBe('Tom & Jerry');
   });
 
   it('does not let an allowed tag smuggle itself out of an escaped region', () => {
@@ -417,6 +433,17 @@ describe('private-use citation tokens', () => {
     expect(output).not.toContain('turn0search1');
     expect(output).toContain('Answer');
     expect(output).toContain('continues');
+  });
+
+  it('routes non-lowercase token kinds through cite-vs-drop handling', () => {
+    const output = sanitizeAndParse(
+      `One ${cite('https://example.com/a', 'Cite')} two ${cite('turn0search1', 'NavList')} three`
+    );
+
+    expect(output).toContain('<sup>[1]</sup>');
+    expect(output).not.toContain('Cite');
+    expect(output).not.toContain('NavList');
+    expect(output).not.toContain('turn0search1');
   });
 
   it('drops a cite token carrying no usable URL', () => {

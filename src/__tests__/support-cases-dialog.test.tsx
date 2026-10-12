@@ -245,6 +245,44 @@ describe('SupportCasesDialog', () => {
     expect(apiMocks.upsertSupportCase).not.toHaveBeenCalled();
   });
 
+  it('resets busy when closed mid-save so reopening is not wedged', async () => {
+    const existing = supportCase();
+    apiMocks.listSupportCases.mockResolvedValue({ success: true, cases: [existing], next_cursor: null });
+    apiMocks.upsertSupportCase.mockImplementation((_payload: unknown, _rev: unknown, options: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    }));
+    const props = {
+      onClose: vi.fn(),
+      signedIn: true,
+      currentConversationId: 'conv_current',
+      attachmentIds: ['att_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    };
+    const { rerender } = render(
+      <ThemeProvider theme={theme}>
+        <SupportCasesDialog open {...props} />
+      </ThemeProvider>,
+    );
+    expect(await screen.findByText(/Revision 3/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Case title/), { target: { value: 'Edited title' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(apiMocks.upsertSupportCase).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+
+    rerender(
+      <ThemeProvider theme={theme}>
+        <SupportCasesDialog open={false} {...props} />
+      </ThemeProvider>,
+    );
+    rerender(
+      <ThemeProvider theme={theme}>
+        <SupportCasesDialog open {...props} />
+      </ThemeProvider>,
+    );
+
+    expect(await screen.findByText(/Revision 3/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled());
+  });
+
   it('shows a member-only explanation without loading private case data for guests', () => {
     renderDialog({ signedIn: false });
     expect(screen.getByRole('alert')).toHaveTextContent('Sign in to create private support cases');

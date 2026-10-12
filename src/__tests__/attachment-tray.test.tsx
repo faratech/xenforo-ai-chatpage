@@ -146,6 +146,30 @@ describe('AttachmentTray', () => {
     expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(2);
   });
 
+  it('rejects MIME/extension mismatches locally in both directions', async () => {
+    render(<Harness />);
+    const region = screen.getByRole('region', { name: 'File attachment drop zone' });
+
+    const textAsImage = new File([new Uint8Array(2 * 1024 * 1024)], 'notes.png', { type: 'text/plain' });
+    fireEvent.drop(region, { dataTransfer: { files: [textAsImage] } });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/mismatch/);
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+
+    const imageAsText = new File(['image'], 'photo.txt', { type: 'image/png' });
+    fireEvent.drop(region, { dataTransfer: { files: [imageAsText] } });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/mismatch/);
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+  });
+
+  it('keeps files with only one type signal working', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment() });
+    const { container } = render(<Harness />);
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    const extensionOnly = new File(['log'], 'only-extension.txt', { type: '' });
+    fireEvent.change(input!, { target: { files: [extensionOnly] } });
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(1));
+  });
+
   it('shows truthful queue progress while an upload is pending', async () => {
     let finishUpload: ((value: { success: true; attachment: ChatAttachment }) => void) | undefined;
     apiMocks.uploadChatAttachment.mockImplementation(() => new Promise(resolve => {

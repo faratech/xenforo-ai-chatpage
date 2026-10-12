@@ -55,7 +55,11 @@ const contrast = (first: string, second: string): number => {
   return (lighter + 0.05) / (darker + 0.05);
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  cleanup();
+});
 
 describe('message action menu', () => {
   it('keeps primary actions visible and places secondary actions in one accessible menu', async () => {
@@ -91,6 +95,35 @@ describe('message action menu', () => {
 
     await waitFor(() => expect(onCopyPermalink).toHaveBeenCalledWith('ai-action-1'));
     expect(screen.getByRole('status')).toHaveTextContent('Link to message copied.');
+  });
+});
+
+describe('code snippet download', () => {
+  it('defers object URL revocation by 10 seconds like the export helpers', () => {
+    const createObjectURL = vi.fn().mockReturnValue('blob:snippet');
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderMessage({
+      msg: {
+        id: 'ai-code-1',
+        role: 'ai',
+        rawContent: '```js\nconsole.log("hi");\n```',
+        timestamp: 1_700_000_000_000,
+        status: 'complete',
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Download code' }));
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(9_999);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:snippet');
   });
 });
 

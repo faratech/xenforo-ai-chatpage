@@ -359,6 +359,9 @@ describe('frame separators', () => {
     ['CRLF', '\r\n\r\n', '\r\n\r\n'],
     ['CRLF then LF', '\r\n\n', '\n\n'],
     ['LF then CRLF', '\n\r\n', '\n\n'],
+    ['CR only', '\r\r', '\r\r'],
+    ['CR then CRLF', '\r\r\n', '\r\n\r'],
+    ['CRLF then CR', '\r\n\r', '\r\r'],
   ])('parses every frame across a %s separator', async (_label, first, second) => {
     const payload = `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'A' })}${first}`
       + `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'B' })}${second}`

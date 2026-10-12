@@ -218,6 +218,58 @@ describe('AccountDataDialog', () => {
     expect(screen.getByRole('button', { name: 'Delete saved data' })).toBeDisabled();
   });
 
+  it('keeps the partial-delete warning in the main dialog after the confirmation is dismissed', async () => {
+    apiMocks.deleteAllSavedChatData.mockResolvedValue(deleteResult);
+    const onDeleteAllSucceeded = vi.fn().mockRejectedValue(new Error('Browser storage is locked.'));
+    renderDialog({ onDeleteAllSucceeded, onDeleteAllFinished: vi.fn() });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all data' }));
+    const confirmationDialog = screen.getByRole('dialog', { name: 'Permanently delete saved chat data?' });
+    fireEvent.change(within(confirmationDialog).getByLabelText('Confirmation phrase'), {
+      target: { value: ACCOUNT_DELETE_CONFIRMATION_PHRASE },
+    });
+    fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Delete saved data' }));
+    expect(await within(confirmationDialog).findByText(/Saved server data was deleted/)).toBeInTheDocument();
+
+    fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Permanently delete saved chat data?' })).not.toBeInTheDocument());
+    const mainDialog = screen.getByRole('dialog', { name: /Your AI chat data/ });
+    expect(within(mainDialog).getByText(/Saved server data was deleted, but this browser could not clear/)).toBeInTheDocument();
+  });
+
+  it('composes a resume failure with the primary delete error instead of overwriting it', async () => {
+    apiMocks.deleteAllSavedChatData.mockRejectedValue(new Error('Deletion service unavailable.'));
+    const onDeleteAllFinished = vi.fn().mockRejectedValue(new Error('Resume failed in test.'));
+    renderDialog({ onDeleteAllFinished });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all data' }));
+    const confirmationDialog = screen.getByRole('dialog', { name: 'Permanently delete saved chat data?' });
+    fireEvent.change(within(confirmationDialog).getByLabelText('Confirmation phrase'), {
+      target: { value: ACCOUNT_DELETE_CONFIRMATION_PHRASE },
+    });
+    fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Delete saved data' }));
+
+    const alert = await within(confirmationDialog).findByText(/Deletion service unavailable\./);
+    expect(alert).toHaveTextContent('Deletion service unavailable.');
+    expect(alert).toHaveTextContent('Resume failed in test.');
+  });
+
+  it('keeps the success message when resuming fails after a successful delete', async () => {
+    apiMocks.deleteAllSavedChatData.mockResolvedValue(deleteResult);
+    const onDeleteAllFinished = vi.fn().mockRejectedValue(new Error('Resume failed in test.'));
+    renderDialog({ onDeleteAllFinished });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all data' }));
+    const confirmationDialog = screen.getByRole('dialog', { name: 'Permanently delete saved chat data?' });
+    fireEvent.change(within(confirmationDialog).getByLabelText('Confirmation phrase'), {
+      target: { value: ACCOUNT_DELETE_CONFIRMATION_PHRASE },
+    });
+    fireEvent.click(within(confirmationDialog).getByRole('button', { name: 'Delete saved data' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('deleted from the server and this browser');
+    expect(await screen.findByText('Resume failed in test.')).toBeInTheDocument();
+  });
+
   it('states the separate provider cleanup and exposes no actions when signed out', () => {
     renderDialog({ signedIn: false });
     expect(screen.getByText(/Sign in to export or delete/)).toBeInTheDocument();
