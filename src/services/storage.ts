@@ -1,11 +1,11 @@
 /**
  * Per-user conversation persistence.
  *
- * Storage layout (v4): one JSON envelope per user containing the
+ * Storage layout (v5): one JSON envelope per user containing the
  * conversation map plus timestamped deletion tombstones and the queue of
  * server-side deletions that have not been confirmed yet. Tombstones make
  * deletions win across tabs: a conversation id with a tombstone is dead
- * everywhere, regardless of which tab wrote last. V4 keeps the unsent draft
+ * everywhere, regardless of which tab wrote last. V5 keeps the unsent draft
  * alongside each conversation so switching chats or reloading does not throw
  * away work in the composer.
  */
@@ -13,7 +13,7 @@
 import type {
   Annotation,
   ChatStoreV3,
-  ChatStoreV4,
+  ChatStoreV5,
   Conversation,
   ConversationMap,
   Message,
@@ -21,6 +21,7 @@ import type {
   StreamActivity,
 } from '../types';
 import { ENV } from '../config/env';
+import { normalizeLineage, normalizeResponseDetails } from './supportContracts';
 
 const UNSCOPED_LEGACY_CONVERSATIONS_KEY = 'chat_conversations';
 const UNSCOPED_LEGACY_CURRENT_KEY = 'current_conversation_id';
@@ -30,6 +31,8 @@ export interface StorageKeys {
   current: string;
   /** Quarantine for an envelope that failed to parse; overwritten per incident. */
   corrupt: string;
+  legacyStoreV4: string;
+  legacyCurrentV4: string;
   legacyStoreV3: string;
   legacyCurrentV3: string;
   legacyConversations: string;
@@ -39,9 +42,11 @@ export interface StorageKeys {
 export const storageKeys = (userId: string): StorageKeys => {
   const principal = encodeURIComponent(userId);
   return {
-    store: `chat_store:v4:${principal}`,
-    current: `current_conversation_id:v4:${principal}`,
+    store: `chat_store:v5:${principal}`,
+    current: `current_conversation_id:v5:${principal}`,
     corrupt: `chat_store_corrupt:v1:${principal}`,
+    legacyStoreV4: `chat_store:v4:${principal}`,
+    legacyCurrentV4: `current_conversation_id:v4:${principal}`,
     legacyStoreV3: `chat_store:v3:${principal}`,
     legacyCurrentV3: `current_conversation_id:v3:${principal}`,
     legacyConversations: `chat_conversations:v2:${principal}`,
@@ -118,7 +123,7 @@ const normalizeActivity = (value: unknown): StreamActivity | null => {
   if (
     typeof value.id !== 'string'
     || typeof value.label !== 'string'
-    || (value.state !== 'active' && value.state !== 'done')
+    || (value.state !== 'active' && value.state !== 'done' && value.state !== 'failed' && value.state !== 'cancelled')
   ) return null;
   return {
     id: value.id,
@@ -184,6 +189,8 @@ const normalizeMessage = (value: unknown): Message | null => {
       .filter((attachment): attachment is MessageAttachment => attachment !== null);
     if (attachments.length) message.attachments = attachments;
   }
+  const details = normalizeResponseDetails(value.details);
+  if (details) message.details = details;
   return message;
 };
 
@@ -245,6 +252,11 @@ const normalizeConversation = (id: string, value: unknown): Conversation | null 
   if (typeof value.metadataUpdatedAt === 'number' && Number.isFinite(value.metadataUpdatedAt)) {
     conversation.metadataUpdatedAt = value.metadataUpdatedAt;
   }
+  if (value.mode === 'chat' || value.mode === 'troubleshoot') conversation.mode = value.mode;
+  if (typeof value.supportCaseId === 'string' && /^case_[a-f0-9]{32}$/.test(value.supportCaseId)) conversation.supportCaseId = value.supportCaseId;
+  if (typeof value.supportCaseRevision === 'number' && Number.isSafeInteger(value.supportCaseRevision) && value.supportCaseRevision > 0) conversation.supportCaseRevision = value.supportCaseRevision;
+  const lineage = normalizeLineage(value.lineage);
+  if (lineage) conversation.lineage = lineage;
   if (value.needsServerResync === true) conversation.needsServerResync = true;
   return conversation;
 };
@@ -276,11 +288,11 @@ const parseTimestampMap = (value: unknown): Record<string, number> => {
   return result;
 };
 
-export const parseStore = (raw: string | null): ChatStoreV4 | null => {
+export const parseStore = (raw: string | null): ChatStoreV5 | null => {
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed) || parsed.version !== 4) return null;
+    if (!isRecord(parsed) || (parsed.version !== 5 && parsed.version !== 4)) return null;
     const conversations: ConversationMap = {};
     if (isRecord(parsed.conversations)) {
       for (const [id, value] of Object.entries(parsed.conversations)) {
@@ -290,7 +302,7 @@ export const parseStore = (raw: string | null): ChatStoreV4 | null => {
       }
     }
     return {
-      version: 4,
+      version: 5,
       conversations,
       tombstones: parseTimestampMap(parsed.tombstones),
       pendingServerDeletions: parseTimestampMap(parsed.pendingServerDeletions),
@@ -301,7 +313,7 @@ export const parseStore = (raw: string | null): ChatStoreV4 | null => {
   }
 };
 
-/** Parses the previous envelope without weakening the current v4 parser. */
+/** Parses the previous envelope without weakening the current v5 parser. */
 const parseV3Store = (raw: string | null): ChatStoreV3 | null => {
   if (!raw) return null;
   try {
@@ -326,16 +338,16 @@ const parseV3Store = (raw: string | null): ChatStoreV3 | null => {
   }
 };
 
-const upgradeV3Store = (store: ChatStoreV3): ChatStoreV4 => ({
-  version: 4,
+const upgradeV3Store = (store: ChatStoreV3): ChatStoreV5 => ({
+  version: 5,
   conversations: store.conversations,
   tombstones: store.tombstones,
   pendingServerDeletions: store.pendingServerDeletions,
   trimmed: {},
 });
 
-export const emptyStore = (): ChatStoreV4 => ({
-  version: 4,
+export const emptyStore = (): ChatStoreV5 => ({
+  version: 5,
   conversations: {},
   tombstones: {},
   pendingServerDeletions: {},
@@ -347,7 +359,7 @@ export const emptyStore = (): ChatStoreV4 => ({
  * always win over an older conversation copy, but only a tombstone means
  * deletion — a trimmed conversation still exists in the account.
  */
-export const applyTombstones = (store: ChatStoreV4): ChatStoreV4 => {
+export const applyTombstones = (store: ChatStoreV5): ChatStoreV5 => {
   const conversations: ConversationMap = {};
   for (const [id, conversation] of Object.entries(store.conversations)) {
     if (!(id in store.tombstones) && !(id in store.trimmed)) conversations[id] = conversation;
@@ -389,7 +401,7 @@ const selectMetadataWinner = (local: Conversation, remote: Conversation): Conver
 };
 
 /** Content, draft, cloud, and library metadata clocks merge independently per conversation. */
-export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV4 => {
+export const mergeStores = (local: ChatStoreV5, remote: ChatStoreV5): ChatStoreV5 => {
   const conversations: ConversationMap = { ...local.conversations };
   for (const [id, conversation] of Object.entries(remote.conversations)) {
     const existing = conversations[id];
@@ -405,8 +417,18 @@ export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV
       ? conversation
       : existing;
     const metadataWinner = selectMetadataWinner(existing, conversation);
+    const otherContent = contentWinner === existing ? conversation : existing;
+    const priorMessages = new Map(otherContent.messages.map(message => [message.id, message]));
     conversations[id] = {
       ...contentWinner,
+      mode: contentWinner.mode ?? otherContent.mode,
+      supportCaseId: contentWinner.mode === 'chat' ? undefined : contentWinner.supportCaseId ?? otherContent.supportCaseId,
+      supportCaseRevision: Math.max(contentWinner.supportCaseRevision ?? 0, otherContent.supportCaseRevision ?? 0) || undefined,
+      lineage: contentWinner.lineage ?? otherContent.lineage,
+      messages: contentWinner.messages.map(message => {
+        const prior = priorMessages.get(message.id);
+        return !message.details && prior?.details && prior.rawContent === message.rawContent ? { ...message, details: prior.details } : message;
+      }),
       draft: draftWinner.draft,
       draftUpdatedAt: draftWinner.draftUpdatedAt,
       cloudRevision: cloudWinner.cloudRevision,
@@ -437,7 +459,7 @@ export const mergeStores = (local: ChatStoreV4, remote: ChatStoreV4): ChatStoreV
   for (const [id, timestamp] of Object.entries(pendingServerDeletions)) {
     if ((tombstones[id] ?? 0) > timestamp) delete pendingServerDeletions[id];
   }
-  return applyTombstones({ version: 4, conversations, tombstones, pendingServerDeletions, trimmed });
+  return applyTombstones({ version: 5, conversations, tombstones, pendingServerDeletions, trimmed });
 };
 
 const sortedByKey = <T>(map: Record<string, T>): Record<string, T> => {
@@ -453,8 +475,8 @@ const sortedByKey = <T>(map: Record<string, T>): Record<string, T> => {
  * current-conversation-first ordering made cross-tab writes ping-pong
  * forever between tabs on different conversations.
  */
-export const serializeStore = (store: ChatStoreV4): string => JSON.stringify({
-  version: 4,
+export const serializeStore = (store: ChatStoreV5): string => JSON.stringify({
+  version: 5,
   conversations: sortedByKey(store.conversations),
   tombstones: sortedByKey(store.tombstones),
   pendingServerDeletions: sortedByKey(store.pendingServerDeletions),
@@ -472,21 +494,21 @@ const isQuotaError = (error: unknown): boolean => {
 };
 
 export interface LoadResult {
-  store: ChatStoreV4;
+  store: ChatStoreV5;
   currentId: string | null;
   /** localStorage was unusable; nothing persists this session. */
   unavailable: boolean;
 }
 
 /**
- * Loads the per-user store, migrating v3 (and older v2 maps) into a v4
+ * Loads the per-user store, migrating v3 (and older v2 maps) into a v5
  * envelope once, and dropping the unscoped pre-v2 keys that cannot be assigned
  * to a user safely on a shared browser.
  *
- * Ordering matters: the v4 write is attempted (with one cap-reduced retry)
+ * Ordering matters: the v5 write is attempted (with one cap-reduced retry)
  * BEFORE any legacy blob is removed. Deleting the legacy sources first meant
  * a quota failure mid-migration destroyed every conversation with no way to
- * retry. A corrupt v4 envelope is quarantined before recovery so it is never
+ * retry. A corrupt v5 envelope is quarantined before recovery so it is never
  * silently overwritten.
  */
 export const loadStore = (userId: string): LoadResult => {
@@ -494,6 +516,10 @@ export const loadStore = (userId: string): LoadResult => {
   try {
     const rawStore = localStorage.getItem(keys.store);
     let store = parseStore(rawStore);
+    const previous = parseStore(localStorage.getItem(keys.legacyStoreV4));
+    // An older open tab may still hold an unsent draft. Import by the existing
+    // merge clocks; never remove its source during this migration.
+    if (store && previous) store = mergeStores(store, previous);
     if (!store && rawStore) {
       // The envelope exists but is unreadable (e.g. a truncated write).
       // Quarantine it — best effort; quota pressure must not turn a recovery
@@ -503,12 +529,12 @@ export const loadStore = (userId: string): LoadResult => {
         console.warn('Chat history envelope was unreadable; quarantined it for inspection.');
       } catch { /* best effort */ }
     }
-    let currentId = localStorage.getItem(keys.current);
+    let currentId = localStorage.getItem(keys.current) ?? localStorage.getItem(keys.legacyCurrentV4);
     // A poisoned current id (e.g. "__proto__") must never reach an object
     // key or enforceConversationCap; the JSON paths already filter these.
     if (currentId && DANGEROUS_KEYS.has(currentId)) currentId = null;
 
-    /** Superseded keys may only be dropped once their data lives in v4 on disk. */
+    /** Superseded keys may only be dropped once their data lives in v5 on disk. */
     const removeSupersededKeys = () => {
       localStorage.removeItem(UNSCOPED_LEGACY_CONVERSATIONS_KEY);
       localStorage.removeItem(UNSCOPED_LEGACY_CURRENT_KEY);
@@ -521,15 +547,16 @@ export const loadStore = (userId: string): LoadResult => {
     if (store) {
       removeSupersededKeys();
     } else {
-      // One-time v3 → v4 migration. Preserve deletion state as well as the
+      // One-time v3 → v5 migration. Preserve deletion state as well as the
       // transcript; otherwise a deleted chat could reappear from another tab.
+      store = previous;
       const v3 = parseV3Store(localStorage.getItem(keys.legacyStoreV3));
-      if (v3) store = upgradeV3Store(v3);
+      if (!store && v3) store = upgradeV3Store(v3);
       const v3Current = localStorage.getItem(keys.legacyCurrentV3);
       if (v3Current && !DANGEROUS_KEYS.has(v3Current) && !currentId) currentId = v3Current;
 
       if (!store) {
-        // Older one-time v2 → v4 migration.
+        // Older one-time v2 → v5 migration.
         store = emptyStore();
         store.conversations = parseConversationMap(localStorage.getItem(keys.legacyConversations));
         const legacyCurrent = localStorage.getItem(keys.legacyCurrent);
@@ -582,7 +609,7 @@ export interface SaveResult {
    */
   trimmedIds: string[];
   /** The store as actually persisted (post cap, GC, and eviction). */
-  store: ChatStoreV4;
+  store: ChatStoreV5;
 }
 
 /**
@@ -596,18 +623,20 @@ export interface SaveResult {
  */
 export const saveStore = (
   userId: string,
-  store: ChatStoreV4,
+  store: ChatStoreV5,
   currentId: string,
 ): SaveResult => {
   const keys = storageKeys(userId);
-  let onDisk: ChatStoreV4 | null;
+  let onDisk: ChatStoreV5 | null;
   try {
     onDisk = parseStore(localStorage.getItem(keys.store));
+    const previous = parseStore(localStorage.getItem(keys.legacyStoreV4));
+    if (previous) onDisk = onDisk ? mergeStores(onDisk, previous) : previous;
   } catch (error) {
     console.warn('Failed to read chat history before saving:', error);
     return { persisted: false, evictedIds: [], trimmedIds: [], store: applyTombstones(store) };
   }
-  let prepared: ChatStoreV4 = onDisk ? mergeStores(store, onDisk) : applyTombstones(store);
+  let prepared: ChatStoreV5 = onDisk ? mergeStores(store, onDisk) : applyTombstones(store);
 
   /** Ids dropped by cap enforcement in the current pass. */
   const collectTrimmed = (before: ConversationMap): string[] => {
@@ -623,7 +652,7 @@ export const saveStore = (
    * `trimmed` map, never in `tombstones`: a trimmed conversation still exists
    * in the account, and only a tombstone may read as deletion intent.
    */
-  const markTrimmed = (target: ChatStoreV4, ids: string[]): ChatStoreV4 => {
+  const markTrimmed = (target: ChatStoreV5, ids: string[]): ChatStoreV5 => {
     if (!ids.length) return target;
     const trimmedAt = Date.now();
     const trimmed = { ...target.trimmed };
@@ -641,7 +670,7 @@ export const saveStore = (
   // started from. saveStore never awaits, so no task — including a cross-tab
   // storage event — can run before the first write; a re-read is only needed
   // on a retry, after a quota error has yielded to other tasks.
-  let latestDisk: ChatStoreV4 | null = onDisk;
+  let latestDisk: ChatStoreV5 | null = onDisk;
   for (let attempt = 0; ; attempt += 1) {
     try {
       // A storage event may land while the quota retry sleeps nothing but

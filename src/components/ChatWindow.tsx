@@ -5,6 +5,8 @@ import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import ButtonBase from '@mui/material/ButtonBase';
 import CircularProgress from '@mui/material/CircularProgress';
+import Checkbox from '@mui/material/Checkbox';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
@@ -93,6 +95,8 @@ import {
 import { loadLazyModule } from '../services/lazyImport';
 import { announceCompletedConversation } from '../services/completionNotifications';
 import { writeClipboardText } from './managementDialogHelpers';
+import { DEFAULT_CHAT_CAPABILITIES, normalizeResponseDetails, type ChatCapabilities, type ChatResponseDetails, type SupportCard, type SupportOutcome } from '../services/supportContracts';
+import type { SupportCase } from '../services/api';
 
 // Management surfaces are not part of the core chat path. Load each only
 // after its menu action so new product capabilities do not tax every session's
@@ -100,6 +104,10 @@ import { writeClipboardText } from './managementDialogHelpers';
 const SupportCasesDialog = React.lazy(() => loadLazyModule(async () => {
   const module = await import('./SupportCasesDialog');
   return { default: module.SupportCasesDialog };
+}));
+const GuidedSupportPanel = React.lazy(() => loadLazyModule(async () => {
+  const module = await import('./GuidedSupportPanel');
+  return { default: module.GuidedSupportPanel };
 }));
 const ShareLinksDialog = React.lazy(() => loadLazyModule(async () => {
   const module = await import('./ShareLinksDialog');
@@ -299,6 +307,10 @@ const savedConversationToLocal = (
     archivedAt: local.archivedAt,
   } : savedMetadata(saved)),
   needsServerResync: true,
+  ...(saved.mode ? { mode: saved.mode } : local?.mode ? { mode: local.mode } : {}),
+  ...(saved.mode ? { supportCaseId: saved.support_case_id } : local?.supportCaseId ? { supportCaseId: local.supportCaseId } : {}),
+  ...(saved.support_case_revision ? { supportCaseRevision: saved.support_case_revision } : {}),
+  ...(saved.lineage ? { lineage: saved.lineage } : local?.lineage ? { lineage: local.lineage } : {}),
 });
 
 const savedMetadata = (saved: SavedConversationSummary): Pick<Conversation,
@@ -451,8 +463,8 @@ const ActivitySteps: React.FC<{ activities: StreamActivity[] }> = ({ activities 
       <ActivityRow
         key={activity.id}
         label={activity.label}
-        detail={activity.detail}
-        done={activity.state === 'done'}
+        detail={activity.state === 'failed' ? 'Failed' : activity.state === 'cancelled' ? 'Cancelled' : activity.detail}
+        done={activity.state !== 'active'}
       />
     ))}
   </>
@@ -542,6 +554,7 @@ interface ActiveTurn {
   annotations: Annotation[];
   /** What the assistant is doing before/while it answers, for the wait UI. */
   activities: StreamActivity[];
+  details?: ChatResponseDetails;
   /** Drives the elapsed-time hint, and the duration shown on the finished trail. */
   startedAt: number;
   /** Lifecycle telemetry records the first non-empty text chunk exactly once. */
@@ -866,6 +879,13 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const [composerAttachments, setComposerAttachments] = useState<Record<string, ChatAttachment[]>>({});
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [supportCasesOpen, setSupportCasesOpen] = useState(false);
+  const [capabilities, setCapabilities] = useState<ChatCapabilities>(DEFAULT_CHAT_CAPABILITIES);
+  const [guidedSupportOpen, setGuidedSupportOpen] = useState(false);
+  const [activeSupportCase, setActiveSupportCase] = useState<SupportCase>();
+  const forkInProgressRef = useRef(false);
+  const [pendingFork, setPendingFork] = useState<{ conversationId: string; messageId: string; kind: 'branch' | 'edit' | 'regenerate'; content?: string; attachments: MessageAttachment[] }>();
+  const [selectedForkAttachments, setSelectedForkAttachments] = useState<string[]>([]);
+  const forkControllerRef = useRef<AbortController | null>(null);
   const [shareLinksOpen, setShareLinksOpen] = useState(false);
   const [accountDataOpen, setAccountDataOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -1029,11 +1049,31 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   }), [currentConversationId]);
   const currentConversation = conversations[currentConversationId] || defaultConversation;
 
-  /** Persists the composed v4 store and reflects quota evictions in memory. */
+  useEffect(() => {
+    const controller = new AbortController();
+    void ChatAPI.getChatCapabilities(controller.signal).then(result => {
+      if (!controller.signal.aborted) setCapabilities(result);
+    }).catch(() => { /* Older deployments keep all new capabilities disabled. */ });
+    return () => controller.abort();
+  }, [userId]);
+
+  useEffect(() => {
+    setActiveSupportCase(undefined);
+    if (!currentConversation.supportCaseId || isGuest || !capabilities.features.guided_support) return;
+    const controller = new AbortController();
+    void ChatAPI.getSupportCase(currentConversation.supportCaseId, { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setActiveSupportCase(result.case);
+    }).catch(() => {
+      if (!controller.signal.aborted) setErrorMessage('The selected support case is unavailable. Choose a case before continuing guided troubleshooting.');
+    });
+    return () => controller.abort();
+  }, [capabilities.features.guided_support, currentConversation.supportCaseId, currentConversationId, isGuest]);
+
+  /** Persists the composed v5 store and reflects quota evictions in memory. */
   const persistStore = useCallback(() => {
     if (storageLoadUnavailableRef.current) return;
     const result = saveStore(userId, {
-      version: 4,
+      version: 5,
       conversations: conversationsRef.current,
       tombstones: tombstonesRef.current,
       pendingServerDeletions: pendingDeletionsRef.current,
@@ -1474,6 +1514,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       title: conversation.title,
       messages: conversation.messages,
       created_at: conversation.createdAt,
+      ...(conversation.mode ? { mode: conversation.mode } : {}),
+      ...(conversation.supportCaseId ? { support_case_id: conversation.supportCaseId } : {}),
     }, revision, { signal });
 
     try {
@@ -1600,6 +1642,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             annotations: turn.annotations,
             turnId: turn.turnId,
             activities: turn.activities,
+            details: turn.details,
           }],
         }));
       } else if (turn.rollbackMessages) {
@@ -1683,6 +1726,48 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     createAndSelectConversation();
     reportClientEvent('conversation_created', { outcome: 'new' });
   }, [abortActiveTurn, cancelPendingCaptcha, createAndSelectConversation, stopListening]);
+
+  const handleSupportCaseUpdated = useCallback((supportCase: SupportCase) => {
+    const conversationId = currentConversationIdRef.current;
+    if (conversationsRef.current[conversationId]?.supportCaseId !== supportCase.id) return;
+    setActiveSupportCase(supportCase);
+    updateConversationById(conversationId, { supportCaseRevision: supportCase.revision });
+  }, [updateConversationById]);
+
+  const handleSelectSupportCase = useCallback((supportCase: SupportCase | null) => {
+    if (activeTurnRef.current || isClearingRef.current || attachmentBusyRef.current) return;
+    const current = conversationsRef.current[currentConversationIdRef.current];
+    if (current?.supportCaseId !== supportCase?.id && (current?.cloudRevision || current?.messages.some(message => message.role === 'user'))) {
+      if (Object.keys(conversationsRef.current).length >= maxConversations()) {
+        setErrorMessage('Manage saved chats before starting a different support case. Your current draft is saved.'); return;
+      }
+      createAndSelectConversation();
+    }
+    const conversationId = currentConversationIdRef.current;
+    const existing = conversationsRef.current[conversationId];
+    if (!existing) return;
+    const next = { ...conversationsRef.current, [conversationId]: {
+      ...existing, mode: supportCase ? 'troubleshoot' as const : 'chat' as const,
+      supportCaseId: supportCase?.id, supportCaseRevision: supportCase?.revision, updatedAt: Date.now(),
+    } };
+    conversationsRef.current = next;
+    setConversations(next);
+    setActiveSupportCase(supportCase ?? undefined);
+    setGuidedSupportOpen(Boolean(supportCase));
+    setAnnouncement(supportCase ? `Using support case ${supportCase.title}.` : 'Ordinary chat selected.');
+  }, [createAndSelectConversation]);
+
+  const handleSupportOutcome = useCallback(async (card: SupportCard, outcome: SupportOutcome, observed: string) => {
+    const conversation = conversationsRef.current[currentConversationIdRef.current];
+    if (!activeSupportCase || activeSupportCase.id !== conversation?.supportCaseId) throw new Error('Select the support case before recording a result.');
+    const progress = activeSupportCase.progress ?? { confirmed_facts: [], recent_changes: '', attempts: [] };
+    const attempts = progress.attempts.filter(item => item.id !== card.id);
+    if (attempts.length >= 50) throw new Error('This case has reached its check limit. Start a new case to keep recording results.');
+    const result = await ChatAPI.updateSupportCaseProgress(activeSupportCase.id, activeSupportCase.revision, {
+      ...progress, attempts: [...attempts, { id: card.id, check: card.check, expected_result: card.expected_result, outcome, observed_result: observed }],
+    });
+    handleSupportCaseUpdated(result.case);
+  }, [activeSupportCase, handleSupportCaseUpdated]);
 
   const handleSelectConversation = useCallback((conversationId: string, updateUrl = true) => {
     cloudInitialSelectionResolvedRef.current = true;
@@ -2054,6 +2139,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   }, [bulkDeleteConversationIds, handleDeleteConversation]);
 
   const quiesceCloudSync = useCallback(() => {
+    forkControllerRef.current?.abort();
     cloudSyncPausedRef.current = true;
     setCloudSyncPaused(true);
     setCloudReady(false);
@@ -2174,7 +2260,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     // Persist the tombstoned empty replacement synchronously. This both clears
     // the current browser and broadcasts the deletion to other open tabs.
     const result = saveStore(userId, {
-      version: 4,
+      version: 5,
       conversations: nextConversations,
       tombstones,
       pendingServerDeletions: {},
@@ -2512,7 +2598,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         scrollPositionsRef.current = parseScrollPositions(event.newValue);
         return;
       }
-      if (event.key !== keys.store || !event.newValue) return;
+      if ((event.key !== keys.store && event.key !== keys.legacyStoreV4) || !event.newValue) return;
       const remote = parseStore(event.newValue);
       if (!remote) return;
       const currentTombstoned = remote.tombstones[currentConversationIdRef.current] !== undefined
@@ -2523,7 +2609,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       // without reviving the old cross-tab ping-pong.
       setConversations(previous => {
         const merged = mergeStores({
-          version: 4,
+          version: 5,
           conversations: previous,
           tombstones: tombstonesRef.current,
           pendingServerDeletions: pendingDeletionsRef.current,
@@ -2603,6 +2689,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       }
       if (error.code === 'timeout') return 'The AI service took too long to respond. Please retry.';
       if (error.code === 'network_error') return 'Network error. Check your connection and retry.';
+      if (error.code === 'revision_conflict') return 'The support case changed. Reload its saved facts, then retry your message.';
+      if (error.code === 'support_case_required' || error.code === 'support_case_switch_requires_new_chat') return 'Start a new chat or choose another support case to continue troubleshooting.';
       if (error.retryable) return 'The AI service is temporarily unavailable. Please retry.';
     }
     return 'Failed to send the message. Please retry.';
@@ -2888,7 +2976,18 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         resetConversation: resetConversation || undefined,
         history,
         attachmentIds: turnAttachments.map(attachment => attachment.id),
+        ...(Object.values(capabilities.features).some(Boolean) ? { supportContractVersion: 1 as const } : {}),
+        ...(capabilities.features.guided_support && existingConversation.supportCaseId ? {
+          mode: 'troubleshoot' as const,
+          supportCaseId: existingConversation.supportCaseId,
+          supportCaseRevision: activeSupportCase?.id === existingConversation.supportCaseId ? activeSupportCase.revision : existingConversation.supportCaseRevision,
+        } : {}),
         turnId,
+        onDetails: (details) => {
+          const active = activeTurnRef.current;
+          if (!active || active.requestId !== requestId) return;
+          active.details = details;
+        },
         onActivity: (next) => {
           const active = activeTurnRef.current;
           if (!active || active.requestId !== requestId) return;
@@ -2965,6 +3064,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           responseId: result.responseId,
           turnId: turn.turnId,
           activities: steps,
+          details: normalizeResponseDetails(result.details ?? activeTurnRef.current?.details),
         }],
         needsServerResync: false,
       }));
@@ -3037,6 +3137,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
               annotations,
               turnId: turn.turnId,
               activities: active.activities,
+            details: active.details,
             }],
           }));
         }
@@ -3069,6 +3170,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             annotations,
             turnId: turn.turnId,
             activities: active.activities,
+            details: active.details,
           }],
         }));
       } else {
@@ -3086,6 +3188,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       setUsageRefresh(value => value + 1);
     }
   }, [
+    activeSupportCase,
+    capabilities.features,
     clearActiveTurn,
     clearSentAttachments,
     enforceCapWithLocalTrim,
@@ -3160,7 +3264,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   }, [cancelPendingCaptcha, cleanupTurnstileWidget, showCaptcha]);
 
   const branchGuard = useCallback((): Conversation | null => {
-    if (activeTurnRef.current || isClearingRef.current) return null;
+    if (activeTurnRef.current || isClearingRef.current || forkInProgressRef.current) return null;
     if (attachmentBusyRef.current) {
       setErrorMessage('Wait for the current file upload to finish before changing this branch.');
       return null;
@@ -3172,9 +3276,113 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     return conversationsRef.current[currentConversationIdRef.current] ?? null;
   }, []);
 
+  useEffect(() => () => { forkControllerRef.current?.abort(); }, []);
+
+  const createPreservedFork = useCallback(async (
+    request: { conversationId: string; messageId: string; kind: 'branch' | 'edit' | 'regenerate'; content?: string },
+    attachmentIds: string[] = [],
+  ) => {
+    let source = conversationsRef.current[request.conversationId];
+    if (!source || !branchGuard() || forkInProgressRef.current) return;
+    if (Object.keys(conversationsRef.current).length >= maxConversations()) {
+      setErrorMessage('History is at its limit. Manage saved chats before creating another branch. Your original chat is unchanged.');
+      return;
+    }
+    if (!isOnlineRef.current) { setErrorMessage('Reconnect before creating a branch.'); return; }
+    forkInProgressRef.current = true;
+    const controller = new AbortController();
+    forkControllerRef.current = controller;
+    isClearingRef.current = true;
+    setIsClearing(true);
+    try {
+      let fork: Conversation;
+      let clonedAttachments: MessageAttachment[] = [];
+      if (isGuest) {
+        const index = source.messages.findIndex(message => message.id === request.messageId);
+        if (index < 0) throw new Error('The fork point is no longer available.');
+        const now = Date.now();
+        fork = {
+          id: generateConversationId(), title: `Branch of ${source.title}`.slice(0, 80),
+          messages: source.messages.slice(0, index + (request.kind === 'branch' ? 1 : 0)).map(message => ({
+            ...message, attachments: undefined, details: undefined, responseId: undefined, turnId: undefined,
+            annotations: message.annotations?.filter(annotation => annotation.type === 'url_citation'),
+          })),
+          createdAt: now, updatedAt: now, draft: '', needsServerResync: true,
+          lineage: { parent_conversation_id: source.id, fork_message_id: request.messageId, family_id: source.lineage?.family_id ?? source.id },
+        };
+      } else {
+        if (!source.cloudRevision || source.cloudSyncedLocalUpdatedAt !== source.updatedAt) {
+          if (!await syncConversationToCloud(source.id, controller.signal)) throw new Error('Save this chat successfully before branching.');
+          source = conversationsRef.current[request.conversationId];
+        }
+        if (controller.signal.aborted) return;
+        if (!source?.cloudRevision) throw new Error('This chat has not finished saving yet.');
+        const result = await ChatAPI.forkConversation({
+          sourceConversationId: source.id, expectedRevision: source.cloudRevision,
+          forkMessageId: request.messageId, kind: request.kind, attachmentIds,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        fork = savedConversationToLocal(result.conversation);
+        clonedAttachments = result.attachments?.map(item => item.attachment) ?? [];
+      }
+      const next = { ...conversationsRef.current, [fork.id]: fork };
+      conversationsRef.current = next;
+      setConversations(next);
+      if (currentConversationIdRef.current !== request.conversationId) {
+        if (request.content) setConversationDraft(fork.id, request.content);
+        setPendingFork(undefined);
+        setAnnouncement('The alternate approach was saved in history. Your selected chat is unchanged.');
+        return;
+      }
+      handleSelectConversation(fork.id);
+      setPendingFork(undefined);
+      setAnnouncement('Created an alternate approach. The original chat is preserved.');
+      isClearingRef.current = false;
+      setIsClearing(false);
+      forkInProgressRef.current = false;
+      if (request.kind !== 'branch') {
+        let base = fork.messages;
+        let content = request.content ?? '';
+        if (request.kind === 'regenerate') {
+          const lastUser = base.map(message => message.role).lastIndexOf('user');
+          if (lastUser < 0) throw new Error('There is no user message at this fork point.');
+          content = base[lastUser].rawContent;
+          base = base.slice(0, lastUser);
+        }
+        await runTurn({ conversationId: fork.id, content, kind: 'send', baseMessages: base, forceReset: true, attachments: clonedAttachments });
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted) setErrorMessage(cause instanceof Error ? cause.message : 'Could not create the branch.');
+    } finally {
+      forkInProgressRef.current = false;
+      isClearingRef.current = false;
+      setIsClearing(false);
+      forkControllerRef.current = null;
+    }
+  }, [branchGuard, handleSelectConversation, isGuest, runTurn, setConversationDraft, syncConversationToCloud]);
+
+  const requestPreservedFork = useCallback((messageId: string, kind: 'branch' | 'edit' | 'regenerate', content?: string) => {
+    const source = branchGuard();
+    if (!source) return;
+    const index = source.messages.findIndex(message => message.id === messageId);
+    if (index < 0) return;
+    const attachments = [...new Map(source.messages.slice(0, index + 1).flatMap(message => message.attachments ?? []).map(item => [item.id, item])).values()];
+    const request = { conversationId: source.id, messageId, kind, content, attachments };
+    if (attachments.length && !isGuest) {
+      setPendingFork(request);
+      setSelectedForkAttachments([]);
+    } else void createPreservedFork(request);
+  }, [branchGuard, createPreservedFork, isGuest]);
+
   const handleBranchConversation = useCallback(() => {
     const source = branchGuard();
     if (!source) return;
+    if (capabilities.features.branches) {
+      const last = source.messages[source.messages.length - 1];
+      if (last) requestPreservedFork(last.id, 'branch');
+      return;
+    }
     const id = generateConversationId();
     const now = Date.now();
     const branched: Conversation = {
@@ -3222,7 +3430,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       outcome: 'branch',
       value: branched.messages.length,
     });
-  }, [branchGuard, enforceCapWithLocalTrim]);
+  }, [branchGuard, capabilities.features.branches, enforceCapWithLocalTrim, requestPreservedFork]);
 
   const handleEditMessage = useCallback((id: string, newContent: string) => {
     if (!isOnlineRef.current) {
@@ -3231,6 +3439,10 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     }
     const conversation = branchGuard();
     if (!conversation) return false;
+    if (capabilities.features.branches) {
+      requestPreservedFork(id, 'edit', newContent);
+      return true;
+    }
     const index = conversation.messages.findIndex(message => message.id === id);
     if (index < 0) return false;
     const sourceMessage = conversation.messages[index];
@@ -3249,11 +3461,16 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     // move focus to the stable transcript host after React commits the edit.
     requestAnimationFrame(() => messagesContainerRef.current?.focus());
     return true;
-  }, [branchGuard, runTurn]);
+  }, [branchGuard, capabilities.features.branches, requestPreservedFork, runTurn]);
 
-  const handleRegenerateMessage = useCallback(() => {
+  const handleRegenerateMessage = useCallback((messageId?: string) => {
     const conversation = branchGuard();
     if (!conversation) return;
+    if (capabilities.features.branches) {
+      const selected = messageId ?? conversation.messages[conversation.messages.length - 1]?.id;
+      if (selected) requestPreservedFork(selected, 'regenerate');
+      return;
+    }
     const lastUserIndex = conversation.messages.map(message => message.role).lastIndexOf('user');
     if (lastUserIndex < 0) return;
     const sourceMessage = conversation.messages[lastUserIndex];
@@ -3267,7 +3484,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       forceReset: true,
       attachments: sourceMessage.attachments?.map(attachment => ({ ...attachment })),
     });
-  }, [branchGuard, runTurn]);
+  }, [branchGuard, capabilities.features.branches, requestPreservedFork, runTurn]);
 
   const handleRetryMessage = useCallback((id: string) => {
     const conversation = branchGuard();
@@ -3809,10 +4026,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             annotations: active.annotations,
             turnId: active.turnId,
             activities: active.activities,
+            details: active.details,
           }],
         };
       saveStore(userId, {
-        version: 4,
+        version: 5,
         conversations: {
           ...conversationsRef.current,
           [active.conversationId]: restored,
@@ -3867,6 +4085,14 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         onBusyChange={handleAttachmentBusyChange}
         onRemoveAttachment={handleRemoveComposerAttachment}
         disabled={isLoading || showCaptcha || !isOnline}
+        diagnosticCapability={{
+          enabled: capabilities.features.diagnostics,
+          maxAttachments: capabilities.limits.max_attachments,
+          maxImageBytes: capabilities.limits.max_image_bytes,
+          maxTextFileBytes: capabilities.limits.max_text_file_bytes,
+          maxTotalTextBytes: capabilities.limits.max_total_text_bytes,
+          maxTotalImageBytes: capabilities.limits.max_total_image_bytes,
+        }}
       />
     </React.Suspense>
   ), [
@@ -3879,6 +4105,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     isLoading,
     isOnline,
     showCaptcha,
+    capabilities,
   ]);
   const currentSupportAttachmentIds = [...new Set([
     ...currentConversation.messages.flatMap(message => message.attachments?.map(attachment => attachment.id) ?? []),
@@ -4099,7 +4326,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             setChatMenuAnchor(null);
             requestRenameConversation(currentConversationIdRef.current);
           }}><EditOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Rename</MenuItem>
-          <MenuItem disabled={isLoading} onClick={handleBranchConversation}>
+          <MenuItem disabled={isLoading || (capabilities.features.branches && !lastUserMessageId)} onClick={handleBranchConversation}>
             <AccountTreeOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Branch to new chat
           </MenuItem>
           {!isGuest && (
@@ -4112,6 +4339,11 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           )}
           <Divider />
           <ListSubheader disableSticky component="div">Tools</ListSubheader>
+          {!isGuest && capabilities.features.guided_support && (
+            <MenuItem onClick={() => { setChatMenuAnchor(null); setGuidedSupportOpen(true); }}>
+              <TroubleshootOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Troubleshoot Windows
+            </MenuItem>
+          )}
           {!isGuest && (
             <MenuItem onClick={() => {
               setChatMenuAnchor(null);
@@ -4189,14 +4421,16 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
                       userAvatar={userAvatar}
                       userName={userName}
                       onEdit={handleEditMessage}
-                      onRegenerate={handleRegenerateMessage}
+                      onRegenerate={() => handleRegenerateMessage(message.id)}
+                      canBranch={capabilities.features.branches && index > 0}
+                      onSupportOutcome={capabilities.features.support_cards && activeSupportCase ? handleSupportOutcome : undefined}
                       onRetry={handleRetryMessage}
                       isLastMessage={isLast}
                       isLastUserMessage={isLastUser}
                       isStreaming={false}
                       // Only the rows that actually render busy-gated actions see
                       // this flip, so the rest keep their memo across a turn.
-                      isBusy={isLoading && (isLast || isLastUser)}
+                      isBusy={isLoading && (isLast || isLastUser || capabilities.features.branches)}
                       isSpeaking={speakingMessageId === message.id}
                       onSpeak={ENV.ENABLE_VOICE ? handleSpeakMessage : undefined}
                       onStopSpeaking={handleStopSpeaking}
@@ -4344,6 +4578,24 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           </Alert>
         )}
 
+        {capabilities.features.branches && sortedConversations.filter(item => (item.lineage?.family_id ?? item.id) === (currentConversation.lineage?.family_id ?? currentConversation.id)).length > 1 && (
+          <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1, px: 2, pt: 1 }}>
+            <Typography variant="caption">Alternate approach</Typography>
+            {currentConversation.lineage && conversations[currentConversation.lineage.parent_conversation_id] && <Button size="small" disabled={isLoading} onClick={() => handleSelectConversation(currentConversation.lineage!.parent_conversation_id)}>Original approach</Button>}
+            {sortedConversations.filter(item => (item.lineage?.family_id ?? item.id) === (currentConversation.lineage?.family_id ?? currentConversation.id)).map((item, index) => (
+              <Button key={item.id} size="small" disabled={isLoading || item.id === currentConversationId} onClick={() => handleSelectConversation(item.id)} aria-label={`Open approach ${index + 1}: ${item.title}`}>{index + 1}</Button>
+            ))}
+          </Box>
+        )}
+        {!isGuest && capabilities.features.guided_support && (guidedSupportOpen || currentConversation.supportCaseId) && (
+          <React.Suspense fallback={<Typography role="status" sx={{ px: 2 }}>Loading troubleshooting tools…</Typography>}>
+            <GuidedSupportPanel key={currentConversationId} activeCase={activeSupportCase} onSelect={handleSelectSupportCase}
+              onUpdated={handleSupportCaseUpdated} disabled={isLoading || !isOnline} onManage={() => setSupportCasesOpen(true)} />
+          </React.Suspense>
+        )}
+        {!isGuest && capabilities.features.guided_support && !guidedSupportOpen && !currentConversation.supportCaseId && (
+          <Button size="small" sx={{ alignSelf: 'flex-start', ml: 2, mt: 0.5 }} onClick={() => setGuidedSupportOpen(true)}>Troubleshoot Windows</Button>
+        )}
         <InputArea
           input={input}
           setInput={setCurrentDraft}
@@ -4501,10 +4753,29 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
             signedIn
             currentConversationId={currentCloudSynced ? currentConversation.id : undefined}
             attachmentIds={currentSupportAttachmentIds}
+            onCasesChange={cases => {
+              const selected = cases.find(item => item.id === currentConversation.supportCaseId);
+              if (selected) handleSupportCaseUpdated(selected);
+            }}
             onForumHandoffCopied={() => setAnnouncement('Support case BBCode copied. Nothing was posted automatically.')}
           />
         </React.Suspense>
       )}
+
+      <Dialog open={Boolean(pendingFork)} onClose={() => { if (!isClearing) setPendingFork(undefined); }} aria-labelledby="wf-fork-files-title" fullWidth maxWidth="sm">
+        <DialogTitle id="wf-fork-files-title">Choose evidence for the alternate approach</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1 }}>The original chat stays saved. Only the files you select will be copied to the new branch.</Typography>
+          {pendingFork?.attachments.map(attachment => <FormControlLabel key={attachment.id} sx={{ display: 'flex' }}
+            control={<Checkbox checked={selectedForkAttachments.includes(attachment.id)} disabled={isClearing} onChange={event => setSelectedForkAttachments(previous => event.target.checked ? [...previous, attachment.id] : previous.filter(id => id !== attachment.id))} />}
+            label={`${attachment.name} (${attachment.size.toLocaleString()} bytes)`} />)}
+          {selectedForkAttachments.length > capabilities.limits.max_attachments && <Alert severity="warning">Choose at most {capabilities.limits.max_attachments} files.</Alert>}
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={isClearing} onClick={() => setPendingFork(undefined)}>Cancel</Button>
+          <Button disabled={isClearing || selectedForkAttachments.length > capabilities.limits.max_attachments} onClick={() => { if (pendingFork) void createPreservedFork(pendingFork, selectedForkAttachments); }}>Create alternate approach</Button>
+        </DialogActions>
+      </Dialog>
 
       {!isGuest && accountDataOpen && (
         <React.Suspense fallback={null}>

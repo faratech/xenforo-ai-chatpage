@@ -261,7 +261,7 @@ function wfChatProductNormalizeMessages($value, ?string &$error = null): ?array
                 $label = wfChatProductCleanText($activity['label'] ?? null, 160, false);
                 $state = $activity['state'] ?? null;
                 if ($activityId === null || $label === null || $label === ''
-                    || !in_array($state, ['active', 'done'], true)) {
+                    || !in_array($state, ['active', 'done', 'failed', 'cancelled'], true)) {
                     $error = 'invalid_activity';
                     return null;
                 }

@@ -51,6 +51,7 @@
     "test:watch": "vitest",
     "verify:dist": "node scripts/verify-dist.mjs",
     "check": "npm run lint && npm run typecheck && npm run test && npm run test:ops && npm run build && npm run verify:dist && npm run test:release && npm run test:browser",
-    "deploy": "./deploy.sh"
+    "deploy": "./deploy.sh",
+    "test:support-eval": "node scripts/evaluate-support.mjs"
   }
 }

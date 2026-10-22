@@ -21,6 +21,8 @@ vi.mock('../services/api', async importOriginal => {
 
 import { AttachmentTray } from '../components/AttachmentTray';
 import type { ChatAttachment } from '../services/api';
+import type { DiagnosticAttachmentCapability } from '../services/diagnosticFiles';
+import { readDiagnosticFile } from '../services/diagnosticFiles';
 
 const theme = createTheme();
 
@@ -30,6 +32,8 @@ interface HarnessProps {
   compact?: boolean;
   onBusyChange?: (busy: boolean) => void;
   onRemoveAttachment?: (attachment: ChatAttachment) => void | Promise<void>;
+  diagnosticCapability?: DiagnosticAttachmentCapability;
+  conversationId?: string;
 }
 
 const Harness = ({
@@ -38,6 +42,8 @@ const Harness = ({
   compact = false,
   onBusyChange,
   onRemoveAttachment,
+  diagnosticCapability,
+  conversationId = 'conv_current',
 }: HarnessProps) => {
   const [attachments, setAttachments] = useState(initial);
   return (
@@ -46,11 +52,12 @@ const Harness = ({
         <AttachmentTray
           compact={compact}
           signedIn={signedIn}
-          conversationId="conv_current"
+          conversationId={conversationId}
           attachments={attachments}
           onChange={setAttachments}
           onBusyChange={onBusyChange}
           onRemoveAttachment={onRemoveAttachment}
+          diagnosticCapability={diagnosticCapability}
         />
         {compact && <textarea aria-label="Composer text" />}
       </div>
@@ -66,6 +73,15 @@ const attachment = (overrides: Partial<ChatAttachment> = {}): ChatAttachment => 
   expires_at: Date.now() + 60_000,
   ...overrides,
 });
+
+const diagnostics: DiagnosticAttachmentCapability = {
+  enabled: true,
+  maxAttachments: 4,
+  maxImageBytes: 8 * 1024 * 1024,
+  maxTextFileBytes: 1024 * 1024,
+  maxTotalTextBytes: 131072,
+  maxTotalImageBytes: 16 * 1024 * 1024,
+};
 
 beforeEach(() => {
   apiMocks.uploadChatAttachment.mockReset();
@@ -249,5 +265,110 @@ describe('AttachmentTray', () => {
     expect(row.children).toHaveLength(8);
     expect(window.getComputedStyle(row).flexWrap).toBe('nowrap');
     expect(window.getComputedStyle(row).overflowX).toBe('auto');
+  });
+
+  it('reviews local text, explicitly applies redactions and uploads only the edited UTF-8 derivative', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment({ name: 'report.log.reviewed.txt' }) });
+    const busyChanges = vi.fn();
+    render(<Harness diagnosticCapability={diagnostics} onBusyChange={busyChanges} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['password=secret\nWindows build 26100'], 'report.log', { type: 'text/plain' })] },
+    });
+    expect(await screen.findByRole('dialog', { name: 'Review diagnostic files' })).toBeInTheDocument();
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'Reviewed text for report.log' })).toHaveValue('password=secret\nWindows build 26100');
+    fireEvent.click(screen.getByRole('button', { name: 'Apply 1 suggested redactions to report.log' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reviewed text for report.log' }), { target: { value: 'password=[REDACTED]\nWindows build 26100\nReviewed note' } });
+    expect(screen.getByLabelText('Numbered uploaded lines for report.log')).toHaveTextContent('3 Reviewed note');
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(1));
+    const uploaded = apiMocks.uploadChatAttachment.mock.calls[0]![0] as File;
+    expect(uploaded.name).toBe('report.log.reviewed.txt');
+    expect(await readDiagnosticFile(uploaded, 1024 * 1024)).toBe('password=[REDACTED]\nWindows build 26100\nReviewed note');
+    await waitFor(() => expect(busyChanges).toHaveBeenLastCalledWith(false));
+  });
+
+  it('cancels review without uploading or changing existing handles', async () => {
+    const busyChanges = vi.fn();
+    render(<Harness initial={[attachment()]} diagnosticCapability={diagnostics} onBusyChange={busyChanges} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['<report>local only</report>'], 'report.xml', { type: 'text/xml' })] },
+    });
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel review' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Attached files')).toHaveTextContent('report.txt');
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    expect(busyChanges).toHaveBeenLastCalledWith(false);
+  });
+
+  it('rejects binary NFO before review and keeps the exact omitted filename visible', async () => {
+    render(<Harness diagnosticCapability={diagnostics} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File([new Uint8Array([0x4d, 0x5a, 0, 0])], 'private.nfo', { type: 'application/octet-stream' })] },
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/private\.nfo:.*binary file/);
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('blocks combined text oversize until the user edits it, with no truncation', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment({ id: 'att_cccccccccccccccccccccccccccccccc', name: 'large.log.reviewed.txt' }) });
+    render(<Harness initial={[attachment({ size: 131060 })]} diagnosticCapability={diagnostics} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['x'.repeat(100)], 'large.log', { type: 'text/plain' })] },
+    });
+    await screen.findByRole('dialog');
+    expect(screen.getByRole('alert')).toHaveTextContent(/Selected text totals.*no text will be truncated/);
+    expect(screen.getByRole('button', { name: 'Upload reviewed selection' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Reviewed text for large.log' })).toHaveValue('x'.repeat(100));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reviewed text for large.log' }), { target: { value: 'x'.repeat(12) } });
+    expect(screen.getByRole('button', { name: 'Upload reviewed selection' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(1));
+    expect((apiMocks.uploadChatAttachment.mock.calls[0]![0] as File).size).toBe(12);
+  });
+
+  it('enforces the four-file turn limit through explicit selection and reports exclusions', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment({ name: 'included.txt' }) });
+    render(<Harness initial={Array.from({ length: 3 }, (_, i) => attachment({ id: `existing_${i}`, name: `${i}.txt` }))} diagnosticCapability={diagnostics} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['one'], 'one.log'), new File(['two'], 'two.log')] },
+    });
+    await screen.findByRole('dialog');
+    expect(screen.getByRole('button', { name: 'Upload reviewed selection' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Include two.log' }));
+    expect(screen.getByText('two.log will be excluded.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(1));
+    expect(apiMocks.uploadChatAttachment.mock.calls[0]![0].name).toBe('one.log.reviewed.txt');
+    expect(await screen.findByRole('alert')).toHaveTextContent('two.log: excluded from upload by your selection');
+  });
+
+  it('uses server limits for images and leaves legacy diagnostic extensions disabled without capability', async () => {
+    const { rerender } = render(<Harness />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['report'], 'report.log', { type: 'application/octet-stream' })] },
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent('choose a JPG, PNG, WebP, TXT, CSV, or JSON');
+    rerender(<Harness diagnosticCapability={{ ...diagnostics, maxTotalImageBytes: 4 }} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['123'], 'one.png', { type: 'image/png' }), new File(['456'], 'two.png', { type: 'image/png' })] },
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Selected images total 6 bytes');
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+  });
+
+  it('discards a private local preview when the conversation changes', async () => {
+    const busyChanges = vi.fn();
+    const { rerender } = render(<Harness diagnosticCapability={diagnostics} onBusyChange={busyChanges} />);
+    fireEvent.drop(screen.getByRole('region', { name: 'File attachment drop zone' }), {
+      dataTransfer: { files: [new File(['local private text'], 'private.log')] },
+    });
+    await screen.findByRole('dialog');
+    rerender(<Harness diagnosticCapability={diagnostics} onBusyChange={busyChanges} conversationId="conv_other" />);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    expect(busyChanges).toHaveBeenLastCalledWith(false);
   });
 });

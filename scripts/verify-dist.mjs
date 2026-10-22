@@ -158,9 +158,12 @@ const totalJsGzipBytes = [...jsGzipSizes.values()].reduce((total, size) => total
 // member-only support/share/account/export dialogs that are never fetched on
 // the core path. Raised 2026-08-22 from 265 KiB for storage data-loss guards,
 // and 2026-09-28 to 282 KiB for React 19.3, MUI 9.4, and Marked 18 updates.
+// 2026-10-22: 292 KiB includes optional guided support and diagnostic review.
+// Same-dependency baseline measured 284865 gzip bytes; the new functionality
+// adds approximately 13 KiB across all routes. Optional evidence UI stays lazy.
 // The strict 4 KiB bootstrap and 50 KiB ChatWindow caps below still protect
 // startup cost.
-const totalJsGzipBudget = 282 * 1024;
+const totalJsGzipBudget = 292 * 1024;
 if (totalJsGzipBytes > totalJsGzipBudget) {
   throw new Error(
     `Compressed JavaScript budget exceeded: ${totalJsGzipBytes} bytes gzip > ${totalJsGzipBudget}.`,

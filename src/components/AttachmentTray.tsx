@@ -8,12 +8,30 @@ import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import Alert from '@mui/material/Alert';
+import Checkbox from '@mui/material/Checkbox';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
+import FormControlLabel from '@mui/material/FormControlLabel';
+import TextField from '@mui/material/TextField';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
 import { APIError, ChatAPI } from '../services/api';
 import type { ChatAttachment } from '../services/api';
 import { reportClientEvent } from '../services/telemetry';
+import {
+  DIAGNOSTIC_EXTENSIONS,
+  diagnosticBudgetErrors,
+  readDiagnosticFile,
+  reviewedDiagnosticFile,
+  suggestDiagnosticRedactions,
+  utf8Size,
+} from '../services/diagnosticFiles';
+import type { DiagnosticAttachmentCapability } from '../services/diagnosticFiles';
+
+export type { DiagnosticAttachmentCapability } from '../services/diagnosticFiles';
 
 export const ATTACHMENT_MAX_COUNT = 8;
 export const ATTACHMENT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -47,6 +65,18 @@ interface UploadProgress {
   fileName: string;
 }
 
+interface ReviewFile {
+  file: File;
+  text?: string;
+  included: boolean;
+}
+
+interface DiagnosticReview {
+  files: ReviewFile[];
+  omissions: string[];
+  conversationId?: string;
+}
+
 export interface AttachmentTrayProps {
   /** Uploads are a member-only backend capability. */
   signedIn: boolean;
@@ -61,6 +91,8 @@ export interface AttachmentTrayProps {
   onBusyChange?: (busy: boolean) => void;
   /** Compact controls designed to sit inside the rounded message composer. */
   compact?: boolean;
+  /** Server-advertised reviewed text uploads; absent preserves legacy uploads. */
+  diagnosticCapability?: DiagnosticAttachmentCapability;
   /**
    * Optional server cleanup hook. The chip remains when this rejects (for
    * example, when the backend reports that a saved case still uses the file).
@@ -85,28 +117,33 @@ const kindForExtension = (extension: string): AttachmentKind | null => {
   return null;
 };
 
-const attachmentKind = (file: File): AttachmentKind | null => {
+const attachmentKind = (file: File, diagnostics = false): AttachmentKind | null => {
   const mimeKind = kindForMime(file.type.toLocaleLowerCase());
-  const extensionKind = kindForExtension(fileExtension(file.name));
+  const extensionKind = diagnostics && DIAGNOSTIC_EXTENSIONS.has(fileExtension(file.name))
+    ? 'text' : kindForExtension(fileExtension(file.name));
   if (mimeKind && extensionKind && mimeKind !== extensionKind) return null;
   return mimeKind ?? extensionKind;
 };
 
-const hasKindMismatch = (file: File): boolean => {
+const hasKindMismatch = (file: File, diagnostics = false): boolean => {
   const mimeKind = kindForMime(file.type.toLocaleLowerCase());
-  const extensionKind = kindForExtension(fileExtension(file.name));
+  const extensionKind = diagnostics && DIAGNOSTIC_EXTENSIONS.has(fileExtension(file.name))
+    ? 'text' : kindForExtension(fileExtension(file.name));
   return mimeKind !== null && extensionKind !== null && mimeKind !== extensionKind;
 };
 
-const validateFile = (file: File): string | null => {
-  if (hasKindMismatch(file)) {
+const validateFile = (file: File, capability?: DiagnosticAttachmentCapability): string | null => {
+  if (hasKindMismatch(file, capability?.enabled)) {
     return `${file.name}: file type and extension mismatch — the content type and filename extension point to different file kinds. Rename the file or choose a file whose type and extension agree.`;
   }
-  const kind = attachmentKind(file);
-  if (!kind) return `${file.name}: choose a JPG, PNG, WebP, TXT, CSV, or JSON file.`;
+  const kind = attachmentKind(file, capability?.enabled);
+  if (!kind) return `${file.name}: choose a JPG, PNG, WebP, TXT, CSV, or JSON${capability?.enabled ? ', LOG, XML, or text NFO' : ''} file.`;
   if (file.size < 1) return `${file.name}: empty files cannot be uploaded.`;
-  const limit = kind === 'image' ? ATTACHMENT_MAX_IMAGE_BYTES : ATTACHMENT_MAX_TEXT_BYTES;
+  const limit = kind === 'image'
+    ? capability?.maxImageBytes ?? ATTACHMENT_MAX_IMAGE_BYTES
+    : capability?.maxTextFileBytes ?? ATTACHMENT_MAX_TEXT_BYTES;
   if (file.size > limit) {
+    if (capability?.enabled) return `${file.name}: exceeds the ${formatAttachmentSize(limit)} ${kind === 'image' ? 'image' : 'original text file'} limit. Export a smaller file; nothing was uploaded.`;
     return `${file.name}: ${kind === 'image' ? 'images must be 8 MB or smaller' : 'text files must be 1 MB or smaller'}.`;
   }
   return null;
@@ -139,6 +176,7 @@ export const AttachmentTray = ({
   onBusyChange,
   onRemoveAttachment,
   compact = false,
+  diagnosticCapability,
 }: AttachmentTrayProps) => {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -148,14 +186,20 @@ export const AttachmentTray = ({
   const onBusyChangeRef = useRef(onBusyChange);
   const mountedRef = useRef(true);
   const dragDepthRef = useRef(0);
+  const operationRef = useRef(false);
+  const operationGenerationRef = useRef(0);
   const [dragActive, setDragActive] = useState(false);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const limit = Math.min(ATTACHMENT_MAX_COUNT, Math.max(1, Math.floor(maxAttachments)));
-  const busy = progress !== null || removingId !== null;
+  const [preparing, setPreparing] = useState(false);
+  const [review, setReview] = useState<DiagnosticReview | null>(null);
+  const capability = diagnosticCapability?.enabled ? diagnosticCapability : undefined;
+  const limit = Math.min(capability?.maxAttachments ?? ATTACHMENT_MAX_COUNT, Math.max(1, Math.floor(maxAttachments)));
+  const busy = progress !== null || removingId !== null || preparing || review !== null;
   const unavailable = disabled || busy || !signedIn;
   const remaining = Math.max(0, limit - attachments.length);
+  const accept = capability ? `${ATTACHMENT_ACCEPT},.log,.xml,.nfo,text/xml,application/xml` : ATTACHMENT_ACCEPT;
 
   useEffect(() => {
     latestAttachmentsRef.current = attachments;
@@ -171,39 +215,29 @@ export const AttachmentTray = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      operationGenerationRef.current += 1;
       abortRef.current?.abort();
       onBusyChangeRef.current?.(false);
     };
   }, []);
 
   useEffect(() => {
-    if (!signedIn) abortRef.current?.abort();
-  }, [signedIn]);
+    // Keep local diagnostic bytes scoped to the originating chat and identity.
+    return () => {
+      operationGenerationRef.current += 1;
+      operationRef.current = false;
+      abortRef.current?.abort();
+      setPreparing(false);
+      setReview(null);
+      setProgress(null);
+      onBusyChangeRef.current?.(false);
+    };
+  }, [conversationId, signedIn]);
 
-  const uploadFiles = useCallback(async (selectedFiles: readonly File[]) => {
-    if (unavailable || selectedFiles.length === 0) return;
-    const slots = Math.max(0, limit - latestAttachmentsRef.current.length);
-    if (slots === 0) {
-      setError(`Remove a file before adding another. You can attach up to ${limit}.`);
-      return;
-    }
-
-    const validationErrors: string[] = [];
-    const validFiles: File[] = [];
-    for (const file of selectedFiles) {
-      const validationError = validateFile(file);
-      if (validationError) validationErrors.push(validationError);
-      else if (validFiles.length < slots) validFiles.push(file);
-    }
-    if (selectedFiles.length - validationErrors.length > slots) {
-      validationErrors.push(`Only ${slots} more ${slots === 1 ? 'file fits' : 'files fit'} in this message.`);
-    }
-    setError(validationErrors.length > 0 ? validationErrors.join(' ') : null);
-    if (validFiles.length === 0) return;
-
+  const performUploads = useCallback(async (validFiles: readonly File[], validationErrors: readonly string[]) => {
+    const generation = operationGenerationRef.current;
     const controller = new AbortController();
     abortRef.current = controller;
-    onBusyChange?.(true);
     const uploadErrors: string[] = [];
     try {
       for (let index = 0; index < validFiles.length; index += 1) {
@@ -217,7 +251,7 @@ export const AttachmentTray = ({
             conversationId,
             signal: controller.signal,
           });
-          if (!mountedRef.current || controller.signal.aborted) return;
+          if (!mountedRef.current || controller.signal.aborted || generation !== operationGenerationRef.current) return;
           const next = [...latestAttachmentsRef.current, response.attachment];
           latestAttachmentsRef.current = next;
           onChange(next);
@@ -233,15 +267,73 @@ export const AttachmentTray = ({
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      if (mountedRef.current) {
+      if (mountedRef.current && generation === operationGenerationRef.current) {
+        operationRef.current = false;
         setProgress(null);
         if (uploadErrors.length > 0) {
           setError([...validationErrors, ...uploadErrors].join(' '));
         }
-        onBusyChange?.(false);
+        onBusyChangeRef.current?.(false);
       }
     }
-  }, [conversationId, limit, onBusyChange, onChange, unavailable]);
+  }, [conversationId, onChange]);
+
+  const uploadFiles = useCallback(async (selectedFiles: readonly File[]) => {
+    if (unavailable || operationRef.current || selectedFiles.length === 0) return;
+    const slots = Math.max(0, limit - latestAttachmentsRef.current.length);
+    if (slots === 0) {
+      setError(`Remove a file before adding another. You can attach up to ${limit}.`);
+      return;
+    }
+    const validationErrors: string[] = [];
+    const validFiles: File[] = [];
+    for (const file of selectedFiles) {
+      const validationError = validateFile(file, capability);
+      if (validationError) validationErrors.push(validationError);
+      else if (!capability && validFiles.length >= slots) validationErrors.push(`${file.name}: omitted; only ${slots} more ${slots === 1 ? 'file fits' : 'files fit'} in this message.`);
+      else if (capability && validFiles.length >= limit) validationErrors.push(`${file.name}: omitted; review up to ${limit} files at a time. Choose this file in a later selection.`);
+      else validFiles.push(file);
+    }
+    setError(validationErrors.length ? validationErrors.join(' ') : null);
+    if (!validFiles.length) return;
+    operationRef.current = true;
+    onBusyChangeRef.current?.(true);
+
+    if (capability && validFiles.some(file => attachmentKind(file, true) === 'text')) {
+      const generation = operationGenerationRef.current;
+      setPreparing(true);
+      const files: ReviewFile[] = [];
+      for (const file of validFiles) {
+        try {
+          const text = attachmentKind(file, true) === 'text'
+            ? await readDiagnosticFile(file, capability.maxTextFileBytes) : undefined;
+          files.push({ file, text, included: true });
+        } catch (readError) {
+          validationErrors.push(uploadErrorMessage(readError, file.name));
+        }
+      }
+      if (!mountedRef.current || generation !== operationGenerationRef.current) return;
+      setPreparing(false);
+      if (!files.length) {
+        operationRef.current = false;
+        setError(validationErrors.join(' '));
+        onBusyChangeRef.current?.(false);
+        return;
+      }
+      setReview({ files, omissions: validationErrors, conversationId });
+      return;
+    }
+    if (capability) {
+      const budgetErrors = diagnosticBudgetErrors([...latestAttachmentsRef.current, ...validFiles.map(file => ({ name: file.name, size: file.size, mime: 'image/*' }))], { ...capability, maxAttachments: limit });
+      if (budgetErrors.length) {
+        operationRef.current = false;
+        setError([...validationErrors, ...budgetErrors].join(' '));
+        onBusyChangeRef.current?.(false);
+        return;
+      }
+    }
+    await performUploads(validFiles, validationErrors);
+  }, [capability, conversationId, limit, performUploads, unavailable]);
 
   const resetFileInput = () => {
     if (inputRef.current) inputRef.current.value = '';
@@ -360,6 +452,105 @@ export const AttachmentTray = ({
     }
   };
 
+  const selectedReviewFiles = review?.files.filter(file => file.included) ?? [];
+  const reviewErrors = capability && review ? diagnosticBudgetErrors([
+    ...attachments,
+    ...selectedReviewFiles.map(({ file, text }) => ({
+      name: file.name,
+      size: text === undefined ? file.size : utf8Size(text),
+      mime: text === undefined ? 'image/*' : 'text/plain',
+    })),
+  ], { ...capability, maxAttachments: limit }) : [];
+  if (review && !selectedReviewFiles.length) reviewErrors.push('Select at least one file to upload.');
+
+  const cancelReview = () => {
+    setReview(null);
+    operationRef.current = false;
+    onBusyChangeRef.current?.(false);
+  };
+
+  const approveReview = () => {
+    if (!review || reviewErrors.length || !capability || disabled || review.conversationId !== conversationId) return;
+    const files = selectedReviewFiles.map(({ file, text }) => text === undefined
+      ? file : reviewedDiagnosticFile(file.name, text));
+    const omissions = [...review.omissions, ...review.files.filter(file => !file.included)
+      .map(({ file }) => `${file.name}: excluded from upload by your selection.`)];
+    setError(omissions.length ? omissions.join(' ') : null);
+    setReview(null);
+    void performUploads(files, omissions);
+  };
+
+  const reviewDialog = (
+    <Dialog open={review !== null && signedIn} onClose={cancelReview} fullWidth maxWidth="md" aria-labelledby={`${inputId}-review-title`}>
+      <DialogTitle id={`${inputId}-review-title`}>Review diagnostic files</DialogTitle>
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          <Alert severity="info" role="note">
+            Originals stay on your device during review. Only included files and the edited UTF-8 text below will be uploaded after you approve.
+            Diagnostic line references will refer to the uploaded text. Automated redaction suggestions can miss private information; check the text yourself.
+          </Alert>
+          {review?.omissions.map((omission, index) => <Alert severity="warning" key={index}>{omission}</Alert>)}
+          {review?.files.map(({ file, text, included }, index) => {
+            const suggestion = text === undefined ? null : suggestDiagnosticRedactions(text);
+            return (
+              <Box key={index} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5 }}>
+                <FormControlLabel
+                  control={<Checkbox checked={included} onChange={event => setReview(current => current && ({
+                    ...current,
+                    files: current.files.map((item, fileIndex) => fileIndex === index ? { ...item, included: event.target.checked } : item),
+                  }))} />}
+                  label={`Include ${file.name}`}
+                />
+                {!included && <Typography role="status" variant="body2">{file.name} will be excluded.</Typography>}
+                {text !== undefined ? (
+                  <Stack spacing={1}>
+                    <Typography variant="caption">
+                      Uploaded name: {file.name}.reviewed.txt · {utf8Size(text).toLocaleString()} UTF-8 bytes · {text.split('\n').length} lines
+                    </Typography>
+                    <TextField
+                      label={`Reviewed text for ${file.name}`}
+                      value={text}
+                      onChange={event => setReview(current => current && ({
+                        ...current,
+                        files: current.files.map((item, fileIndex) => fileIndex === index ? { ...item, text: event.target.value } : item),
+                      }))}
+                      multiline minRows={4} maxRows={12} fullWidth disabled={!included}
+                      helperText="Edit or remove private and irrelevant text. Nothing is automatically truncated."
+                      slotProps={{ htmlInput: { spellCheck: false }, input: { sx: { fontFamily: 'monospace', fontSize: '0.85rem' } } }}
+                    />
+                    {suggestion !== null && suggestion.count > 0 && (
+                      <Button size="small" sx={{ alignSelf: 'flex-start' }} disabled={!included} onClick={() => setReview(current => current && ({
+                        ...current,
+                        files: current.files.map((item, fileIndex) => fileIndex === index ? { ...item, text: suggestion.text } : item),
+                      }))}>
+                        Apply {suggestion.count} suggested redactions to {file.name}
+                      </Button>
+                    )}
+                    <Box component="details">
+                      <Typography component="summary" variant="body2" sx={{ cursor: 'pointer' }}>Preview numbered uploaded lines for {file.name}</Typography>
+                      <Box component="pre" aria-label={`Numbered uploaded lines for ${file.name}`} sx={{ maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '0.8rem' }}>
+                        {text.split('\n').map((line, lineIndex) => `${lineIndex + 1}  ${line}`).join('\n')}
+                      </Box>
+                    </Box>
+                  </Stack>
+                ) : <Typography variant="body2">Image · {formatAttachmentSize(file.size)}</Typography>}
+              </Box>
+            );
+          })}
+          <Typography variant="body2" role="status">
+            {selectedReviewFiles.length} files selected; {review ? review.files.length - selectedReviewFiles.length : 0} excluded.
+            {' '}Existing attachments also count toward message limits.
+          </Typography>
+          {reviewErrors.map((reviewError, index) => <Alert key={index} severity="warning" role="alert">{reviewError}</Alert>)}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={cancelReview}>Cancel review</Button>
+        <Button onClick={approveReview} disabled={reviewErrors.length > 0 || disabled} variant="contained">Upload reviewed selection</Button>
+      </DialogActions>
+    </Dialog>
+  );
+
   if (!signedIn) {
     return (
       <Alert severity="info" variant="outlined" icon={<AttachFileIcon fontSize="inherit" />}>
@@ -371,6 +562,7 @@ export const AttachmentTray = ({
   if (compact) {
     return (
       <Stack sx={{ display: 'contents' }} aria-busy={busy}>
+        {reviewDialog}
         <Box
           ref={compactTriggerRef}
           id={`${inputId}-compact-trigger`}
@@ -404,7 +596,7 @@ export const AttachmentTray = ({
                   ref={inputRef}
                   id={inputId}
                   type="file"
-                  accept={ATTACHMENT_ACCEPT}
+                  accept={accept}
                   multiple
                   hidden
                   onChange={handleFileInput}
@@ -458,6 +650,7 @@ export const AttachmentTray = ({
             />
           </Box>
         )}
+        {preparing && <Typography role="status" variant="caption" sx={{ flex: '1 0 100%' }}>Preparing local diagnostic preview…</Typography>}
 
         {error && (
           <Alert severity="error" onClose={() => setError(null)} role="alert" sx={{ order: 1, flex: '1 0 100%' }}>
@@ -470,6 +663,7 @@ export const AttachmentTray = ({
 
   return (
     <Stack spacing={1} aria-busy={busy}>
+      {reviewDialog}
       <Box
         role="region"
         tabIndex={unavailable ? -1 : 0}
@@ -511,7 +705,10 @@ export const AttachmentTray = ({
               Drop or paste files here
             </Typography>
             <Typography id={`${inputId}-guidance`} variant="caption" component="p">
-              JPG, PNG, WebP up to 8 MB; UTF-8 TXT, CSV, JSON up to 1 MB. {remaining} of {limit} slots available.
+              {capability
+                ? `JPG, PNG, WebP up to ${formatAttachmentSize(capability.maxImageBytes)}; review UTF-8 or BOM-marked UTF-16 TXT, CSV, JSON, LOG, XML, text NFO. ${formatAttachmentSize(capability.maxTotalTextBytes)} combined text per message.`
+                : 'JPG, PNG, WebP up to 8 MB; UTF-8 TXT, CSV, JSON up to 1 MB.'}
+              {' '}{remaining} of {limit} slots available.
             </Typography>
           </Box>
         </Box>
@@ -529,13 +726,15 @@ export const AttachmentTray = ({
             ref={inputRef}
             id={inputId}
             type="file"
-            accept={ATTACHMENT_ACCEPT}
+            accept={accept}
             multiple
             hidden
             onChange={handleFileInput}
           />
         </Button>
       </Box>
+
+      {preparing && <Typography role="status" variant="caption">Preparing local diagnostic preview…</Typography>}
 
       {busy && progress && (
         <Box aria-live="polite">

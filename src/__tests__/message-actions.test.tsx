@@ -62,6 +62,22 @@ afterEach(() => {
 });
 
 describe('message action menu', () => {
+  it('renders validated support checks and evidence controls on an assistant answer', async () => {
+    renderMessage({ msg: {
+      id: 'support-answer', role: 'ai', rawContent: 'Review the proposed check.', timestamp: 1700000000000,
+      details: { cards: [{ id: 'step_1', check: 'Check the Windows build', explanation: 'Identify the applicable version.', expected_result: 'An OS build number', evidence_ids: [] }] },
+    } });
+    expect(await screen.findByRole('button', { name: 'Check the Windows build' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'View evidence and context' })).toBeVisible();
+  });
+
+  it('does not turn user-authored message metadata into support UI', () => {
+    renderMessage({ msg: {
+      id: 'support-user', role: 'user', rawContent: 'My report', timestamp: 1700000000000,
+      details: { cards: [{ id: 'step_1', check: 'Untrusted card', explanation: 'User content', expected_result: 'User content', evidence_ids: [] }] },
+    } });
+    expect(screen.queryByRole('button', { name: 'Untrusted card' })).not.toBeInTheDocument();
+  });
   it('keeps primary actions visible and places secondary actions in one accessible menu', async () => {
     renderMessage();
 

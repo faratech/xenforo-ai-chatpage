@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from 'react';
+import { useState, useCallback, useEffect, useId, useMemo, useRef, memo, lazy, Suspense } from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Avatar from '@mui/material/Avatar';
@@ -39,6 +39,11 @@ import {
 } from '../utils/helpers';
 import { ASSISTANT_NAME, BOT_AVATAR } from '../config/brand';
 import { CHAT_CONTENT_MAX_WIDTH } from '../config/layout';
+import { loadLazyModule } from '../services/lazyImport';
+const SupportResponseDetails = lazy(() => loadLazyModule(async () => {
+  const module = await import('./SupportResponseDetails');
+  return { default: module.SupportResponseDetails };
+}));
 import { reportClientEvent, reportSourceOpened, type SourceKind } from '../services/telemetry';
 
 const citationLabel = (annotation: Annotation): string => {
@@ -469,6 +474,8 @@ export const Message = memo<MessageComponentProps>(({ msg,
   onRetry,
   isLastMessage,
   isLastUserMessage,
+  canBranch = false,
+  onSupportOutcome,
   isStreaming,
   isBusy = false,
   isSpeaking = false,
@@ -801,7 +808,7 @@ export const Message = memo<MessageComponentProps>(({ msg,
           </Tooltip>
         )}
 
-        {!isUser && isLastMessage && !isBusy && (
+        {!isUser && (isLastMessage || canBranch) && !isBusy && (
           <Tooltip title="Regenerate">
             <IconButton size="small" onClick={() => onRegenerate()} aria-label="Regenerate response">
               <RefreshIcon fontSize="small" />
@@ -810,7 +817,7 @@ export const Message = memo<MessageComponentProps>(({ msg,
         )}
 
         {(onCopyPermalink
-          || (isUser && isLastUserMessage && !isBusy)
+          || (isUser && (isLastUserMessage || canBranch) && !isBusy)
           || (!isUser && Boolean(onSpeak))
           || (!isUser && Boolean(msg.responseId && msg.turnId && onFeedback))) && (
           <Tooltip title="Message actions">
@@ -846,7 +853,7 @@ export const Message = memo<MessageComponentProps>(({ msg,
             <ListItemText>Copy link to this message</ListItemText>
           </MenuItem>
         )}
-        {isUser && isLastUserMessage && !isBusy && (
+        {isUser && (isLastUserMessage || canBranch) && !isBusy && (
           <MenuItem onClick={() => { setActionsMenuAnchor(null); handleEdit(); }}>
             <ListItemIcon><EditIcon fontSize="small" /></ListItemIcon>
             <ListItemText>Edit message</ListItemText>
@@ -1095,6 +1102,7 @@ export const Message = memo<MessageComponentProps>(({ msg,
                       }}
                     />
                   )}
+                  {msg.details && !isStreaming && <Suspense fallback={<Typography role="status" variant="caption">Loading evidence…</Typography>}><SupportResponseDetails details={msg.details} onOutcome={onSupportOutcome} disabled={isBusy} /></Suspense>}
                 </Box>
               )}
               {actions}

@@ -44,6 +44,20 @@ interface ConversationSearchResult {
   matchCount: number;
 }
 
+const togetherByFamily = (results: ConversationSearchResult[]): ConversationSearchResult[] => {
+  if (!results.some(result => result.conversation.lineage)) return results;
+  const families = new Map<string, ConversationSearchResult[]>();
+  for (const result of results) {
+    const family = result.conversation.lineage?.family_id ?? result.conversation.id;
+    const members = families.get(family) ?? [];
+    members.push(result);
+    families.set(family, members);
+  }
+  return [...families.values()].flatMap(members => members.sort((left, right) =>
+    Number(Boolean(left.conversation.lineage)) - Number(Boolean(right.conversation.lineage))
+      || right.conversation.updatedAt - left.conversation.updatedAt));
+};
+
 const normalizeSearchText = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
 /**
@@ -275,22 +289,27 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
 
   const groups = useMemo(() => {
     if (libraryView === 'pinned') {
-      return visibleResults.length ? [{ label: 'Pinned', results: visibleResults }] : [];
+      return visibleResults.length ? [{ label: 'Pinned', results: togetherByFamily(visibleResults) }] : [];
     }
     if (libraryView === 'archived') {
-      return visibleResults.length ? [{ label: 'Archived', results: visibleResults }] : [];
+      return visibleResults.length ? [{ label: 'Archived', results: togetherByFamily(visibleResults) }] : [];
     }
 
     const activePinned = visibleResults.filter(({ conversation }) => conversation.pinnedAt && !conversation.archivedAt);
     const activeRecent = visibleResults.filter(({ conversation }) => !conversation.pinnedAt && !conversation.archivedAt);
     const archived = visibleResults.filter(({ conversation }) => conversation.archivedAt);
+    const familyUpdated = new Map<string, number>();
+    for (const { conversation } of activeRecent) {
+      const family = conversation.lineage?.family_id ?? conversation.id;
+      familyUpdated.set(family, Math.max(familyUpdated.get(family) ?? 0, conversation.updatedAt));
+    }
     const sections: Array<{ label: string; results: ConversationSearchResult[] }> = [];
-    if (activePinned.length) sections.push({ label: 'Pinned', results: activePinned });
+    if (activePinned.length) sections.push({ label: 'Pinned', results: togetherByFamily(activePinned) });
     sections.push(...GROUP_ORDER.map(label => ({
       label,
-      results: activeRecent.filter(result => groupForDate(result.conversation.updatedAt) === label),
+      results: togetherByFamily(activeRecent.filter(({ conversation }) => groupForDate(familyUpdated.get(conversation.lineage?.family_id ?? conversation.id) ?? conversation.updatedAt) === label)),
     })).filter(group => group.results.length > 0));
-    if (archived.length) sections.push({ label: 'Archived', results: archived });
+    if (archived.length) sections.push({ label: 'Archived', results: togetherByFamily(archived) });
     return sections;
   }, [libraryView, visibleResults]);
 
@@ -810,7 +829,7 @@ export const ConversationSidebar = memo<ConversationSidebarProps>(({
                               {conversation.archivedAt ? 'Archived · ' : ''}{result.matchCount} {result.matchCount === 1 ? 'match' : 'matches'}
                             </Box>
                           </>
-                        ) : conversation.archivedAt ? 'Archived' : conversation.draft?.trim() ? 'Draft saved' : undefined}
+                        ) : conversation.lineage ? 'Alternate approach' : conversation.archivedAt ? 'Archived' : conversation.draft?.trim() ? 'Draft saved' : undefined}
                         slotProps={{
                           primary: { noWrap: true, sx: { fontSize: 13, fontWeight: isCurrent ? 650 : 500 } },
                           secondary: { component: 'div', sx: { fontSize: 10.5, color: normalizedQuery ? 'text.secondary' : 'primary.main' } },

@@ -79,6 +79,31 @@ const streamAnswer = async (request, response, state, { slow = false } = {}) => 
     response.end();
     return;
   }
+  if (state.mode === 'guided-support') {
+    const payload = state.chatPayloads[state.chatPayloads.length - 1];
+    const emit = event => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    emit({ type: 'chat.context', context: {
+      mode: 'troubleshoot', case_id: payload.support_case_id, case_revision: payload.support_case_revision,
+      included_attachment_ids: [], history_items: payload.history?.length ?? 0, history_limit: 12,
+      history_item_bytes: 2048, recovery_used: false,
+    } });
+    emit({ type: 'chat.activity', activity: { id: 'support_search', label: 'Reviewing support documentation', state: 'active' } });
+    emit({ type: 'chat.evidence', evidence: [{
+      id: 'ms_storage', kind: 'microsoft', title: 'Synthetic Microsoft source record',
+      url: 'https://learn.microsoft.com/windows/deployment/update/windows-update-logs',
+      excerpt: 'Synthetic retrieval excerpt: inspect available storage before retrying.', retrieved_at: '2026-10-22T12:00:00Z',
+    }] });
+    emit({ type: 'chat.support_card', card: {
+      id: 'check_free_space', check: 'Inspect available storage',
+      explanation: 'Review the system volume before retrying the update.',
+      expected_result: 'Record the free space without deleting files.', evidence_ids: ['ms_storage'], command: 'Get-Volume',
+    } });
+    emit({ type: 'chat.activity', activity: { id: 'support_search', label: 'Reviewing support documentation', state: 'done' } });
+    emit({ type: 'response.output_text.delta', delta: state.chatPayloads.length === 1 ? 'Guided support original answer.' : 'Guided support alternate answer.' });
+    emit({ type: 'chat.stream.completed', response_id: `resp_guided_${state.chatPayloads.length}` });
+    response.end();
+    return;
+  }
   response.write('data: {"type":"response.output_text.delta","delta":"Browser smoke"}\n\n');
 
   if (slow) {
@@ -142,6 +167,7 @@ const server = createServer({
     let body = '';
     for await (const chunk of request) body += chunk;
     const payload = JSON.parse(body || '{}');
+    state.apiPayloads.push(payload);
 
     if (payload.action === 'getUserData') {
       state.identityCalls += 1;
@@ -150,8 +176,101 @@ const server = createServer({
         identity_id: identityId,
         name: 'Browser Smoke',
         user_id: '42',
+        ...(state.mode === 'guided-support' ? { csrf_token: 'synthetic-browser-csrf-token' } : {}),
       }, request);
       return;
+    }
+    if (payload.action === 'getChatCapabilities') {
+      const enabled = state.mode === 'guided-support';
+      json(response, 200, {
+        success: true, version: 1, modes: enabled ? ['chat', 'troubleshoot'] : ['chat'],
+        features: { guided_support: enabled, diagnostics: enabled, branches: enabled, support_cards: enabled },
+        limits: { max_attachments: 4, max_image_bytes: 8388608, max_text_file_bytes: 1048576, max_total_text_bytes: 131072, max_total_image_bytes: 10485760 },
+      }, request);
+      return;
+    }
+    if (state.mode === 'guided-support') {
+      if (payload.action === 'listSupportCases') {
+        json(response, 200, { success: true, cases: [...state.supportCases.values()], next_cursor: null }, request);
+        return;
+      }
+      if (payload.action === 'getSupportCase') {
+        const supportCase = state.supportCases.get(payload.case_id);
+        json(response, supportCase ? 200 : 404, supportCase ? { success: true, case: supportCase } : { error: 'not_found' }, request);
+        return;
+      }
+      if (payload.action === 'upsertSupportCase') {
+        const now = Date.now();
+        const supportCase = {
+          ...payload.case, id: payload.case.id || 'case_browser_created', status: 'open', revision: 1,
+          conversation_ids: [], attachment_ids: [], created_at: now, updated_at: now,
+          progress: { confirmed_facts: [], recent_changes: '', attempts: [] },
+        };
+        state.supportCases.set(supportCase.id, supportCase);
+        json(response, 200, { success: true, case: supportCase }, request);
+        return;
+      }
+      if (payload.action === 'updateSupportCaseProgress') {
+        const prior = state.supportCases.get(payload.case_id);
+        if (!prior || prior.revision !== payload.expected_revision) {
+          json(response, 409, { error: 'revision_conflict' }, request);
+          return;
+        }
+        const supportCase = { ...prior, progress: payload.progress, revision: prior.revision + 1, updated_at: Date.now() };
+        state.supportCases.set(supportCase.id, supportCase);
+        json(response, 200, { success: true, case: supportCase }, request);
+        return;
+      }
+      if (payload.action === 'listSavedConversations') {
+        const summaries = [...state.savedConversations.values()].map(conversation => {
+          const summary = { ...conversation };
+          delete summary.messages;
+          return summary;
+        });
+        json(response, 200, { success: true, conversations: summaries, next_cursor: null }, request);
+        return;
+      }
+      if (payload.action === 'upsertSavedConversation') {
+        const prior = state.savedConversations.get(payload.conversation.id);
+        if ((prior?.revision ?? 0) !== payload.expected_revision) {
+          json(response, 409, { error: 'revision_conflict' }, request);
+          return;
+        }
+        const supportCase = state.supportCases.get(payload.conversation.support_case_id);
+        const saved = {
+          ...prior, ...payload.conversation, revision: (prior?.revision ?? 0) + 1, metadata_revision: 1,
+          pinned_at: null, archived_at: null, created_at: prior?.created_at ?? Date.now(), updated_at: Date.now(),
+          message_count: payload.conversation.messages.length,
+          ...(supportCase ? { support_case_revision: supportCase.revision } : {}),
+        };
+        state.savedConversations.set(saved.id, structuredClone(saved));
+        json(response, 200, { success: true, conversation: saved }, request);
+        return;
+      }
+      if (payload.action === 'getSavedConversation') {
+        const saved = state.savedConversations.get(payload.client_conversation_id);
+        json(response, saved ? 200 : 404, saved ? { success: true, conversation: saved } : { error: 'not_found' }, request);
+        return;
+      }
+      if (payload.action === 'forkConversation') {
+        const source = state.savedConversations.get(payload.source_conversation_id);
+        const index = source?.messages.findIndex(message => message.id === payload.fork_message_id) ?? -1;
+        if (!source || source.revision !== payload.expected_revision || index < 0) {
+          json(response, 409, { error: 'revision_conflict' }, request);
+          return;
+        }
+        state.sourceTranscriptAtFork = structuredClone(source.messages);
+        const fork = {
+          ...structuredClone(source), id: 'conv_browser_fork', title: `Branch of ${source.title}`, revision: 1,
+          created_at: Date.now(), updated_at: Date.now(),
+          messages: structuredClone(source.messages.slice(0, index + (payload.kind === 'branch' ? 1 : 0))),
+          lineage: { parent_conversation_id: source.id, fork_message_id: payload.fork_message_id, family_id: source.lineage?.family_id ?? source.id },
+        };
+        fork.message_count = fork.messages.length;
+        state.savedConversations.set(fork.id, fork);
+        json(response, 200, { success: true, conversation: fork, attachments: [] }, request);
+        return;
+      }
     }
     if (payload.action === 'getUsage') {
       json(response, 200, { logged_in: true, remaining: 10, used: 0, limit: 10 }, request);
@@ -236,6 +355,7 @@ const createPage = async (
   } = {},
 ) => {
   const state = {
+    apiPayloads: [],
     chatPayloads: [],
     identityCalls: 0,
     mode,
@@ -243,6 +363,13 @@ const createPage = async (
     optionalChunkRequests: 0,
     streamAborted: false,
     telemetry: [],
+    supportCases: new Map([['case_browser_existing', {
+      id: 'case_browser_existing', title: 'Existing synthetic update case', description: 'A synthetic update error for browser coverage.',
+      status: 'open', revision: 3, pc_profile: { os_name: 'Windows', os_version: 'Windows 11 24H2', build: '26100.1000' },
+      conversation_ids: [], attachment_ids: [], created_at: Date.now(), updated_at: Date.now(),
+      progress: { confirmed_facts: ['Synthetic PC has limited free storage.'], recent_changes: 'A synthetic update was attempted.', attempts: [] },
+    }]]),
+    savedConversations: new Map(),
   };
   scenarios.set(name, state);
   const context = await browser.newContext({
@@ -251,6 +378,12 @@ const createPage = async (
     ...(viewport ? { viewport } : {}),
   });
   const page = await context.newPage();
+  if (mode === 'guided-support') {
+    // These scenarios exercise real rendered code with mocked application APIs.
+    // Unexpected external requests must never escape to a live provider/site.
+    await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1'
+      ? route.continue() : route.abort('blockedbyclient'));
+  }
   const routeApi = async route => {
     const request = route.request();
     const headers = { ...request.headers(), 'x-wf-smoke-scenario': name };
@@ -287,6 +420,26 @@ const createPage = async (
 };
 
 const waitForComposer = page => page.getByRole('textbox', { name: 'Type your message' }).waitFor();
+
+const assertAccessible = async (page, label) => {
+  // Visibility alone permits an in-progress MUI fade or drawer slide. Audit
+  // after finite modal animations finish; loading spinners may keep running.
+  for (const dialog of await page.getByRole('dialog').all()) {
+    await dialog.evaluate(async element => {
+      const root = element.closest('.MuiModal-root') ?? element;
+      await Promise.all(root.getAnimations({ subtree: true })
+        .filter(animation => animation.effect?.getTiming().iterations !== Infinity)
+        .map(animation => animation.finished.catch(() => {})));
+    });
+  }
+  await page.addScriptTag({ path: axePath });
+  const violations = await page.evaluate(async () => (await globalThis.axe.run(globalThis.document, {
+    resultTypes: ['violations'],
+    runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+  })).violations.filter(item => item.impact === 'serious' || item.impact === 'critical')
+    .map(item => ({ id: item.id, impact: item.impact, nodes: item.nodes.map(node => ({ target: node.target, summary: node.failureSummary })) })));
+  assert.deepEqual(violations, [], `${label}: serious accessibility violations: ${JSON.stringify(violations)}`);
+};
 
 try {
   const manifest = JSON.parse(await readFile(path.join(distRoot, 'manifest.json'), 'utf8'));
@@ -587,6 +740,130 @@ try {
     await context.close();
   }
 
+  for (const [name, viewport, createCase] of [
+    ['guided-desktop', { width: 1440, height: 1000 }, true],
+    ['guided-mobile', { width: 390, height: 844 }, false],
+  ]) {
+    const { context, page, state } = await createPage(name, 'guided-support', { viewport, blockServiceWorkers: true });
+    const browserErrors = [];
+    page.on('pageerror', error => browserErrors.push(error.message));
+    await page.goto(`${origin}/chatpage/`);
+    await waitForComposer(page);
+    await page.getByRole('button', { name: 'Troubleshoot Windows', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Support case' }).waitFor();
+
+    if (createCase) {
+      await page.getByRole('button', { name: 'New guided case' }).click();
+      await page.getByRole('textbox', { name: 'What is going wrong?' }).fill('Synthetic update fails with limited disk space');
+      await page.getByRole('textbox', { name: 'Windows version' }).fill('Windows 11 24H2');
+      await page.getByRole('textbox', { name: 'OS build (optional)' }).fill('26100.1000');
+      await page.getByRole('button', { name: 'Create and use case' }).click();
+    } else {
+      await page.getByRole('combobox', { name: 'Support case' }).click();
+      await page.getByRole('option', { name: 'Existing synthetic update case' }).click();
+    }
+    const caseId = createCase ? 'case_browser_created' : 'case_browser_existing';
+    await page.getByRole('button', { name: /^Troubleshooting:/ }).waitFor();
+    await page.getByRole('textbox', { name: 'Confirmed facts (one per line)' }).fill('Synthetic system volume has 500 MB available.\nRestarting did not help.');
+    await page.getByRole('textbox', { name: 'Recent changes', exact: true }).fill('Attempted a synthetic cumulative update.');
+    const savedFacts = page.waitForResponse(response => response.url().endsWith('/chat.php')
+      && response.request().postDataJSON()?.action === 'updateSupportCaseProgress');
+    await page.getByRole('button', { name: 'Save reviewed facts' }).click();
+    await savedFacts;
+    const revisionAfterFacts = createCase ? 2 : 4;
+    await page.getByText(new RegExp(`Revision ${revisionAfterFacts}$`)).waitFor();
+    await assertAccessible(page, `${name} case intake`);
+    await page.getByRole('button', { name: /^Troubleshooting:/ }).click();
+
+    // Exercise the local-only diagnostic review without approving any upload.
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'synthetic-report.log', mimeType: 'text/plain',
+      buffer: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('Windows synthetic report\r\npassword=synthetic-secret', 'utf16le')]),
+    });
+    const diagnosticDialog = page.getByRole('dialog', { name: 'Review diagnostic files' });
+    await diagnosticDialog.waitFor();
+    assert.equal(await diagnosticDialog.getByRole('textbox', { name: 'Reviewed text for synthetic-report.log' }).inputValue(), 'Windows synthetic report\npassword=synthetic-secret');
+    await diagnosticDialog.getByRole('button', { name: 'Apply 1 suggested redactions to synthetic-report.log' }).click();
+    assert.match(await diagnosticDialog.getByRole('textbox', { name: 'Reviewed text for synthetic-report.log' }).inputValue(), /password=\[REDACTED\]/);
+    await diagnosticDialog.getByText('Preview numbered uploaded lines for synthetic-report.log').click();
+    assert.match(await diagnosticDialog.getByLabel('Numbered uploaded lines for synthetic-report.log').textContent(), /2 {2}password=\[REDACTED\]/);
+    await assertAccessible(page, `${name} diagnostic review`);
+    await diagnosticDialog.getByRole('button', { name: 'Cancel review' }).click();
+    await diagnosticDialog.waitFor({ state: 'hidden' });
+    assert.equal(state.apiPayloads.filter(payload => payload.action === 'uploadChatAttachment').length, 0, 'cancelled diagnostic review must not upload original bytes');
+
+    const question = 'What should I check next on this synthetic Windows PC?';
+    await page.getByRole('textbox', { name: 'Type your message' }).fill(question);
+    await page.getByRole('button', { name: 'Send message' }).click();
+    await page.getByText('Guided support original answer.', { exact: true }).waitFor();
+    assert.equal(state.chatPayloads.length, 1);
+    assert.equal(state.chatPayloads[0].mode, 'troubleshoot');
+    assert.equal(state.chatPayloads[0].support_contract_version, 1);
+    assert.equal(state.chatPayloads[0].support_case_id, caseId);
+    assert.equal(state.chatPayloads[0].support_case_revision, revisionAfterFacts);
+    assert.equal(state.chatPayloads[0].expected_identity_id, identityId);
+    assert.equal(state.chatPayloads[0].attachment_ids, undefined);
+
+    await page.getByRole('button', { name: 'View evidence and context' }).click();
+    const evidenceDialog = page.getByRole('dialog', { name: 'Evidence and context' });
+    await evidenceDialog.waitFor();
+    await evidenceDialog.getByText('Guided Windows troubleshooting', { exact: true }).waitFor();
+    await evidenceDialog.getByText(`Support case revision ${revisionAfterFacts}`, { exact: true }).waitFor();
+    await evidenceDialog.getByRole('link', { name: 'Synthetic Microsoft source record' }).waitFor();
+    await evidenceDialog.getByText('Synthetic retrieval excerpt: inspect available storage before retrying.', { exact: true }).waitFor();
+    await assertAccessible(page, `${name} evidence drawer`);
+    const evidenceBounds = await evidenceDialog.boundingBox();
+    assert(evidenceBounds && evidenceBounds.x >= -1 && evidenceBounds.x + evidenceBounds.width <= viewport.width + 1, `${name}: evidence drawer escaped viewport: ${JSON.stringify(evidenceBounds)}`);
+    await evidenceDialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await evidenceDialog.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Inspect available storage', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Result of this check' }).click();
+    await page.getByRole('option', { name: 'No change', exact: true }).click();
+    await page.getByRole('textbox', { name: 'What happened?' }).fill('Synthetic test: still 500 MB available; no files deleted.');
+    await page.getByRole('button', { name: 'Save result to case' }).click();
+    await page.getByText('Result saved to your support case.', { exact: true }).waitFor();
+    const recorded = state.supportCases.get(caseId);
+    assert.equal(recorded.revision, revisionAfterFacts + 1);
+    assert.equal(recorded.progress.attempts.length, 1);
+    assert.equal(recorded.progress.attempts[0].id, 'check_free_space');
+    assert.equal(recorded.progress.attempts[0].outcome, 'no_change');
+    await assertAccessible(page, `${name} recorded support card`);
+
+    await page.getByRole('button', { name: 'Regenerate response', exact: true }).last().click();
+    await page.getByText('Guided support alternate answer.', { exact: true }).waitFor();
+    assert.equal(state.chatPayloads.length, 2, 'regeneration must send one alternate turn');
+    assert.equal(state.apiPayloads.filter(payload => payload.action === 'forkConversation').length, 1);
+    assert.equal(state.chatPayloads[1].client_conversation_id, 'conv_browser_fork');
+    assert.equal(state.chatPayloads[1].message, question);
+    assert.equal(state.chatPayloads[1].reset_conversation, true);
+    assert.equal(state.chatPayloads[1].support_case_id, caseId);
+    assert.equal(state.chatPayloads[1].support_case_revision, revisionAfterFacts + 1);
+    assert(!state.chatPayloads[1].history?.some(message => message.role === 'user' && message.content === question), 'regeneration history must not duplicate the new user turn');
+    await page.waitForFunction(() => {
+      const store = JSON.parse(globalThis.localStorage.getItem('chat_store:v5:42') || '{}');
+      return store.conversations?.conv_browser_fork?.messages.some(message => message.rawContent === 'Guided support alternate answer.');
+    });
+    const localStore = await page.evaluate(() => JSON.parse(globalThis.localStorage.getItem('chat_store:v5:42')));
+    const fork = localStore.conversations.conv_browser_fork;
+    const source = localStore.conversations[fork.lineage.parent_conversation_id];
+    assert.deepEqual(source.messages, state.sourceTranscriptAtFork, 'regeneration must preserve the original transcript');
+    assert.equal(fork.messages.filter(message => message.role === 'user').length, 1, 'regenerated branch must contain exactly one user turn');
+    assert.equal(source.messages.filter(message => message.role === 'user').length, 1);
+    assert(source.messages.some(message => message.rawContent === 'Guided support original answer.'));
+    assert(!fork.messages.some(message => message.rawContent === 'Guided support original answer.'));
+    await page.getByRole('button', { name: 'Original approach', exact: true }).click();
+    await page.getByText('Guided support original answer.', { exact: true }).waitFor();
+    await page.reload();
+    await waitForComposer(page);
+    await page.getByText('Guided support original answer.', { exact: true }).waitFor();
+    await assertAccessible(page, `${name} reloaded preserved original`);
+    assert.deepEqual(browserErrors, [], `${name}: browser runtime errors`);
+    assert(state.apiPayloads.some(payload => payload.action === 'listSupportCases'));
+    assert(state.apiPayloads.some(payload => payload.action === 'getSupportCase'));
+    process.stdout.write(`${name} mocked browser flow: case intake/context, local UTF-16 review/cancel, evidence, outcome revision, preserved regeneration/reload, axe passed\n`);
+    await context.close();
+  }
+
   {
     const { context, page, state } = await createPage('abort', 'abort');
     await page.goto(`${origin}/chatpage/`);
@@ -653,7 +930,7 @@ try {
     await context.close();
   }
 
-  process.stdout.write('browser smoke: desktop screenshot/reload, PWA, completion, cold mobile, abort, Turnstile, lazy recovery, chunk failure, manifest, and axe checks passed\n');
+  process.stdout.write('browser smoke with mocked API/SSE: desktop screenshot/reload, PWA, completion, cold mobile, guided desktop/mobile, abort, Turnstile, lazy recovery, chunk failure, manifest, and axe checks passed\n');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

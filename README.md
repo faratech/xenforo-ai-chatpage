@@ -30,3 +30,8 @@ npm run check      # Lint, type-check, test, and verify the build
 
 API requests are centralized in `src/services/api.ts`; environment values are
 accessed through `src/config/env.ts`.
+
+Optional guided Windows support, diagnostic review, preserved branches and
+support cards are described in [the implementation and rollout guide](docs/guided-support.md).
+All new backend capabilities default to disabled. Upstream reference commits and
+licenses are listed in [the provenance record](docs/sources/upstream-reuse.md).

@@ -1,4 +1,5 @@
 // Core types for the XenForo AI Chat application
+import type { ChatResponseDetails, ConversationLineage } from '../services/supportContracts';
 
 export interface Message {
   id: string;
@@ -15,6 +16,8 @@ export interface Message {
   activities?: StreamActivity[];
   /** Local metadata for files attached to the turn. */
   attachments?: MessageAttachment[];
+  /** Validated presentation metadata; never rendered as HTML. */
+  details?: ChatResponseDetails;
 }
 
 export interface MessageAttachment {
@@ -89,6 +92,10 @@ export interface Conversation {
    * then clears the marker on success.
    */
   needsServerResync?: boolean;
+  supportCaseId?: string;
+  supportCaseRevision?: number;
+  mode?: 'chat' | 'troubleshoot';
+  lineage?: ConversationLineage;
 }
 
 export interface ConversationMap {
@@ -121,6 +128,11 @@ export interface ChatStoreV4 {
   trimmed: Record<string, number>;
 }
 
+/** Current envelope; v4 remains readable for migration and older open tabs. */
+export interface ChatStoreV5 extends Omit<ChatStoreV4, 'version'> {
+  version: 5;
+}
+
 /**
  * One step the assistant is taking before (or while) it answers — a tool call,
  * a search, a reasoning pass. Surfaced so the wait shows what is happening
@@ -130,7 +142,7 @@ export interface StreamActivity {
   /** Stable per output item, so repeated status events update rather than append. */
   id: string;
   label: string;
-  state: 'active' | 'done';
+  state: 'active' | 'done' | 'failed' | 'cancelled';
   /**
    * Streamed reasoning summary for this step, when the backend asks for one
    * (`reasoning.summary`). The model reasons either way — this is only whether
@@ -156,6 +168,7 @@ export interface StreamingResponse {
   annotations: Annotation[];
   responseId?: string;
   diagnostics?: StreamDiagnostics;
+  details?: ChatResponseDetails;
 }
 
 export interface ChatMessageHistoryItem {
@@ -231,6 +244,8 @@ export interface MessageProps {
   /** Returns false when another active operation prevents accepting the edit. */
   onEdit: (messageId: string, newContent: string) => boolean;
   onRegenerate: () => void;
+  canBranch?: boolean;
+  onSupportOutcome?: (card: import('../services/supportContracts').SupportCard, outcome: import('../services/supportContracts').SupportOutcome, observed: string) => Promise<void>;
   onRetry: (messageId: string) => void;
   isLastMessage: boolean;
   isLastUserMessage?: boolean;

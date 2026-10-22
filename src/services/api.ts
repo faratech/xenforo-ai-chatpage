@@ -18,6 +18,11 @@ import type {
 } from '../types';
 import { generateTurnId } from '../utils/ids';
 import type { TTSVoice } from './speech';
+import {
+  normalizeCapabilities, normalizeChatContext, normalizeEvidence, normalizeSupportCard,
+  type ChatCapabilities, type ChatMode, type ChatResponseDetails, type SupportProgress,
+} from './supportContracts';
+export type { ChatCapabilities, ChatMode, ChatResponseDetails, SupportProgress, SupportCard, SupportOutcome } from './supportContracts';
 import type {
   ChatAttachmentDeleteResponse,
   ChatAttachmentResponse,
@@ -143,6 +148,10 @@ interface SendMessagePayload {
   has_local_history?: boolean;
   history?: ChatMessageHistoryItem[];
   attachment_ids?: string[];
+  mode?: ChatMode;
+  support_case_id?: string;
+  support_case_revision?: number;
+  support_contract_version?: 1;
 }
 
 export interface TTSRequestOptions {
@@ -521,8 +530,11 @@ async function fetchAPI<T>(
 export class ChatAPI {
   private static expectedIdentityId = '';
   private static csrfToken = '';
+  /** A recovered turn must replay with the same history fingerprint after a lost response. */
+  private static historyPromotedTurns = new Map<string, number>();
 
   static setExpectedIdentityId(identityId: string): void {
+    if (identityId !== this.expectedIdentityId) this.historyPromotedTurns.clear();
     this.expectedIdentityId = identityId;
   }
 
@@ -583,6 +595,35 @@ export class ChatAPI {
     });
   }
 
+  static async getChatCapabilities(signal?: AbortSignal): Promise<ChatCapabilities> {
+    const result = await fetchAPI<unknown>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST', signal, body: JSON.stringify({ action: 'getChatCapabilities' }),
+    });
+    return normalizeCapabilities(result);
+  }
+
+  static async updateSupportCaseProgress(caseId: string, expectedRevision: number, progress: SupportProgress): Promise<SupportCaseResponse> {
+    return fetchAPI<SupportCaseResponse>(ENV.ENDPOINTS.CHAT, {
+      method: 'POST', body: JSON.stringify(this.protectedPayload({
+        action: 'updateSupportCaseProgress', case_id: caseId, expected_revision: expectedRevision, progress,
+      })),
+    });
+  }
+
+  static async forkConversation(options: {
+    sourceConversationId: string; expectedRevision: number; forkMessageId: string;
+    kind: 'branch' | 'edit' | 'regenerate'; attachmentIds?: string[];
+    signal?: AbortSignal;
+  }): Promise<SavedConversationResponse & { attachments?: Array<{ source_id: string; attachment: import('./apiContracts').ChatAttachment }> }> {
+    return fetchAPI(ENV.ENDPOINTS.CHAT, {
+      method: 'POST', signal: options.signal, body: JSON.stringify(this.protectedPayload({
+        action: 'forkConversation', source_conversation_id: options.sourceConversationId,
+        expected_revision: options.expectedRevision, fork_message_id: options.forkMessageId,
+        kind: options.kind, attachment_ids: options.attachmentIds ?? [],
+      })),
+    });
+  }
+
   static async verifyCaptcha(token: string): Promise<{ success: boolean }> {
     return fetchAPI<{ success: boolean }>(ENV.ENDPOINTS.TURNSTILE_VERIFY, {
       method: 'POST',
@@ -603,6 +644,11 @@ export class ChatAPI {
       includeHistory?: boolean;
       onChunk?: (partialText: string, annotations: Annotation[]) => void;
       onActivity?: (activities: StreamActivity[]) => void;
+      onDetails?: (details: ChatResponseDetails) => void;
+      mode?: ChatMode;
+      supportCaseId?: string;
+      supportCaseRevision?: number;
+      supportContractVersion?: 1;
     } = {}
   ): Promise<StreamingResponse> {
     const {
@@ -619,14 +665,23 @@ export class ChatAPI {
     // Correlates this turn with the server's log lines for the same request.
     const turnId = options.turnId ?? generateTurnId();
     const startedAt = Date.now();
+    for (const [key, expires] of this.historyPromotedTurns) {
+      if (expires <= startedAt) this.historyPromotedTurns.delete(key);
+    }
+    const historyKey = `${this.expectedIdentityId}:${conversationId ?? ''}:${turnId}`;
+    const includeHistory = options.includeHistory || this.historyPromotedTurns.has(historyKey);
 
     const payload: SendMessagePayload = { message };
+    if (options.supportContractVersion === 1 || options.mode === 'troubleshoot' || options.supportCaseId) payload.support_contract_version = 1;
+    if (options.mode) payload.mode = options.mode;
+    if (options.supportCaseId) payload.support_case_id = options.supportCaseId;
+    if (options.supportCaseRevision !== undefined) payload.support_case_revision = options.supportCaseRevision;
     if (this.expectedIdentityId) payload.expected_identity_id = this.expectedIdentityId;
     if (captchaToken) payload.captcha_token = captchaToken;
     if (conversationId) payload.client_conversation_id = conversationId;
     if (resetConversation) payload.reset_conversation = true;
     if (history?.length) {
-      if (resetConversation || options.includeHistory) payload.history = history;
+      if (resetConversation || includeHistory) payload.history = history;
       else payload.has_local_history = true;
     }
     if (attachmentIds?.length) {
@@ -687,7 +742,9 @@ export class ChatAPI {
       if (errorData.captcha_required) throw new CaptchaRequiredError();
       const code = errorCode(errorData);
       if (isIdentityLockResponse(response.status, code)) notifyIdentityChanged();
-      if (code === 'history_required' && history?.length && !options.includeHistory) {
+      if (code === 'history_required' && history?.length && !includeHistory) {
+        if (this.historyPromotedTurns.size >= 128) this.historyPromotedTurns.delete(this.historyPromotedTurns.keys().next().value ?? '');
+        this.historyPromotedTurns.set(historyKey, Date.now() + 15 * 60 * 1000);
         return this.sendMessage(message, { ...options, turnId, includeHistory: true });
       }
 
@@ -719,7 +776,8 @@ export class ChatAPI {
       signal,
       turnId,
       startedAt,
-      onActivity
+      onActivity,
+      options.onDetails
     );
   }
 
@@ -730,7 +788,8 @@ export class ChatAPI {
     signal?: AbortSignal,
     turnId = 'unknown',
     startedAt = Date.now(),
-    onActivity?: (activities: StreamActivity[]) => void
+    onActivity?: (activities: StreamActivity[]) => void,
+    onDetails?: (details: ChatResponseDetails) => void
   ): Promise<StreamingResponse> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -742,6 +801,7 @@ export class ChatAPI {
     let firstByteReceived = false;
     let bytesReceived = 0;
     const eventTypes = new Set<string>();
+    let details: ChatResponseDetails = {};
 
     const diagnostics = (): StreamDiagnostics => ({
       turnId,
@@ -788,7 +848,7 @@ export class ChatAPI {
 
     const completeActivity = (id: string) => {
       const existing = activities.find(activity => activity.id === id);
-      if (!existing || existing.state === 'done') return;
+      if (!existing || existing.state !== 'active') return;
       activities = activities.map(activity => (
         activity.id === id ? { ...activity, state: 'done' as const } : activity
       ));
@@ -899,6 +959,39 @@ export class ChatAPI {
       }
 
       switch (eventType) {
+        case 'chat.context': {
+          const context = normalizeChatContext(parsedData.context);
+          if (context) { details = { ...details, context }; onDetails?.(details); }
+          break;
+        }
+        case 'chat.evidence': {
+          const incoming = normalizeEvidence(parsedData.evidence);
+          const merged = new Map((details.evidence ?? []).map(item => [item.id, item]));
+          incoming.forEach(item => merged.set(item.id, item));
+          details = { ...details, evidence: [...merged.values()].slice(0, 20) };
+          onDetails?.(details);
+          break;
+        }
+        case 'chat.support_card': {
+          const card = normalizeSupportCard(parsedData.card);
+          if (card) {
+            const cards = new Map((details.cards ?? []).map(item => [item.id, item]));
+            cards.set(card.id, card);
+            details = { ...details, cards: [...cards.values()].slice(0, 20) };
+            onDetails?.(details);
+          }
+          break;
+        }
+        case 'chat.activity': {
+          const activity = parsedData.activity;
+          if (activity && typeof activity === 'object' && 'id' in activity && 'label' in activity && 'state' in activity
+            && typeof activity.id === 'string' && activity.id.length <= 128
+            && typeof activity.label === 'string' && activity.label.length <= 200
+            && ['active', 'done', 'failed', 'cancelled'].includes(String(activity.state))) {
+            upsertActivity(activity.id, activity.label, activity.state as StreamActivity['state']);
+          }
+          break;
+        }
         case 'response.output_text.delta':
           partialText += parsedData.delta || '';
           notifyChunk();
@@ -1118,6 +1211,7 @@ export class ChatAPI {
         annotations: [...annotations],
         responseId,
         diagnostics: diagnostics(),
+        ...(Object.keys(details).length ? { details } : {}),
       };
     } catch (error) {
       if (

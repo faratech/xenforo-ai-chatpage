@@ -1,4 +1,5 @@
 import type { Message } from '../types';
+import type { ChatMode, ConversationLineage, SupportProgress } from './supportContracts';
 
 /** Opaque pagination cursor returned by chat.php. */
 export interface CursorPageOptions {
@@ -18,6 +19,10 @@ export interface SavedConversationSummary {
   created_at: number;
   updated_at: number;
   message_count: number;
+  mode?: ChatMode;
+  support_case_id?: string;
+  support_case_revision?: number;
+  lineage?: ConversationLineage;
 }
 
 export interface SavedConversation extends SavedConversationSummary {
@@ -29,6 +34,8 @@ export interface SavedConversationDraft {
   title: string;
   messages: Message[];
   created_at?: number;
+  mode?: ChatMode;
+  support_case_id?: string;
 }
 
 export interface SavedConversationListResponse {
@@ -181,6 +188,7 @@ export interface SupportCase {
   revision: number;
   created_at: number;
   updated_at: number;
+  progress?: SupportProgress;
 }
 
 export interface SupportCaseDraft {

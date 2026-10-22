@@ -58,6 +58,9 @@ export const buildSupportCaseBBCode = (supportCase: SupportCase): string => {
     escapeBBCodeText(supportCase.description),
     '',
     ...listBlock('PC profile', profileRows),
+    ...listBlock('Reviewed facts', supportCase.progress?.confirmed_facts ?? []),
+    ...listBlock('Recent changes', supportCase.progress?.recent_changes ? [supportCase.progress.recent_changes] : []),
+    ...listBlock('Checks and reported results', supportCase.progress?.attempts.map(attempt => `${attempt.check}: ${attempt.outcome.replace(/_/g, ' ')}${attempt.observed_result ? ` — ${attempt.observed_result}` : ''}`) ?? []),
     ...listBlock('Linked AI conversation IDs', supportCase.conversation_ids),
     ...listBlock('Attachment IDs', supportCase.attachment_ids),
   ].join('\n').trim();

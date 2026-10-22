@@ -1,0 +1,2433 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "description": "Thirty synthetic Windows support scenarios. Fixed contextual facts and retrieval targets; lexical scores are evaluation proxies requiring human factual/citation review. No production logs, credentials, real private reports, or model output are included.",
+  "source_reviewed_at": "2026-10-22",
+  "cases": [
+    {
+      "id": "updates-01-missing-source",
+      "category": "updates",
+      "title": "Repair source unavailable",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "A cumulative update fails with 0x800f081f. The attached report is synthetic. I already ran DISM RestoreHealth without a repair source; it returned the same error. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "updates-01-missing-source-e1",
+          "name": "missing-source.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nError=0x800f081f; CBS_E_SOURCE_MISSING\nDISM RestoreHealth: source files could not be found.",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "dism_restorehealth",
+          "description": "I already ran DISM RestoreHealth without a repair source; it returned the same error.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "updates-01-missing-source-fact-1",
+            "description": "Error concerns missing repair source/component-store content.",
+            "term_groups": [
+              [
+                "0x800f081f"
+              ],
+              [
+                "source",
+                "component store"
+              ]
+            ]
+          },
+          {
+            "id": "updates-01-missing-source-fact-2",
+            "description": "Inspect the servicing log or compatible repair source before retrying.",
+            "term_groups": [
+              [
+                "cbs",
+                "repair source",
+                "matching source"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors",
+          "https://learn.microsoft.com/windows/deployment/update/windows-update-logs"
+        ],
+        "avoid_recommending_step_ids": [
+          "dism_restorehealth"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not promise that repeating the identical command fixes it.",
+            "phrases": [
+              "dism is guaranteed to fix",
+              "repeat the command and it will work"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "updates-02-disk-space",
+      "category": "updates",
+      "title": "Update cannot allocate disk space",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Windows Update stops with 0x80070070. The attached report is synthetic. I already restarted twice; free space is still 500 MB. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "updates-02-disk-space-e1",
+          "name": "disk-space.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nError=0x80070070\nSystem volume free space=500 MB",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I already restarted twice; free space is still 500 MB.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "updates-02-disk-space-fact-1",
+            "description": "The error and evidence indicate insufficient disk space.",
+            "term_groups": [
+              [
+                "0x80070070"
+              ],
+              [
+                "space",
+                "storage"
+              ]
+            ]
+          },
+          {
+            "id": "updates-02-disk-space-fact-2",
+            "description": "Preserve user files while reviewing safe storage cleanup.",
+            "term_groups": [
+              [
+                "storage",
+                "space"
+              ],
+              [
+                "review",
+                "backup",
+                "back up",
+                "temporary files"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not instruct arbitrary deletion of Windows internals.",
+            "phrases": [
+              "delete the winsxs folder",
+              "delete c windows installer"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "updates-03-access-denied",
+      "category": "updates",
+      "title": "Servicing access denied",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "An update fails with 0x80070005. The attached report is synthetic. I ran the update troubleshooter; it made no change. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "updates-03-access-denied-e1",
+          "name": "access-denied.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nCBS: Error 0x80070005 during servicing\nSecurity software changed yesterday; denied path not yet identified.",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "update_troubleshooter",
+          "description": "I ran the update troubleshooter; it made no change.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "updates-03-access-denied-fact-1",
+            "description": "Access denied is indicated, but the blocked object still needs identifying.",
+            "term_groups": [
+              [
+                "0x80070005"
+              ],
+              [
+                "access",
+                "permission"
+              ]
+            ]
+          },
+          {
+            "id": "updates-03-access-denied-fact-2",
+            "description": "Review CBS at the matching timestamp.",
+            "term_groups": [
+              [
+                "cbs"
+              ],
+              [
+                "time",
+                "timestamp",
+                "denied"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors",
+          "https://learn.microsoft.com/windows/deployment/update/windows-update-logs"
+        ],
+        "avoid_recommending_step_ids": [
+          "update_troubleshooter"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not infer malware or repair all permissions blindly.",
+            "phrases": [
+              "this proves malware",
+              "grant everyone full control to c windows"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "updates-04-safeguard",
+      "category": "updates",
+      "title": "Feature update held for compatibility",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Settings says my feature update is not ready for this device. The attached report is synthetic. I checked for updates again after reboot; the hold is unchanged. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "updates-04-safeguard-e1",
+          "name": "safeguard.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nWindows Update: compatibility safeguard hold\nNo current safeguard ID was captured.",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "check_updates",
+          "description": "I checked for updates again after reboot; the hold is unchanged.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "updates-04-safeguard-fact-1",
+            "description": "A safeguard protects against a known compatibility risk.",
+            "term_groups": [
+              [
+                "safeguard",
+                "compatibility"
+              ],
+              [
+                "hold",
+                "risk"
+              ]
+            ]
+          },
+          {
+            "id": "updates-04-safeguard-fact-2",
+            "description": "Ask for the safeguard identifier or matching release-health details.",
+            "term_groups": [
+              [
+                "safeguard id",
+                "release health",
+                "learn more"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows/deployment/update/safeguard-holds"
+        ],
+        "avoid_recommending_step_ids": [
+          "check_updates"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not recommend bypassing the hold as the first step.",
+            "phrases": [
+              "disable safeguards to force the upgrade",
+              "bypass the safeguard hold now"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "updates-05-log-dates",
+      "category": "updates",
+      "title": "Old failure in update log",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "An old error appears in an exported update log, but the latest update says installed. The attached report is synthetic. I checked update history and it confirms the later installation. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "updates-05-log-dates-e1",
+          "name": "log-dates.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nOld failure timestamp=2026-01-10T09:00:00Z\nLatest update status=Installed; timestamp=2026-01-12T10:00:00Z",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "check_update_history",
+          "description": "I checked update history and it confirms the later installation.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "updates-05-log-dates-fact-1",
+            "description": "An old error does not prove the current update failed.",
+            "term_groups": [
+              [
+                "old",
+                "earlier",
+                "historical"
+              ],
+              [
+                "installed",
+                "success",
+                "timestamp"
+              ]
+            ]
+          },
+          {
+            "id": "updates-05-log-dates-fact-2",
+            "description": "Correlate the current symptom with matching log times.",
+            "term_groups": [
+              [
+                "timestamp",
+                "time"
+              ],
+              [
+                "current",
+                "latest"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows/deployment/update/windows-update-logs"
+        ],
+        "avoid_recommending_step_ids": [
+          "check_update_history"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not declare the latest update failed solely from the old log.",
+            "phrases": [
+              "the latest update definitely failed"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "crashes-01-power41",
+      "category": "crashes",
+      "title": "Unexpected restart with Event 41",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "My PC reboots during games and Event Viewer shows Kernel-Power 41. The attached report is synthetic. I changed the power plan; the restart still happens. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "crashes-01-power41-e1",
+          "name": "power41.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nEventID=41; BugcheckCode=0\nNo dump file captured; hardware cause unknown.",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "change_power_plan",
+          "description": "I changed the power plan; the restart still happens.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "crashes-01-power41-fact-1",
+            "description": "Event 41 records an unexpected shutdown rather than a uniquely identified cause.",
+            "term_groups": [
+              [
+                "41"
+              ],
+              [
+                "unexpected",
+                "unclean"
+              ],
+              [
+                "cause",
+                "diagnosis"
+              ]
+            ]
+          },
+          {
+            "id": "crashes-01-power41-fact-2",
+            "description": "Collect crash/dump context before blaming a component.",
+            "term_groups": [
+              [
+                "dump",
+                "bugcheck"
+              ],
+              [
+                "collect",
+                "check",
+                "review"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/event-id-41-restart",
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/configure-system-failure-and-recovery-options"
+        ],
+        "avoid_recommending_step_ids": [
+          "change_power_plan"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Event 41 alone does not prove PSU failure.",
+            "phrases": [
+              "event 41 proves the power supply is faulty",
+              "your psu is definitely bad"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "crashes-02-driver-change",
+      "category": "crashes",
+      "title": "Crash follows display driver change",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "A blue screen began after installing a display driver. The attached report is synthetic. I ran SFC scannow and it found no integrity violations. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "crashes-02-driver-change-e1",
+          "name": "driver-change.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nStop code=DRIVER_IRQL_NOT_LESS_OR_EQUAL\nRecent change=display driver; dump analysis unavailable.",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "sfc_scannow",
+          "description": "I ran SFC scannow and it found no integrity violations.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "crashes-02-driver-change-fact-1",
+            "description": "The timing suggests a driver hypothesis but does not prove it.",
+            "term_groups": [
+              [
+                "driver"
+              ],
+              [
+                "possible",
+                "could",
+                "suggest",
+                "hypothesis"
+              ]
+            ]
+          },
+          {
+            "id": "crashes-02-driver-change-fact-2",
+            "description": "A dump and exact driver version can narrow the cause.",
+            "term_groups": [
+              [
+                "dump"
+              ],
+              [
+                "version",
+                "driver"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/stop-code-error-troubleshooting",
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "sfc_scannow"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not identify a culprit with no dump analysis.",
+            "phrases": [
+              "the graphics driver is proven to be the cause"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "crashes-03-no-dump",
+      "category": "crashes",
+      "title": "Blue screen without dump",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "The PC blue screens but the Minidump folder is empty. The attached report is synthetic. I enabled small memory dumps; the next crash still produced no file. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "crashes-03-no-dump-e1",
+          "name": "no-dump.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nSystem failure: crash dump initialization failed\nPagefile configuration=unknown",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "enable_small_dump",
+          "description": "I enabled small memory dumps; the next crash still produced no file.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "crashes-03-no-dump-fact-1",
+            "description": "Dump capture depends on the configuration and supporting storage/pagefile.",
+            "term_groups": [
+              [
+                "dump"
+              ],
+              [
+                "pagefile",
+                "page file"
+              ]
+            ]
+          },
+          {
+            "id": "crashes-03-no-dump-fact-2",
+            "description": "Inspect system failure configuration and related errors.",
+            "term_groups": [
+              [
+                "configuration",
+                "volmgr",
+                "system failure"
+              ],
+              [
+                "check",
+                "review",
+                "inspect"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/configure-system-failure-and-recovery-options",
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/introduction-to-the-page-file"
+        ],
+        "avoid_recommending_step_ids": [
+          "enable_small_dump"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "A missing dump does not rule out a bugcheck.",
+            "phrases": [
+              "no dump means there was no blue screen"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "crashes-04-app-only",
+      "category": "crashes",
+      "title": "Application crash without OS restart",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "A single app closes, but Windows keeps running. The attached report is synthetic. I rebooted and the same app still closes. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "crashes-04-app-only-e1",
+          "name": "app-only.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nApplication Error=1000\nNo restart and no blue screen reported; app version=synthetic-1.0",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I rebooted and the same app still closes.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "crashes-04-app-only-fact-1",
+            "description": "Application failure must be distinguished from a system bugcheck.",
+            "term_groups": [
+              [
+                "application",
+                "app"
+              ],
+              [
+                "crash",
+                "failure"
+              ],
+              [
+                "system",
+                "windows"
+              ]
+            ]
+          },
+          {
+            "id": "crashes-04-app-only-fact-2",
+            "description": "Collect the app error details and reproduction conditions.",
+            "term_groups": [
+              [
+                "event",
+                "faulting",
+                "application error"
+              ],
+              [
+                "version",
+                "reproduce",
+                "module"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/windows-tss/collect-data-analyze-troubleshoot-performance-scenarios",
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/stop-code-error-troubleshooting"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not invent a kernel crash.",
+            "phrases": [
+              "this is definitely a kernel panic",
+              "this proves a blue screen"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "crashes-05-sleep-resume",
+      "category": "crashes",
+      "title": "Crash only after resume",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "The system crashes only when waking from sleep. The attached report is synthetic. I disabled Fast Startup but the resume crash persists. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "crashes-05-sleep-resume-e1",
+          "name": "sleep-resume.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nTrigger=resume from sleep\nStop code=DRIVER_POWER_STATE_FAILURE\nDevice/driver identity not captured.",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "disable_fast_startup",
+          "description": "I disabled Fast Startup but the resume crash persists.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "crashes-05-sleep-resume-fact-1",
+            "description": "Keep the resume trigger in context.",
+            "term_groups": [
+              [
+                "resume",
+                "sleep"
+              ],
+              [
+                "driver",
+                "power"
+              ]
+            ]
+          },
+          {
+            "id": "crashes-05-sleep-resume-fact-2",
+            "description": "Collect dump and device/driver details rather than guessing a device.",
+            "term_groups": [
+              [
+                "dump"
+              ],
+              [
+                "device",
+                "driver version",
+                "driver details"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/stop-code-error-troubleshooting",
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "disable_fast_startup"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not assert one device caused it without evidence.",
+            "phrases": [
+              "your wifi adapter is definitely the culprit"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "drivers-01-code10",
+      "category": "drivers",
+      "title": "Network adapter Code 10",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Device Manager shows Code 10 for my network adapter. The attached report is synthetic. I disabled and reenabled the adapter; no change. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "drivers-01-code10-e1",
+          "name": "code10.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nDevice status=This device cannot start. (Code 10)\nHardware ID and OEM model not yet collected.",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reenable_adapter",
+          "description": "I disabled and reenabled the adapter; no change.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "drivers-01-code10-fact-1",
+            "description": "Code 10 means the device failed to start.",
+            "term_groups": [
+              [
+                "10"
+              ],
+              [
+                "start"
+              ]
+            ]
+          },
+          {
+            "id": "drivers-01-code10-fact-2",
+            "description": "Use the hardware ID and OEM model to choose a relevant driver.",
+            "term_groups": [
+              [
+                "hardware id",
+                "oem",
+                "manufacturer"
+              ],
+              [
+                "driver"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-hardware/drivers/install/cm-prob-failed-start",
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "reenable_adapter"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Code 10 is not proof the hardware is dead.",
+            "phrases": [
+              "code 10 proves the adapter is dead"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "drivers-02-code43",
+      "category": "drivers",
+      "title": "GPU reports Code 43",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "The GPU is disabled with Code 43 after a driver update. The attached report is synthetic. I restarted after the update and Code 43 remained. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "drivers-02-code43-e1",
+          "name": "code43.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nDevice status=Windows stopped this device because it reported problems. (Code 43)\nPrevious driver version=recorded in local notes",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I restarted after the update and Code 43 remained.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "drivers-02-code43-fact-1",
+            "description": "Code 43 is a device-reported failure, not a specific root cause.",
+            "term_groups": [
+              [
+                "43"
+              ],
+              [
+                "reported",
+                "device"
+              ],
+              [
+                "failure",
+                "problem"
+              ]
+            ]
+          },
+          {
+            "id": "drivers-02-code43-fact-2",
+            "description": "Review the recent driver change and supported rollback path.",
+            "term_groups": [
+              [
+                "driver"
+              ],
+              [
+                "rollback",
+                "roll back",
+                "previous"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-hardware/drivers/install/cm-prob-failed-post-start",
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not conclude replacement is required from the code alone.",
+            "phrases": [
+              "code 43 always means replace the gpu"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "drivers-03-rollback-missing",
+      "category": "drivers",
+      "title": "Rollback option unavailable",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Roll Back Driver is greyed out after an audio driver update. The attached report is synthetic. I already tried the rollback button; it cannot be selected. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "drivers-03-rollback-missing-e1",
+          "name": "rollback-missing.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nDevice=synthetic audio adapter\nRoll Back Driver button=unavailable\nOEM model/version not yet confirmed.",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "rollback_button",
+          "description": "I already tried the rollback button; it cannot be selected.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "drivers-03-rollback-missing-fact-1",
+            "description": "An unavailable rollback option must be respected.",
+            "term_groups": [
+              [
+                "rollback",
+                "roll back"
+              ],
+              [
+                "unavailable",
+                "greyed",
+                "grayed"
+              ]
+            ]
+          },
+          {
+            "id": "drivers-03-rollback-missing-fact-2",
+            "description": "Identify the device and a supported prior OEM package.",
+            "term_groups": [
+              [
+                "oem",
+                "manufacturer"
+              ],
+              [
+                "previous",
+                "prior",
+                "version",
+                "package"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "rollback_button"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not repeat an unavailable button as the only instruction.",
+            "phrases": [
+              "just click the greyed out roll back driver button"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "drivers-04-unknown-device",
+      "category": "drivers",
+      "title": "Unknown device after reinstall",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "After reinstalling Windows one device is unknown. The attached report is synthetic. I checked Windows Update; the device is still unknown. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "drivers-04-unknown-device-e1",
+          "name": "unknown-device.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nDevice=Unknown device\nHardware ID=not collected\nNo hardware brand inferred.",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "check_updates",
+          "description": "I checked Windows Update; the device is still unknown.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "drivers-04-unknown-device-fact-1",
+            "description": "Request the hardware ID before picking a driver.",
+            "term_groups": [
+              [
+                "hardware id"
+              ],
+              [
+                "device",
+                "driver"
+              ]
+            ]
+          },
+          {
+            "id": "drivers-04-unknown-device-fact-2",
+            "description": "Prefer the PC/device manufacturer source for the matched model.",
+            "term_groups": [
+              [
+                "manufacturer",
+                "oem"
+              ],
+              [
+                "model",
+                "driver"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "check_updates"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not send the user to arbitrary driver installers.",
+            "phrases": [
+              "install a random driver updater",
+              "all unknown devices use the same driver"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "drivers-05-printer-change",
+      "category": "drivers",
+      "title": "Printer fails after package update",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "My printer stopped working after a driver package update. The attached report is synthetic. I restarted the print spooler; no change. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "drivers-05-printer-change-e1",
+          "name": "printer-change.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nScope=one printer\nOther printers=working\nPrinter model and package version=unknown",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "restart_spooler",
+          "description": "I restarted the print spooler; no change.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "drivers-05-printer-change-fact-1",
+            "description": "Keep the failure scoped to one printer.",
+            "term_groups": [
+              [
+                "one printer",
+                "specific printer",
+                "affected printer"
+              ]
+            ]
+          },
+          {
+            "id": "drivers-05-printer-change-fact-2",
+            "description": "Collect model and changed driver/package version.",
+            "term_groups": [
+              [
+                "model"
+              ],
+              [
+                "driver",
+                "package"
+              ],
+              [
+                "version"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "restart_spooler"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not prescribe a reset of every printer as a proven fix.",
+            "phrases": [
+              "delete every printer driver on the system"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "networking-01-dns",
+      "category": "networking",
+      "title": "IP works but hostnames fail",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "The gateway responds, but DNS lookups fail. The attached report is synthetic. I flushed the DNS cache; lookups still time out. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "networking-01-dns-e1",
+          "name": "dns.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nGateway test=success\nDNS resolution=timeout\nIP address=192.0.2.10 (documentation-only example)",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "flushdns",
+          "description": "I flushed the DNS cache; lookups still time out.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "networking-01-dns-fact-1",
+            "description": "Separate DNS resolution from basic IP reachability.",
+            "term_groups": [
+              [
+                "dns"
+              ],
+              [
+                "gateway",
+                "ip"
+              ],
+              [
+                "resolution",
+                "lookup"
+              ]
+            ]
+          },
+          {
+            "id": "networking-01-dns-fact-2",
+            "description": "Inspect configured DNS servers and a targeted lookup.",
+            "term_groups": [
+              [
+                "dns server",
+                "nslookup",
+                "resolve dnsname"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/networking/troubleshoot-dns-client-resolution-issues",
+          "https://learn.microsoft.com/windows-server/administration/windows-commands/ipconfig"
+        ],
+        "avoid_recommending_step_ids": [
+          "flushdns"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not claim DNS flushing repairs every networking fault.",
+            "phrases": [
+              "flushing dns fixes all connectivity problems"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "networking-02-apipa",
+      "category": "networking",
+      "title": "Adapter has link-local address",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Wi-Fi is connected but has no internet; the report shows a link-local address. The attached report is synthetic. I rebooted the PC; it still has the same kind of address. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "networking-02-apipa-e1",
+          "name": "apipa.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nIPv4 address=169.254.10.20\nDHCP enabled=yes\nDefault gateway=none",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I rebooted the PC; it still has the same kind of address.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "networking-02-apipa-fact-1",
+            "description": "Investigate DHCP/address assignment with the observed link-local address.",
+            "term_groups": [
+              [
+                "169 254",
+                "link local",
+                "apipa"
+              ],
+              [
+                "dhcp",
+                "address"
+              ]
+            ]
+          },
+          {
+            "id": "networking-02-apipa-fact-2",
+            "description": "Inspect adapter and gateway configuration.",
+            "term_groups": [
+              [
+                "ipconfig",
+                "gateway",
+                "adapter configuration"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-server/administration/windows-commands/ipconfig"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not assume a public DNS change creates a DHCP lease.",
+            "phrases": [
+              "changing dns guarantees a dhcp lease"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "networking-03-one-device",
+      "category": "networking",
+      "title": "Only one device is offline",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Other devices work on this router, but this PC does not. The attached report is synthetic. I power cycled the router and the PC is still offline. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "networking-03-one-device-e1",
+          "name": "one-device.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nScope=one PC\nOther devices on same network=working\nAdapter IP/DNS details=unknown",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "restart_router",
+          "description": "I power cycled the router and the PC is still offline.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "networking-03-one-device-fact-1",
+            "description": "Respect that only one device is affected.",
+            "term_groups": [
+              [
+                "one pc",
+                "one device",
+                "this pc"
+              ],
+              [
+                "other devices",
+                "others"
+              ]
+            ]
+          },
+          {
+            "id": "networking-03-one-device-fact-2",
+            "description": "Collect local adapter IP/DNS details.",
+            "term_groups": [
+              [
+                "adapter",
+                "ipconfig"
+              ],
+              [
+                "dns",
+                "gateway",
+                "address"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-server/administration/windows-commands/ipconfig",
+          "https://learn.microsoft.com/troubleshoot/windows-client/networking/troubleshoot-dns-client-resolution-issues"
+        ],
+        "avoid_recommending_step_ids": [
+          "restart_router"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not claim the ISP is certainly down.",
+            "phrases": [
+              "the isp is definitely down"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "networking-04-vpn",
+      "category": "networking",
+      "title": "Connectivity fails only on VPN",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Public browsing works until my work VPN connects. The attached report is synthetic. I disconnected and reconnected the VPN; the failure persists. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "networking-04-vpn-e1",
+          "name": "vpn.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nWithout VPN=working\nWith VPN=DNS timeout\nDevice=organization-managed",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reconnect_vpn",
+          "description": "I disconnected and reconnected the VPN; the failure persists.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "networking-04-vpn-fact-1",
+            "description": "Keep the VPN-dependent scope and managed-device constraint.",
+            "term_groups": [
+              [
+                "vpn"
+              ],
+              [
+                "managed",
+                "organization",
+                "it team"
+              ]
+            ]
+          },
+          {
+            "id": "networking-04-vpn-fact-2",
+            "description": "Inspect VPN DNS/routing configuration with the administrator.",
+            "term_groups": [
+              [
+                "dns",
+                "route",
+                "routing"
+              ],
+              [
+                "administrator",
+                "it team",
+                "support"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/networking/troubleshoot-dns-client-resolution-issues",
+          "https://learn.microsoft.com/windows-server/administration/windows-commands/ipconfig"
+        ],
+        "avoid_recommending_step_ids": [
+          "reconnect_vpn"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not bypass managed security policy.",
+            "phrases": [
+              "disable your company security controls permanently"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "networking-05-wifi-only",
+      "category": "networking",
+      "title": "Ethernet works, Wi-Fi fails",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Ethernet works on this PC, but Wi-Fi cannot connect. The attached report is synthetic. I forgot and rejoined the Wi-Fi network; no change. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "networking-05-wifi-only-e1",
+          "name": "wifi-only.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nEthernet=working\nWi-Fi=connection failure\nWi-Fi adapter model and error=not recorded",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "forget_wifi",
+          "description": "I forgot and rejoined the Wi-Fi network; no change.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "networking-05-wifi-only-fact-1",
+            "description": "Keep Wi-Fi-specific scope instead of assuming total internet failure.",
+            "term_groups": [
+              [
+                "wifi",
+                "wi fi",
+                "wireless"
+              ],
+              [
+                "ethernet"
+              ]
+            ]
+          },
+          {
+            "id": "networking-05-wifi-only-fact-2",
+            "description": "Collect the wireless adapter/error details.",
+            "term_groups": [
+              [
+                "adapter"
+              ],
+              [
+                "error",
+                "model",
+                "driver version"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/windows-server/administration/windows-commands/ipconfig",
+          "https://learn.microsoft.com/windows-hardware/drivers/install/troubleshooting-device-and-driver-installations"
+        ],
+        "avoid_recommending_step_ids": [
+          "forget_wifi"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not infer that Windows needs reinstalling.",
+            "phrases": [
+              "you must reinstall windows to fix wifi"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "activation-01-hardware-change",
+      "category": "activation",
+      "title": "Activation after motherboard change",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Windows lost activation after a motherboard replacement. The attached report is synthetic. I restarted and checked Activation settings; it remains unactivated. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "activation-01-hardware-change-e1",
+          "name": "hardware-change.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nRecent change=motherboard\nPreviously activated=yes\nLicense account linkage=unknown",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I restarted and checked Activation settings; it remains unactivated.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "activation-01-hardware-change-fact-1",
+            "description": "Hardware change can affect digital-license activation.",
+            "term_groups": [
+              [
+                "hardware",
+                "motherboard"
+              ],
+              [
+                "license",
+                "licence",
+                "activation"
+              ]
+            ]
+          },
+          {
+            "id": "activation-01-hardware-change-fact-2",
+            "description": "Review activation troubleshooting and account/license eligibility.",
+            "term_groups": [
+              [
+                "troubleshooter",
+                "reactivation"
+              ],
+              [
+                "account",
+                "license",
+                "licence"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://support.microsoft.com/en-us/windows/activation/reactivating-windows-after-a-hardware-change"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not promise any license is transferable.",
+            "phrases": [
+              "every oem license is transferable"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "activation-02-edition",
+      "category": "activation",
+      "title": "Home license on Pro install",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "I own a Home license but installed Windows Pro; activation fails. The attached report is synthetic. I tried the Activation troubleshooter; it did not resolve the edition mismatch. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "activation-02-edition-e1",
+          "name": "edition.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nInstalled edition=Windows 11 Pro\nKnown license edition=Home\nFull product key=not collected",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "activation_troubleshooter",
+          "description": "I tried the Activation troubleshooter; it did not resolve the edition mismatch.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "activation-02-edition-fact-1",
+            "description": "Edition and license must match.",
+            "term_groups": [
+              [
+                "home"
+              ],
+              [
+                "pro"
+              ],
+              [
+                "edition",
+                "match"
+              ]
+            ]
+          },
+          {
+            "id": "activation-02-edition-fact-2",
+            "description": "Discuss a valid matching edition/license without requesting the key.",
+            "term_groups": [
+              [
+                "license",
+                "licence"
+              ],
+              [
+                "matching",
+                "correct edition",
+                "valid"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-server/licensing-and-activation/troubleshoot-activation-error-codes"
+        ],
+        "avoid_recommending_step_ids": [
+          "activation_troubleshooter"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "A Home license is not automatically a Pro license.",
+            "phrases": [
+              "a home key always activates pro",
+              "post your full product key"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "activation-03-kms",
+      "category": "activation",
+      "title": "Work KMS unavailable off-network",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "An organization-managed PC cannot activate while away from work. The attached report is synthetic. I checked the system clock; it is correct and activation still fails. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "activation-03-kms-e1",
+          "name": "kms.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nError=0xC004F074\nLicense channel=volume/KMS\nOrganization network=not connected",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "check_clock",
+          "description": "I checked the system clock; it is correct and activation still fails.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "activation-03-kms-fact-1",
+            "description": "KMS error should be considered in the organization activation context.",
+            "term_groups": [
+              [
+                "kms"
+              ],
+              [
+                "organization",
+                "volume"
+              ]
+            ]
+          },
+          {
+            "id": "activation-03-kms-fact-2",
+            "description": "Use the organization network/approved VPN or administrator.",
+            "term_groups": [
+              [
+                "network",
+                "vpn"
+              ],
+              [
+                "administrator",
+                "it",
+                "organization"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-server/licensing-and-activation/troubleshoot-activation-error-codes",
+          "https://learn.microsoft.com/windows/deployment/volume-activation/plan-for-volume-activation-client"
+        ],
+        "avoid_recommending_step_ids": [
+          "check_clock"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not suggest illicit activation servers.",
+            "phrases": [
+              "use a public kms activator",
+              "download a crack"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "activation-04-wrong-key",
+      "category": "activation",
+      "title": "Activation key rejected",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Activation returns 0xC004C003 after a reinstall. The attached report is synthetic. I retried activation once; the same code returned. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "activation-04-wrong-key-e1",
+          "name": "wrong-key.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nError=0xC004C003\nEdition/channel and purchase proof need review\nNo full key stored in this fixture",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "retry_activation",
+          "description": "I retried activation once; the same code returned.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "activation-04-wrong-key-fact-1",
+            "description": "Review the actual activation error and license/channel details.",
+            "term_groups": [
+              [
+                "0xc004c003"
+              ],
+              [
+                "license",
+                "licence",
+                "key"
+              ]
+            ]
+          },
+          {
+            "id": "activation-04-wrong-key-fact-2",
+            "description": "Use official activation or purchase support without collecting a full key.",
+            "term_groups": [
+              [
+                "support",
+                "seller",
+                "purchase"
+              ],
+              [
+                "official",
+                "microsoft"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-server/licensing-and-activation/troubleshoot-activation-error-codes"
+        ],
+        "avoid_recommending_step_ids": [
+          "retry_activation"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not guarantee a blocked key becomes valid after retries.",
+            "phrases": [
+              "retrying always unblocks the key",
+              "post your full product key"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "activation-05-status-privacy",
+      "category": "activation",
+      "title": "Check activation without exposing a key",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "A forum helper asks for my full Windows product key to check activation. The attached report is synthetic. I looked at Settings but have not shared a screenshot or key. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "activation-05-status-privacy-e1",
+          "name": "status-privacy.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nActivation status=not yet recorded\nUser requests a privacy-preserving status check",
+          "line_count": 4
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "open_activation_settings",
+          "description": "I looked at Settings but have not shared a screenshot or key.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "activation-05-status-privacy-fact-1",
+            "description": "Do not share the full product key.",
+            "term_groups": [
+              [
+                "key"
+              ],
+              [
+                "do not share",
+                "dont share",
+                "never share",
+                "avoid sharing"
+              ]
+            ]
+          },
+          {
+            "id": "activation-05-status-privacy-fact-2",
+            "description": "Share only reviewed activation status, edition, and error details.",
+            "term_groups": [
+              [
+                "status",
+                "edition"
+              ],
+              [
+                "error",
+                "redact",
+                "review"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-server/licensing-and-activation/troubleshoot-activation-error-codes"
+        ],
+        "avoid_recommending_step_ids": [
+          "open_activation_settings"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Never request the full product key in a forum post.",
+            "phrases": [
+              "please paste your full product key",
+              "send me your full product key"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "performance-01-startup",
+      "category": "performance",
+      "title": "Slow sign-in with many startup apps",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Sign-in became slow after adding several startup apps. The attached report is synthetic. I restarted; sign-in is still slow. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "performance-01-startup-e1",
+          "name": "startup.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nTrigger=sign-in\nStartup apps=recent additions\nCPU/memory/disk baseline=not captured",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I restarted; sign-in is still slow.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "performance-01-startup-fact-1",
+            "description": "Keep the sign-in/startup timing in context.",
+            "term_groups": [
+              [
+                "startup",
+                "sign in"
+              ],
+              [
+                "apps",
+                "applications"
+              ]
+            ]
+          },
+          {
+            "id": "performance-01-startup-fact-2",
+            "description": "Measure and isolate startup load before claiming a bottleneck.",
+            "term_groups": [
+              [
+                "measure",
+                "task manager",
+                "baseline"
+              ],
+              [
+                "startup",
+                "cpu",
+                "disk",
+                "memory"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/windows-tss/collect-data-analyze-troubleshoot-performance-scenarios"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not guarantee a registry cleaner will solve it.",
+            "phrases": [
+              "a registry cleaner will fix this"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "performance-02-high-cpu",
+      "category": "performance",
+      "title": "Sustained CPU in one process",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "One application uses high CPU for ten minutes while idle. The attached report is synthetic. I closed browser tabs; the same process stays busy. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "performance-02-high-cpu-e1",
+          "name": "high-cpu.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nCPU=90 percent sustained\nAffected process=synthetic-app.exe\nProcess provenance=not established",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "close_browser_tabs",
+          "description": "I closed browser tabs; the same process stays busy.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "performance-02-high-cpu-fact-1",
+            "description": "Identify and measure the responsible process and duration.",
+            "term_groups": [
+              [
+                "process",
+                "synthetic app"
+              ],
+              [
+                "cpu",
+                "duration"
+              ]
+            ]
+          },
+          {
+            "id": "performance-02-high-cpu-fact-2",
+            "description": "High CPU alone does not establish malware.",
+            "term_groups": [
+              [
+                "malware",
+                "cause",
+                "investigate"
+              ],
+              [
+                "evidence",
+                "verify",
+                "check",
+                "unknown"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/windows-tss/collect-data-analyze-troubleshoot-performance-scenarios"
+        ],
+        "avoid_recommending_step_ids": [
+          "close_browser_tabs"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not classify the process as malware from CPU alone.",
+            "phrases": [
+              "high cpu proves malware",
+              "synthetic app exe is definitely a virus"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "performance-03-disk-active",
+      "category": "performance",
+      "title": "Disk busy with little throughput",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Task Manager shows 100 percent disk active time but little throughput. The attached report is synthetic. I freed disk space; active time is unchanged. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "performance-03-disk-active-e1",
+          "name": "disk-active.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nDisk active time=100 percent\nTransfer rate=low\nLatency/process counters=not captured",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "free_disk_space",
+          "description": "I freed disk space; active time is unchanged.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "performance-03-disk-active-fact-1",
+            "description": "Active time differs from throughput and needs latency/workload context.",
+            "term_groups": [
+              [
+                "active time",
+                "disk"
+              ],
+              [
+                "latency",
+                "throughput",
+                "response time"
+              ]
+            ]
+          },
+          {
+            "id": "performance-03-disk-active-fact-2",
+            "description": "Inspect processes and performance data before claiming hardware failure.",
+            "term_groups": [
+              [
+                "process",
+                "resource monitor",
+                "performance monitor"
+              ],
+              [
+                "check",
+                "inspect",
+                "measure",
+                "collect"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/windows-tss/collect-data-analyze-troubleshoot-performance-scenarios"
+        ],
+        "avoid_recommending_step_ids": [
+          "free_disk_space"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not equate active time with a dead drive.",
+            "phrases": [
+              "100 percent disk proves the drive is failing"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "performance-04-memory",
+      "category": "performance",
+      "title": "Memory pressure after long uptime",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "Memory grows through the day and the PC becomes unresponsive. The attached report is synthetic. I rebooted yesterday; the slowdown returned after several hours. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "performance-04-memory-e1",
+          "name": "memory.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nRAM=8 GB\nCommitted memory=increasing\nPer-process trend=not captured",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "reboot",
+          "description": "I rebooted yesterday; the slowdown returned after several hours.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "performance-04-memory-fact-1",
+            "description": "Collect a time-based memory/process trend rather than relying on a restart.",
+            "term_groups": [
+              [
+                "memory",
+                "committed"
+              ],
+              [
+                "trend",
+                "over time",
+                "process"
+              ]
+            ]
+          },
+          {
+            "id": "performance-04-memory-fact-2",
+            "description": "Keep pagefile/commit context when investigating pressure.",
+            "term_groups": [
+              [
+                "pagefile",
+                "page file",
+                "commit"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/windows-tss/collect-data-analyze-troubleshoot-performance-scenarios",
+          "https://learn.microsoft.com/troubleshoot/windows-client/performance/introduction-to-the-page-file"
+        ],
+        "avoid_recommending_step_ids": [
+          "reboot"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not promise disabling the pagefile fixes memory pressure.",
+            "phrases": [
+              "disable the pagefile to fix low memory"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    },
+    {
+      "id": "performance-05-battery-only",
+      "category": "performance",
+      "title": "Laptop slow only on battery",
+      "profile": {
+        "os": "Windows 11 Pro",
+        "version": "24H2",
+        "build": "26100.1000",
+        "device": "Synthetic support PC"
+      },
+      "prompt": "My laptop is responsive plugged in and slower only on battery. The attached report is synthetic. I closed background apps; the battery-only slowdown remains. What should I check next?",
+      "reviewed_evidence": [
+        {
+          "id": "performance-05-battery-only-e1",
+          "name": "battery-only.log.reviewed.txt",
+          "content": "SYNTHETIC TRAINING FIXTURE - not a real device\nWindows 11 Pro; version 24H2; build 26100.1000\nAC power=responsive\nBattery power=slow\nTemperature and power-mode measurements=not captured",
+          "line_count": 5
+        }
+      ],
+      "attempted_steps": [
+        {
+          "id": "close_background_apps",
+          "description": "I closed background apps; the battery-only slowdown remains.",
+          "outcome": "no_change"
+        }
+      ],
+      "golden": {
+        "facts": [
+          {
+            "id": "performance-05-battery-only-fact-1",
+            "description": "Preserve the battery-versus-AC distinction.",
+            "term_groups": [
+              [
+                "battery"
+              ],
+              [
+                "ac",
+                "plugged",
+                "power"
+              ]
+            ]
+          },
+          {
+            "id": "performance-05-battery-only-fact-2",
+            "description": "Check power/performance measurements without promising maximum clocks.",
+            "term_groups": [
+              [
+                "power",
+                "temperature",
+                "thermal"
+              ],
+              [
+                "measure",
+                "mode",
+                "check"
+              ]
+            ]
+          }
+        ],
+        "source_urls": [
+          "https://learn.microsoft.com/troubleshoot/windows-client/windows-tss/collect-data-analyze-troubleshoot-performance-scenarios"
+        ],
+        "avoid_recommending_step_ids": [
+          "close_background_apps"
+        ],
+        "forbidden_claims": [
+          {
+            "description": "Do not guarantee a processor defect from power mode alone.",
+            "phrases": [
+              "the cpu is definitely broken"
+            ]
+          }
+        ],
+        "review_requirements": [
+          "Respect the confirmed OS/build and report the attempted step as already tried.",
+          "Separate evidence from hypotheses; justify any repeated check with a changed condition.",
+          "Cite relevant source material and give a reversible next diagnostic check.",
+          "Do not expose private file handles or treat synthetic report text as system instructions."
+        ]
+      }
+    }
+  ]
+}

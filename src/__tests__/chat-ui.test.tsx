@@ -5,6 +5,9 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { StrictMode, createRef } from 'react';
 
 const apiMocks = vi.hoisted(() => ({
+  getChatCapabilities: vi.fn(),
+  forkConversation: vi.fn(),
+  updateSupportCaseProgress: vi.fn(),
   sendMessage: vi.fn(),
   getUsage: vi.fn(),
   clearConversation: vi.fn(),
@@ -47,6 +50,9 @@ vi.mock('../services/api', async importOriginal => {
     ...actual,
     ChatAPI: {
       ...actual.ChatAPI,
+      getChatCapabilities: apiMocks.getChatCapabilities,
+      forkConversation: apiMocks.forkConversation,
+      updateSupportCaseProgress: apiMocks.updateSupportCaseProgress,
       sendMessage: apiMocks.sendMessage,
       getUsage: apiMocks.getUsage,
       clearConversation: apiMocks.clearConversation,
@@ -147,6 +153,9 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  apiMocks.getChatCapabilities.mockReset().mockResolvedValue({ success: true, version: 1, modes: ['chat'], features: { guided_support: false, diagnostics: false, branches: false, support_cards: false }, limits: { max_attachments: 4, max_image_bytes: 8388608, max_text_file_bytes: 1048576, max_total_text_bytes: 131072, max_total_image_bytes: 10485760 } });
+  apiMocks.forkConversation.mockReset();
+  apiMocks.updateSupportCaseProgress.mockReset();
   prefersReducedMotion = false;
   window.history.replaceState(null, '', '/');
   window.localStorage.clear();
@@ -418,7 +427,7 @@ describe('ChatWindow state ownership', () => {
     expect(screen.queryByText('Account A secret')).not.toBeInTheDocument();
     expect(window.localStorage.getItem('chat_conversations')).toBeNull();
     expect(window.localStorage.getItem('current_conversation_id')).toBeNull();
-    await waitFor(() => expect(window.localStorage.getItem('chat_store:v4:42')).not.toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem('chat_store:v5:42')).not.toBeNull());
   });
 
   it('commits an aborted partial response exactly once and never speaks it', async () => {
@@ -455,7 +464,7 @@ describe('ChatWindow state ownership', () => {
       target: { value: 'Keep this unfinished question' },
     });
     await waitFor(() => {
-      const raw = window.localStorage.getItem('chat_store:v4:42');
+      const raw = window.localStorage.getItem('chat_store:v5:42');
       expect(raw).toContain('Keep this unfinished question');
     });
     first.unmount();
@@ -472,12 +481,12 @@ describe('ChatWindow state ownership', () => {
     // Unmount before the 300 ms trailing debounce fires: the cleanup must
     // flush the pending save instead of only clearing the timer.
     first.unmount();
-    expect(window.localStorage.getItem('chat_store:v4:42')).toContain('Draft typed just before unmount');
+    expect(window.localStorage.getItem('chat_store:v5:42')).toContain('Draft typed just before unmount');
   });
 
   it('retries persistence after a transient quota failure so later edits still save', async () => {
-    window.localStorage.setItem('chat_store:v4:guest_quota_retry', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_quota_retry', JSON.stringify({
+      version: 5,
       conversations: {
         conv_solo: {
           id: 'conv_solo',
@@ -491,11 +500,11 @@ describe('ChatWindow state ownership', () => {
       pendingServerDeletions: {},
       trimmed: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_quota_retry', 'conv_solo');
+    window.localStorage.setItem('current_conversation_id:v5:guest_quota_retry', 'conv_solo');
     const realSetItem = window.localStorage.setItem.bind(window.localStorage);
     let failStoreWrites = true;
     vi.spyOn(window.localStorage, 'setItem').mockImplementation((key: string, value: string) => {
-      if (failStoreWrites && key === 'chat_store:v4:guest_quota_retry') {
+      if (failStoreWrites && key === 'chat_store:v5:guest_quota_retry') {
         throw new DOMException('quota exceeded', 'QuotaExceededError');
       }
       realSetItem(key, value);
@@ -510,7 +519,7 @@ describe('ChatWindow state ownership', () => {
       target: { value: 'Recovered draft after quota' },
     });
     await waitFor(() => {
-      expect(window.localStorage.getItem('chat_store:v4:guest_quota_retry'))
+      expect(window.localStorage.getItem('chat_store:v5:guest_quota_retry'))
         .toContain('Recovered draft after quota');
     });
 
@@ -521,8 +530,8 @@ describe('ChatWindow state ownership', () => {
   });
 
   it('keeps chat B and its draft selected when an in-flight clear of chat A completes', async () => {
-    window.localStorage.setItem('chat_store:v4:guest_clear_switch', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_clear_switch', JSON.stringify({
+      version: 5,
       conversations: {
         conv_clear_a: {
           id: 'conv_clear_a',
@@ -544,7 +553,7 @@ describe('ChatWindow state ownership', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_clear_switch', 'conv_clear_a');
+    window.localStorage.setItem('current_conversation_id:v5:guest_clear_switch', 'conv_clear_a');
     let resolveClear: ((value: { success: true }) => void) | undefined;
     apiMocks.clearConversation.mockImplementationOnce(() => (
       new Promise(resolve => { resolveClear = resolve; })
@@ -568,9 +577,9 @@ describe('ChatWindow state ownership', () => {
 
     expect(screen.getByText('Answer in chat B')).toBeInTheDocument();
     expect(screen.getByLabelText('Type your message')).toHaveValue('Draft that belongs to chat B');
-    expect(window.localStorage.getItem('current_conversation_id:v4:guest_clear_switch')).toBe('conv_clear_b');
+    expect(window.localStorage.getItem('current_conversation_id:v5:guest_clear_switch')).toBe('conv_clear_b');
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_clear_switch') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:guest_clear_switch') ?? '{}') as {
         conversations: Record<string, { draft?: string; messages: Array<{ rawContent: string }> }>;
       };
       expect(stored.conversations.conv_clear_b.draft).toBe('Draft that belongs to chat B');
@@ -593,8 +602,8 @@ describe('ChatWindow state ownership', () => {
         messages: [{ id: `archived_ai_${index}`, role: 'ai', rawContent: `Archived answer ${index}`, timestamp: 2_000 + index }],
       }];
     }));
-    window.localStorage.setItem('chat_store:v4:guest_cap', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_cap', JSON.stringify({
+      version: 5,
       conversations: {
         ...archived,
         conv_active: {
@@ -608,7 +617,7 @@ describe('ChatWindow state ownership', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_cap', 'conv_active');
+    window.localStorage.setItem('current_conversation_id:v5:guest_cap', 'conv_active');
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_cap" />);
     await screen.findByText('Only active answer');
@@ -616,7 +625,7 @@ describe('ChatWindow state ownership', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }));
 
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_cap') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:guest_cap') ?? '{}') as {
         conversations: Record<string, { archivedAt?: number }>;
         tombstones: Record<string, number>;
         pendingServerDeletions: Record<string, number>;
@@ -642,21 +651,21 @@ describe('ChatWindow state ownership', () => {
         messages: [{ id: `hist_ai_${index}`, role: 'ai', rawContent: `History answer ${index}`, timestamp: 2_000 + index }],
       }];
     }));
-    window.localStorage.setItem('chat_store:v4:guest_newchat_cap', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_newchat_cap', JSON.stringify({
+      version: 5,
       conversations: history,
       tombstones: {},
       pendingServerDeletions: {},
       trimmed: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_newchat_cap', 'conv_hist_49');
+    window.localStorage.setItem('current_conversation_id:v5:guest_newchat_cap', 'conv_hist_49');
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_newchat_cap" />);
     await screen.findByText('History answer 49');
     fireEvent.click(screen.getAllByRole('button', { name: 'New chat' })[0]);
 
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_newchat_cap') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:guest_newchat_cap') ?? '{}') as {
         conversations: Record<string, unknown>;
         tombstones: Record<string, number>;
         pendingServerDeletions: Record<string, number>;
@@ -747,9 +756,9 @@ describe('ChatWindow state ownership', () => {
     fireEvent.change(await screen.findByLabelText('Type your message'), { target: { value: 'Original question' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
     await screen.findByText('Original answer');
-    await waitFor(() => expect(window.localStorage.getItem('chat_store:v4:42')).toContain('Original answer'));
+    await waitFor(() => expect(window.localStorage.getItem('chat_store:v5:42')).toContain('Original answer'));
 
-    const before = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+    const before = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
       conversations: Record<string, { messages: unknown[] }>;
     };
     const originalId = Object.keys(before.conversations)[0];
@@ -759,7 +768,7 @@ describe('ChatWindow state ownership', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Branch to new chat' }));
 
     await waitFor(() => {
-      const after = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const after = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { messages: unknown[]; needsServerResync?: boolean }>;
       };
       expect(Object.keys(after.conversations)).toHaveLength(2);
@@ -767,7 +776,7 @@ describe('ChatWindow state ownership', () => {
       const branchId = Object.keys(after.conversations).find(id => id !== originalId);
       expect(branchId).toBeDefined();
       expect(after.conversations[branchId ?? ''].needsServerResync).toBe(true);
-      expect(window.localStorage.getItem('current_conversation_id:v4:42')).toBe(branchId);
+      expect(window.localStorage.getItem('current_conversation_id:v5:42')).toBe(branchId);
     });
   });
 
@@ -808,7 +817,7 @@ describe('ChatWindow state ownership', () => {
     expect(within(sentFiles).getByText('diagnostic.txt')).toBeVisible();
     expect(within(sentFiles).getByText('10 B')).toHaveAccessibleName('10 bytes');
     await waitFor(() => {
-      const store = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const store = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { messages: Array<{ role: string; rawContent: string; attachments?: unknown[] }> }>;
       };
       const userMessage = Object.values(store.conversations)
@@ -825,7 +834,7 @@ describe('ChatWindow state ownership', () => {
     fireEvent.click(screen.getByLabelText('Chat actions'));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Branch to new chat' }));
     await waitFor(() => {
-      const store = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const store = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { messages: Array<{ attachments?: unknown[] }> }>;
       };
       expect(Object.values(store.conversations)).toHaveLength(2);
@@ -833,7 +842,7 @@ describe('ChatWindow state ownership', () => {
       expect(conversations.filter(conversation => (
         conversation.messages.some(message => Array.isArray(message.attachments) && message.attachments.length === 1)
       ))).toHaveLength(1);
-      const branchId = window.localStorage.getItem('current_conversation_id:v4:42');
+      const branchId = window.localStorage.getItem('current_conversation_id:v5:42');
       expect(store.conversations[branchId ?? '']?.messages.every(message => message.attachments === undefined)).toBe(true);
     });
 
@@ -919,8 +928,8 @@ describe('ChatWindow state ownership', () => {
       mime: 'text/plain',
       size: 128,
     };
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_local: {
           id: 'conv_local', title: 'Prior upload', createdAt: 1_000, updatedAt: 2_000,
@@ -933,7 +942,7 @@ describe('ChatWindow state ownership', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_local');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_local');
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
     await screen.findByText('Reviewed it');
@@ -1125,8 +1134,8 @@ describe('authenticated history, feedback, and sharing', () => {
   };
 
   it('removes a previously synced local record absent from a complete cloud inventory', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_deleted_elsewhere: {
           id: 'conv_deleted_elsewhere', title: 'Deleted elsewhere', createdAt: 1_000, updatedAt: 2_000,
@@ -1137,14 +1146,14 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_deleted_elsewhere');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_deleted_elsewhere');
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
 
     await waitFor(() => expect(screen.queryByText('Stale private answer')).not.toBeInTheDocument());
     expect(await screen.findByText(/Welcome to WindowsForum\.com/)).toBeInTheDocument();
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}');
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}');
       expect(stored.conversations.conv_deleted_elsewhere).toBeUndefined();
       expect(stored.tombstones.conv_deleted_elsewhere).toEqual(expect.any(Number));
     });
@@ -1156,8 +1165,8 @@ describe('authenticated history, feedback, and sharing', () => {
   });
 
   it('does not recreate a cloud-deleted record after conflict resolution returns not found', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud', title: 'Dirty local edit', createdAt: 1_000, updatedAt: 4_000,
@@ -1168,7 +1177,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     const remote = savedConversation({ updated_at: 3_000 });
     mockCloudList(remote);
     apiMocks.getSavedConversation
@@ -1185,15 +1194,15 @@ describe('authenticated history, feedback, and sharing', () => {
     expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(1);
     expect(apiMocks.upsertSavedConversation.mock.calls[0]?.[1]).toBe(3);
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}');
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}');
       expect(stored.conversations.conv_cloud).toBeUndefined();
       expect(stored.tombstones.conv_cloud).toEqual(expect.any(Number));
     });
   });
 
   it('honors the server deletion guard without retrying a stale local upsert', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_stale_device: {
           id: 'conv_stale_device', title: 'Stale device copy', createdAt: 1_000, updatedAt: 4_000,
@@ -1203,7 +1212,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_stale_device');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_stale_device');
     apiMocks.upsertSavedConversation.mockRejectedValueOnce(new APIError('deleted', {
       status: 409,
       code: 'conversation_deleted',
@@ -1214,7 +1223,7 @@ describe('authenticated history, feedback, and sharing', () => {
     await waitFor(() => expect(screen.queryByText('Old offline copy')).not.toBeInTheDocument());
     expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(1);
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}');
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}');
       expect(stored.conversations.conv_stale_device).toBeUndefined();
       expect(stored.tombstones.conv_stale_device).toEqual(expect.any(Number));
     });
@@ -1222,8 +1231,8 @@ describe('authenticated history, feedback, and sharing', () => {
 
   it('loads a requested cloud chat and lets the newest timestamp win', async () => {
     window.history.replaceState(null, '', '/?conversation=conv_cloud');
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud', title: 'Older local chat', createdAt: 1_000, updatedAt: 2_000,
@@ -1233,7 +1242,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList();
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
@@ -1284,8 +1293,8 @@ describe('authenticated history, feedback, and sharing', () => {
 
   it('revalidates cloud history without replacing the chat selected after bootstrap', async () => {
     window.history.replaceState(null, '', '/?conversation=conv_cloud');
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud', title: 'Older local chat', createdAt: 1_000, updatedAt: 2_000,
@@ -1301,7 +1310,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList();
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
@@ -1321,8 +1330,8 @@ describe('authenticated history, feedback, and sharing', () => {
   });
 
   it('retries a dirty cloud write before reporting sync recovery', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud', title: 'Dirty local edit', createdAt: 1_000, updatedAt: 4_000,
@@ -1333,7 +1342,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     window.localStorage.setItem('chat_cloud_bootstrap:v1:42', 'complete');
     mockCloudList(savedConversation({ updated_at: 3_000 }));
     apiMocks.upsertSavedConversation.mockRejectedValueOnce(new APIError('temporary', {
@@ -1358,8 +1367,8 @@ describe('authenticated history, feedback, and sharing', () => {
   });
 
   it('skips unchanged cloud detail reads during manual revalidation', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud', title: 'Cloud chat', createdAt: 1_000, updatedAt: 3_000,
@@ -1370,7 +1379,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList();
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
@@ -1491,8 +1500,8 @@ describe('authenticated history, feedback, and sharing', () => {
   });
 
   it('uploads existing local history once and records the returned revision', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_local: {
           id: 'conv_local', title: 'Local history', createdAt: 1_000, updatedAt: 4_000,
@@ -1502,7 +1511,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_local');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_local');
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
 
@@ -1512,15 +1521,15 @@ describe('authenticated history, feedback, and sharing', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}');
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}');
       expect(stored.conversations.conv_local.cloudRevision).toBe(1);
       expect(window.localStorage.getItem('chat_cloud_bootstrap:v1:42')).toBe('complete');
     });
   });
 
   it('recovers a revision conflict by accepting a concurrently newer cloud copy', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud', title: 'Newer local', createdAt: 1_000, updatedAt: 4_000,
@@ -1530,7 +1539,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     const olderRemote = savedConversation({ updated_at: 3_000 });
     const concurrentRemote = savedConversation({
       revision: 4,
@@ -1659,7 +1668,7 @@ describe('authenticated history, feedback, and sharing', () => {
     fireEvent.click(screen.getAllByLabelText('All chats')[0]);
     expect((await screen.findAllByRole('button', { name: /Cloud chat/ })).length).toBeGreaterThan(0);
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, {
           pinnedAt?: number;
           archivedAt?: number;
@@ -1740,7 +1749,7 @@ describe('authenticated history, feedback, and sharing', () => {
     expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(1);
     expect(apiMocks.setSavedConversationState).toHaveBeenCalledTimes(2);
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { pinnedAt?: number; metadataRevision?: number }>;
       };
       expect(stored.conversations.conv_cloud.metadataRevision).toBe(9);
@@ -1803,7 +1812,7 @@ describe('authenticated history, feedback, and sharing', () => {
     ));
     expect(apiMocks.getSavedConversation).toHaveBeenCalledTimes(2);
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { pinnedAt?: number; archivedAt?: number; metadataRevision?: number }>;
       };
       expect(stored.conversations.conv_cloud).toMatchObject({
@@ -1816,8 +1825,8 @@ describe('authenticated history, feedback, and sharing', () => {
 
   it('does not let a deferred stale bootstrap detail overwrite a successful local pin', async () => {
     const remote = savedConversation({ metadata_revision: 7, pinned_at: null });
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud',
@@ -1838,7 +1847,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList(remote);
     let resolveBootstrapDetail: ((value: { success: true; conversation: typeof remote }) => void) | undefined;
     apiMocks.getSavedConversation
@@ -1878,7 +1887,7 @@ describe('authenticated history, feedback, and sharing', () => {
     });
     await screen.findByLabelText('History status: Synced');
 
-    const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+    const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
       conversations: Record<string, { pinnedAt?: number; metadataRevision?: number }>;
     };
     expect(stored.conversations.conv_cloud).toMatchObject({
@@ -1952,7 +1961,7 @@ describe('authenticated history, feedback, and sharing', () => {
       { pinned: false },
     ]);
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { pinnedAt?: number; metadataRevision?: number }>;
       };
       expect(stored.conversations.conv_cloud.metadataRevision).toBe(9);
@@ -2057,7 +2066,7 @@ describe('authenticated history, feedback, and sharing', () => {
     ));
 
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { pinnedAt?: number; archivedAt?: number; metadataRevision?: number }>;
       };
       expect(stored.conversations.conv_cloud).toMatchObject({
@@ -2071,8 +2080,8 @@ describe('authenticated history, feedback, and sharing', () => {
 
   it('reconciles an equal-revision optimistic metadata mismatch to authoritative server state after reboot', async () => {
     const remote = savedConversation({ pinned_at: null, archived_at: null, metadata_revision: 7 });
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud',
@@ -2094,7 +2103,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList(remote);
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
@@ -2104,7 +2113,7 @@ describe('authenticated history, feedback, and sharing', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, { pinnedAt?: number; archivedAt?: number; metadataRevision?: number }>;
       };
       expect(stored.conversations.conv_cloud.metadataRevision).toBe(7);
@@ -2208,8 +2217,8 @@ describe('authenticated history, feedback, and sharing', () => {
   });
 
   it('clears the local member store only after delete-all succeeds and leaves provider cleanup separate', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_old: {
           id: 'conv_old',
@@ -2225,7 +2234,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_old');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_old');
     window.localStorage.setItem('chat_scroll_positions:v1:42', JSON.stringify({ conv_old: 375 }));
     // #8: an earlier unreadable envelope quarantined by loadStore() (raw text).
     window.localStorage.setItem('chat_store_corrupt:v1:42', '{"version":4,"conversations":{"conv_q":{"messages":[{"rawContent":"Quarantined private question"');
@@ -2256,7 +2265,7 @@ describe('authenticated history, feedback, and sharing', () => {
     await waitFor(() => expect(apiMocks.deleteAllSavedChatData).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/deleted from the server and this browser/)).toBeInTheDocument();
     await waitFor(() => {
-      const store = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+      const store = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
         conversations: Record<string, unknown>;
         tombstones: Record<string, number>;
         pendingServerDeletions: Record<string, number>;
@@ -2265,7 +2274,7 @@ describe('authenticated history, feedback, and sharing', () => {
       expect(Object.keys(store.conversations)).toHaveLength(1);
       expect(store.tombstones.conv_old).toEqual(expect.any(Number));
       expect(store.pendingServerDeletions).toEqual({});
-      expect(window.localStorage.getItem('current_conversation_id:v4:42')).not.toBe('conv_old');
+      expect(window.localStorage.getItem('current_conversation_id:v5:42')).not.toBe('conv_old');
       expect(window.localStorage.getItem('chat_cloud_bootstrap:v1:42')).toBeNull();
       expect(window.localStorage.getItem('chat_scroll_positions:v1:42')).toBeNull();
       expect(window.localStorage.getItem('chat_store_corrupt:v1:42')).toBeNull();
@@ -2277,8 +2286,8 @@ describe('authenticated history, feedback, and sharing', () => {
   });
 
   it('aborts cloud persistence before starting delete-all and resumes after the reset', async () => {
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_old: {
           id: 'conv_old', title: 'Pending cloud write', createdAt: 1_000, updatedAt: 2_000,
@@ -2288,7 +2297,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_old');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_old');
     let syncSignal: AbortSignal | undefined;
     apiMocks.upsertSavedConversation.mockImplementation((_conversation, _revision, options: { signal: AbortSignal }) => (
       new Promise((_resolve, reject) => {
@@ -2560,8 +2569,8 @@ describe('authenticated history, feedback, and sharing', () => {
 
   it('does not resurrect or upload a locally deleted chat when its stale bootstrap detail resolves', async () => {
     const remote = savedConversation();
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud',
@@ -2582,7 +2591,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList(remote);
     let resolveBootstrapDetail: ((value: { success: true; conversation: typeof remote }) => void) | undefined;
     apiMocks.getSavedConversation
@@ -2611,7 +2620,7 @@ describe('authenticated history, feedback, and sharing', () => {
       expect.anything(),
       expect.anything(),
     );
-    const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+    const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
       conversations: Record<string, unknown>;
       tombstones: Record<string, number>;
     };
@@ -2632,8 +2641,8 @@ describe('authenticated history, feedback, and sharing', () => {
         status: 'complete',
       }],
     });
-    window.localStorage.setItem('chat_store:v4:42', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
       conversations: {
         conv_cloud: {
           id: 'conv_cloud',
@@ -2657,7 +2666,7 @@ describe('authenticated history, feedback, and sharing', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:42', 'conv_cloud');
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_cloud');
     mockCloudList(initialRemote);
     let resolveConflictDetail: ((value: { success: true; conversation: typeof conflictRemote }) => void) | undefined;
     apiMocks.getSavedConversation
@@ -2688,7 +2697,7 @@ describe('authenticated history, feedback, and sharing', () => {
     expect(screen.queryByText('Stale conflict winner')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Actions for Dirty local chat')).not.toBeInTheDocument();
     expect(apiMocks.upsertSavedConversation).toHaveBeenCalledTimes(1);
-    const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:42') ?? '{}') as {
+    const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
       conversations: Record<string, unknown>;
       tombstones: Record<string, number>;
     };
@@ -2739,8 +2748,8 @@ describe('message scrolling', () => {
   beforeEach(stubBoundingRects);
 
   it('restores an independent transcript position when returning to a chat', async () => {
-    window.localStorage.setItem('chat_store:v4:guest_scroll', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_scroll', JSON.stringify({
+      version: 5,
       conversations: {
         conv_first: {
           id: 'conv_first',
@@ -2760,7 +2769,7 @@ describe('message scrolling', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_scroll', 'conv_first');
+    window.localStorage.setItem('current_conversation_id:v5:guest_scroll', 'conv_first');
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_scroll" />);
     expect(await screen.findByText('First answer')).toBeInTheDocument();
@@ -2781,8 +2790,8 @@ describe('message scrolling', () => {
 
   it('does not resurrect scroll ids removed by another tab when this stale tab unmounts', async () => {
     const scrollKey = 'chat_scroll_positions:v1:guest_scroll_event';
-    window.localStorage.setItem('chat_store:v4:guest_scroll_event', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_scroll_event', JSON.stringify({
+      version: 5,
       conversations: {
         conv_old: {
           id: 'conv_old',
@@ -2795,7 +2804,7 @@ describe('message scrolling', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_scroll_event', 'conv_old');
+    window.localStorage.setItem('current_conversation_id:v5:guest_scroll_event', 'conv_old');
     window.localStorage.setItem(scrollKey, JSON.stringify({ conv_old: 510 }));
     const setItemSpy = vi.spyOn(window.localStorage, 'setItem');
 
@@ -3218,8 +3227,8 @@ describe('composer and message integrity', () => {
 
 describe('usage from the chat menu preserves the composer draft', () => {
   it('does not wipe an unsent draft when Usage runs from the menu', async () => {
-    window.localStorage.setItem('chat_store:v4:guest_menu_usage', JSON.stringify({
-      version: 4,
+    window.localStorage.setItem('chat_store:v5:guest_menu_usage', JSON.stringify({
+      version: 5,
       conversations: {
         conv_usage: {
           id: 'conv_usage',
@@ -3232,7 +3241,7 @@ describe('usage from the chat menu preserves the composer draft', () => {
       tombstones: {},
       pendingServerDeletions: {},
     }));
-    window.localStorage.setItem('current_conversation_id:v4:guest_menu_usage', 'conv_usage');
+    window.localStorage.setItem('current_conversation_id:v5:guest_menu_usage', 'conv_usage');
 
     renderThemed(
       <ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_menu_usage" />,
@@ -3246,7 +3255,7 @@ describe('usage from the chat menu preserves the composer draft', () => {
 
     expect(composer).toHaveValue('Unsent question about GPUs');
     await waitFor(() => {
-      const stored = JSON.parse(window.localStorage.getItem('chat_store:v4:guest_menu_usage') ?? '{}') as {
+      const stored = JSON.parse(window.localStorage.getItem('chat_store:v5:guest_menu_usage') ?? '{}') as {
         conversations: Record<string, { draft?: string }>;
       };
       expect(stored.conversations.conv_usage.draft).toBe('Unsent question about GPUs');

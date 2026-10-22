@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChatStoreV4, Conversation } from '../types';
+import type { ChatStoreV5, Conversation } from '../types';
 import {
   applyTombstones,
   emptyStore,
@@ -65,6 +65,39 @@ beforeEach(() => {
 });
 
 describe('storage migrations', () => {
+  it('migrates v4 with drafts and deletion state while retaining the source on quota failure', () => {
+    const keys = storageKeys('support-migration');
+    const legacy = JSON.stringify({ version: 4, conversations: { conv_old: conversation('conv_old', 1000, { draft: 'Unsent diagnostic details', draftUpdatedAt: 2000 }) }, tombstones: { conv_deleted: 3000 }, pendingServerDeletions: { conv_pending: 2500 }, trimmed: { conv_trimmed: 1000 } });
+    storage.setItem(keys.legacyStoreV4, legacy);
+    storage.setItem(keys.legacyCurrentV4, 'conv_old');
+    storage.failWrites(keys.store, 10);
+    const loaded = loadStore('support-migration');
+    expect(loaded.store.conversations.conv_old.draft).toBe('Unsent diagnostic details');
+    expect(loaded.store.tombstones.conv_deleted).toBe(3000);
+    expect(loaded.store.pendingServerDeletions.conv_pending).toBe(2500);
+    expect(storage.getItem(keys.legacyStoreV4)).toBe(legacy);
+    storage.failWrites(keys.store, 0);
+    saveStore('support-migration', loaded.store, 'conv_old');
+    expect(parseStore(storage.getItem(keys.store))?.version).toBe(5);
+    expect(storage.getItem(keys.legacyStoreV4)).toBe(legacy);
+  });
+
+  it('imports a newer v4 transcript and draft without losing immutable support context or branch lineage', () => {
+    const keys = storageKeys('support-mixed-tabs');
+    const current = emptyStore();
+    current.conversations.conv_old = conversation('conv_old', 1000, {
+      mode: 'troubleshoot', supportCaseId: `case_${'a'.repeat(32)}`, supportCaseRevision: 4,
+      lineage: { parent_conversation_id: 'conv_parent', fork_message_id: 'm1', family_id: 'conv_parent' },
+    });
+    saveStore('support-mixed-tabs', current, 'conv_old');
+    storage.setItem(keys.legacyStoreV4, JSON.stringify({ version: 4, conversations: { conv_old: conversation('conv_old', 3000, { draft: 'New draft in older tab', draftUpdatedAt: 4000 }) }, tombstones: {}, pendingServerDeletions: {}, trimmed: {} }));
+    const restored = loadStore('support-mixed-tabs').store.conversations.conv_old;
+    expect(restored.updatedAt).toBe(3000);
+    expect(restored.draft).toBe('New draft in older tab');
+    expect(restored.supportCaseId).toBe(current.conversations.conv_old.supportCaseId);
+    expect(restored.lineage).toEqual(current.conversations.conv_old.lineage);
+    expect(restored.mode).toBe('troubleshoot');
+  });
   it('migrates the per-user v2 map into a v4 envelope exactly once', () => {
     const keys = storageKeys('42');
     const legacy = {
@@ -92,7 +125,7 @@ describe('storage migrations', () => {
     // Legacy keys are gone and a v4 envelope exists.
     expect(storage.getItem(keys.legacyConversations)).toBeNull();
     expect(storage.getItem(keys.legacyCurrent)).toBeNull();
-    expect(parseStore(storage.getItem(keys.store))?.version).toBe(4);
+    expect(parseStore(storage.getItem(keys.store))?.version).toBe(5);
   });
 
   it('upgrades v3 while preserving conversations, tombstones, and pending deletions', () => {
@@ -107,7 +140,7 @@ describe('storage migrations', () => {
 
     const loaded = loadStore('42');
 
-    expect(loaded.store.version).toBe(4);
+    expect(loaded.store.version).toBe(5);
     expect(loaded.currentId).toBe('conv_1');
     expect(loaded.store.conversations.conv_1).toBeDefined();
     expect(loaded.store.tombstones).toEqual({ conv_gone: 2_000 });
@@ -249,7 +282,7 @@ describe('canonical serialization (cross-tab ping-pong guard)', () => {
   });
 
   it('does not rewrite localStorage when the content is unchanged', () => {
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: { conv_1: conversation('conv_1', 1_000) },
     };
@@ -264,7 +297,7 @@ describe('canonical serialization (cross-tab ping-pong guard)', () => {
 
 describe('tombstones', () => {
   it('always removes tombstoned conversations, regardless of timestamps', () => {
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: { conv_1: conversation('conv_1', 5_000), conv_2: conversation('conv_2', 1_000) },
       tombstones: { conv_1: 2_000 },
@@ -273,7 +306,7 @@ describe('tombstones', () => {
   });
 
   it('merges cross-tab stores: tombstones union, newest conversation wins', () => {
-    const local: ChatStoreV4 = {
+    const local: ChatStoreV5 = {
       ...emptyStore(),
       conversations: {
         conv_a: conversation('conv_a', 2_000, { title: 'local newer' }),
@@ -281,7 +314,7 @@ describe('tombstones', () => {
       },
       tombstones: { conv_x: 500 },
     };
-    const remote: ChatStoreV4 = {
+    const remote: ChatStoreV5 = {
       ...emptyStore(),
       conversations: {
         conv_a: conversation('conv_a', 1_500, { title: 'remote older' }),
@@ -443,7 +476,7 @@ describe('conversation cap', () => {
 describe('quota pressure', () => {
   it('evicts the oldest non-current conversations until the write fits', () => {
     const keys = storageKeys('42');
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: {
         conv_old: conversation('conv_old', 1_000),
@@ -465,7 +498,7 @@ describe('quota pressure', () => {
 
   it('evicts unpinned history before older pinned conversations under quota pressure', () => {
     const keys = storageKeys('42');
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: {
         conv_pinned: conversation('conv_pinned', 1_000, { pinnedAt: 4_000 }),
@@ -484,7 +517,7 @@ describe('quota pressure', () => {
 
   it('folds quota evictions into trimmed markers so another tab cannot resurrect them', () => {
     const keys = storageKeys('42');
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: {
         conv_old: conversation('conv_old', 1_000),
@@ -506,7 +539,7 @@ describe('quota pressure', () => {
     expect(result.store.trimmed.conv_old).toEqual(expect.any(Number));
 
     // A stale tab still holding the evicted conversation cannot merge it back.
-    const stale: ChatStoreV4 = {
+    const stale: ChatStoreV5 = {
       ...emptyStore(),
       conversations: { conv_old: conversation('conv_old', 1_000) },
     };
@@ -518,7 +551,7 @@ describe('quota pressure', () => {
 
   it('reports failure when nothing evictable remains', () => {
     const keys = storageKeys('42');
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: { conv_current: conversation('conv_current', 500) },
     };
@@ -548,7 +581,7 @@ describe('quota pressure', () => {
 
 describe('pending server deletions', () => {
   it('round-trips pending deletions through the envelope', () => {
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: { conv_current: conversation('conv_current', 1_000) },
       tombstones: { conv_gone: Date.now() },
@@ -564,7 +597,7 @@ describe('pending server deletions', () => {
   it('retains old tombstones so a long-suspended stale tab cannot resurrect history', () => {
     const keys = storageKeys('42');
     const expired = Date.now() - 31 * 24 * 60 * 60 * 1000;
-    const store: ChatStoreV4 = {
+    const store: ChatStoreV5 = {
       ...emptyStore(),
       conversations: { conv_current: conversation('conv_current', 1_000) },
       tombstones: { conv_ancient: expired, conv_recent: Date.now() },
@@ -613,7 +646,7 @@ describe('storage data-loss guards', () => {
     // cost that message, never the whole thread.
     const keys = storageKeys('42');
     const poisoned = {
-      version: 4,
+      version: 5,
       conversations: {
         conv_mixed: {
           id: 'conv_mixed',

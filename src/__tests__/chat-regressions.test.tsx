@@ -2,9 +2,12 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import type { ChatStoreV4 } from '../types';
+import type { ChatStoreV5 } from '../types';
 
 const apiMocks = vi.hoisted(() => ({
+  getChatCapabilities: vi.fn(),
+  forkConversation: vi.fn(),
+  updateSupportCaseProgress: vi.fn(),
   sendMessage: vi.fn(),
   getUsage: vi.fn(),
   clearConversation: vi.fn(),
@@ -39,6 +42,9 @@ vi.mock('../services/api', async importOriginal => {
     ...actual,
     ChatAPI: {
       ...actual.ChatAPI,
+      getChatCapabilities: apiMocks.getChatCapabilities,
+      forkConversation: apiMocks.forkConversation,
+      updateSupportCaseProgress: apiMocks.updateSupportCaseProgress,
       sendMessage: apiMocks.sendMessage,
       getUsage: apiMocks.getUsage,
       clearConversation: apiMocks.clearConversation,
@@ -88,10 +94,10 @@ import { Message } from '../components/Message';
 const theme = createTheme();
 const renderThemed = (node: React.ReactNode) => render(<ThemeProvider theme={theme}>{node}</ThemeProvider>);
 
-const readStore = (userId: string): ChatStoreV4 => {
-  const raw = window.localStorage.getItem(`chat_store:v4:${userId}`);
+const readStore = (userId: string): ChatStoreV5 => {
+  const raw = window.localStorage.getItem(`chat_store:v5:${userId}`);
   if (!raw) throw new Error(`no v4 store for user ${userId}`);
-  return JSON.parse(raw) as ChatStoreV4;
+  return JSON.parse(raw) as ChatStoreV5;
 };
 
 beforeAll(() => {
@@ -136,6 +142,9 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  apiMocks.getChatCapabilities.mockReset().mockResolvedValue({ success: true, version: 1, modes: ['chat'], features: { guided_support: false, diagnostics: false, branches: false, support_cards: false }, limits: { max_attachments: 4, max_image_bytes: 8388608, max_text_file_bytes: 1048576, max_total_text_bytes: 131072, max_total_image_bytes: 10485760 } });
+  apiMocks.forkConversation.mockReset();
+  apiMocks.updateSupportCaseProgress.mockReset();
   window.history.replaceState(null, '', '/');
   window.localStorage.clear();
   apiMocks.sendMessage.mockReset();
@@ -202,7 +211,7 @@ const bootWithExchange = async (userId = '42') => {
 describe('account switching', () => {
   it('never shows one account\'s history to another account', async () => {
     const { unmount } = await bootWithExchange('42');
-    await waitFor(() => expect(window.localStorage.getItem('chat_store:v4:42')).not.toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem('chat_store:v5:42')).not.toBeNull());
     unmount();
 
     renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Other" userId="99" />);
@@ -501,8 +510,8 @@ describe('cross-tab deletion propagation', () => {
     const conversationId = apiMocks.sendMessage.mock.calls[0][1].conversationId as string;
     await waitFor(() => expect(readStore('42').conversations[conversationId]).toBeDefined());
 
-    const remote: ChatStoreV4 = {
-      version: 4,
+    const remote: ChatStoreV5 = {
+      version: 5,
       conversations: {},
       tombstones: { [conversationId]: Date.now() },
       pendingServerDeletions: {},
@@ -510,7 +519,7 @@ describe('cross-tab deletion propagation', () => {
     };
     act(() => {
       window.dispatchEvent(new StorageEvent('storage', {
-        key: 'chat_store:v4:42',
+        key: 'chat_store:v5:42',
         newValue: JSON.stringify(remote),
       }));
     });
@@ -540,8 +549,8 @@ describe('cross-tab deletion propagation', () => {
     await waitFor(() => expect(window.turnstile?.render).toHaveBeenCalledTimes(1));
     const callsBeforeDelete = apiMocks.sendMessage.mock.calls.length;
 
-    const remote: ChatStoreV4 = {
-      version: 4,
+    const remote: ChatStoreV5 = {
+      version: 5,
       conversations: {},
       tombstones: { [conversationId]: Date.now() },
       pendingServerDeletions: {},
@@ -549,7 +558,7 @@ describe('cross-tab deletion propagation', () => {
     };
     act(() => {
       window.dispatchEvent(new StorageEvent('storage', {
-        key: 'chat_store:v4:42',
+        key: 'chat_store:v5:42',
         newValue: JSON.stringify(remote),
       }));
     });

@@ -28,6 +28,8 @@ interface ConversationJSONRecord {
   title: string;
   created_at: number;
   updated_at: number;
+  lineage?: Conversation['lineage'];
+  support_case_id?: string;
   messages: Array<{
     id: string;
     role: Message['role'];
@@ -39,6 +41,7 @@ interface ConversationJSONRecord {
     turn_id?: string;
     activities?: Message['activities'];
     attachments?: Message['attachments'];
+    details?: Message['details'];
   }>;
 }
 
@@ -282,6 +285,8 @@ const conversationToJSONRecord = (conversation: Conversation): ConversationJSONR
   title: conversation.title,
   created_at: conversation.createdAt,
   updated_at: conversation.updatedAt,
+  ...(conversation.lineage ? { lineage: conversation.lineage } : {}),
+  ...(conversation.supportCaseId ? { support_case_id: conversation.supportCaseId } : {}),
   messages: conversation.messages.map(message => ({
     id: message.id,
     role: message.role,
@@ -293,6 +298,7 @@ const conversationToJSONRecord = (conversation: Conversation): ConversationJSONR
     ...(message.turnId ? { turn_id: message.turnId } : {}),
     ...(message.activities?.length ? { activities: message.activities } : {}),
     ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+    ...(message.details ? { details: message.details } : {}),
   })),
 });
 
@@ -302,7 +308,7 @@ export const conversationToJSON = (
   options: ConversationExportOptions = {},
 ): string => JSON.stringify({
   schema: 'windowsforum-ai-conversation',
-  version: 1,
+  version: conversation.lineage || conversation.supportCaseId || conversation.messages.some(message => message.details) ? 2 : 1,
   exported_at: options.exportedAt ?? Date.now(),
   conversation: conversationToJSONRecord(conversation),
 }, null, 2) + '\n';
@@ -346,7 +352,7 @@ export const createConversationCollectionExport = (
     ? (markdownDocuments.length ? `${markdownDocuments.join('\n\n---\n\n')}\n` : '')
     : `${JSON.stringify({
       schema: 'windowsforum-ai-conversation-collection',
-      version: 1,
+      version: conversations.some(conversation => conversation.lineage || conversation.supportCaseId || conversation.messages.some(message => message.details)) ? 2 : 1,
       exported_at: exportedAt,
       conversations: conversations.map(conversationToJSONRecord),
     }, null, 2)}\n`;

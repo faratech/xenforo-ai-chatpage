@@ -289,6 +289,18 @@ describe('ConversationSidebar search', () => {
 });
 
 describe('ConversationSidebar library organization', () => {
+  it('keeps an older original beside its recent alternate approach in history', () => {
+    const original = conversation('original', 'Original support chat', 'Original question', { updatedAt: Date.now() - 20 * 86400000 });
+    const alternate = conversation('alternate', 'Second support approach', 'Another check', { lineage: { parent_conversation_id: 'original', fork_message_id: 'message_original', family_id: 'original' } });
+    const unrelated = conversation('other', 'Unrelated chat', 'Another question');
+    render(<Harness conversations={[alternate, unrelated, original]} currentConversationId="alternate" />);
+    const history = screen.getByRole('list', { name: 'Chat history' });
+    const originalTitle = within(history).getByText('Original support chat');
+    const alternateTitle = within(history).getByText('Second support approach');
+    expect(originalTitle.compareDocumentPosition(alternateTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(history).getByText('Alternate approach')).toBeInTheDocument();
+    expect(within(history).queryByText('Older')).not.toBeInTheDocument();
+  });
   const libraryConversations = [
     withLibraryMetadata(conversation('pinned', 'Pinned diagnostics', 'Pinned display troubleshooting notes.'), { pinnedAt: Date.now() }),
     conversation('recent', 'Recent network chat', 'Current adapter troubleshooting.'),
