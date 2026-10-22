@@ -39,7 +39,7 @@ function wfChatSupportSchemaReady(): bool
     if (isset($ready)) return $ready;
     try {
         foreach (['openai_chatpage_case_progress', 'openai_chatpage_conversation_context', 'openai_chatpage_response_details'] as $table) {
-            if (!\XF::db()->fetchOne('SHOW TABLES LIKE ?', [$table])) return $ready = false;
+            if (!\XF::db()->fetchOne('SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [$table])) return $ready = false;
         }
         return $ready = true;
     } catch (\Throwable $e) {
