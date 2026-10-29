@@ -280,11 +280,13 @@ All commands are the `scripts` in `package.json`; there are no others.
 | `npm run test` | `vitest run` | Unit/component tests in `src/__tests__/` (Vitest + jsdom). |
 | `npm run test:watch` | `vitest` | Same suite in watch mode. |
 | `npm run test:browser` | `node scripts/browser-smoke.mjs` | Browser smoke test against mocked API/SSE responses. |
+| `npm run test:public` | `node --test scripts/__tests__/evaluate-support.node.mjs` | Node tests for the shipped support-evaluation scripts; no private operator files required. |
 | `npm run test:ops` | `node --test scripts/__tests__/*.node.mjs` | Node tests for the ops/eval scripts. |
 | `npm run test:release` | `bash scripts/run-release-tests.sh` | Failure-injection harness for the (private) `deploy.sh`. |
 | `npm run test:support-eval` | `node scripts/evaluate-support.mjs` | Offline validation of the 30-case synthetic support corpus; no model or network calls. |
 | `npm run verify:dist` | `node scripts/verify-dist.mjs` | Verify a built `dist/` against the release contract described above. |
-| `npm run check` | lint + typecheck + test + test:ops + build + verify:dist + test:release + test:browser | Full gate, in that order. This is what CI runs (`.github/workflows/ci.yml`, Node 24). |
+| `npm run check` | lint + typecheck + test + test:ops + build + verify:dist + test:release + test:browser | Full private operator gate, in that order; requires the intentionally untracked cache script and release-test suite. |
+| `npm run check:ci` | lint + typecheck + test + test:public + build + verify:dist + test:browser | Public-checkout gate used by CI (`.github/workflows/ci.yml`, Node 24). |
 | `npm run deploy` | `./deploy.sh` | Deploy via the private operator script; not present in a fresh clone (see above). |
 
 ## Project layout
