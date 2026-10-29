@@ -38,4 +38,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm ls
-      - run: npm run check
+      # Public checkout only: private cache/deployment tests remain in npm run check.
+      - run: npm run check:ci
