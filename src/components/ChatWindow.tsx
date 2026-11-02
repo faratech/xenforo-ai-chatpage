@@ -4350,7 +4350,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
               <TroubleshootOutlinedIcon fontSize="small" sx={{ mr: 1.25 }} />Troubleshoot Windows
             </MenuItem>
           )}
-          {!isGuest && (
+          {!isGuest && capabilities.features.guided_support && (
             <MenuItem onClick={() => {
               setChatMenuAnchor(null);
               setSupportCasesOpen(true);
@@ -4445,6 +4445,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
                       onEdit={handleEditMessage}
                       onRegenerate={() => handleRegenerateMessage(message.id)}
                       canBranch={capabilities.features.branches && index > 0}
+                      showSupportDetails={capabilities.features.guided_support}
                       onSupportOutcome={capabilities.features.support_cards && activeSupportCase ? handleSupportOutcome : undefined}
                       onRetry={handleRetryMessage}
                       isLastMessage={isLast}
@@ -4790,7 +4791,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         </React.Suspense>
       )}
 
-      {!isGuest && supportCasesOpen && (
+      {!isGuest && capabilities.features.guided_support && supportCasesOpen && (
         <React.Suspense fallback={null}>
           <SupportCasesDialog
             open

@@ -475,6 +475,7 @@ export const Message = memo<MessageComponentProps>(({ msg,
   isLastMessage,
   isLastUserMessage,
   canBranch = false,
+  showSupportDetails = true,
   onSupportOutcome,
   isStreaming,
   isBusy = false,
@@ -1102,7 +1103,7 @@ export const Message = memo<MessageComponentProps>(({ msg,
                       }}
                     />
                   )}
-                  {msg.details && !isStreaming && <Suspense fallback={<Typography role="status" variant="caption">Loading evidence…</Typography>}><SupportResponseDetails details={msg.details} onOutcome={onSupportOutcome} disabled={isBusy} /></Suspense>}
+                  {showSupportDetails && msg.details && !isStreaming && <Suspense fallback={<Typography role="status" variant="caption">Loading evidence…</Typography>}><SupportResponseDetails details={msg.details} onOutcome={onSupportOutcome} disabled={isBusy} /></Suspense>}
                 </Box>
               )}
               {actions}

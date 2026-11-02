@@ -245,6 +245,8 @@ export interface MessageProps {
   onEdit: (messageId: string, newContent: string) => boolean;
   onRegenerate: () => void;
   canBranch?: boolean;
+  /** Whether saved guided-support evidence and case cards may be displayed. */
+  showSupportDetails?: boolean;
   onSupportOutcome?: (card: import('../services/supportContracts').SupportCard, outcome: import('../services/supportContracts').SupportOutcome, observed: string) => Promise<void>;
   onRetry: (messageId: string) => void;
   isLastMessage: boolean;

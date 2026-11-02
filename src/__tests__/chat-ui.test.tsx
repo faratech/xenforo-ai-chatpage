@@ -1106,6 +1106,11 @@ describe('ChatWindow state ownership', () => {
   });
 
   it('offers prior sent attachment handles to support cases once without duplicates', async () => {
+    apiMocks.getChatCapabilities.mockResolvedValueOnce({
+      success: true, version: 1, modes: ['chat', 'troubleshoot'],
+      features: { guided_support: true, diagnostics: false, branches: false, support_cards: true },
+      limits: { max_attachments: 4, max_image_bytes: 8388608, max_text_file_bytes: 1048576, max_total_text_bytes: 131072, max_total_image_bytes: 10485760 },
+    });
     const attachment = {
       id: 'att_99999999999999999999999999999999',
       name: 'prior-log.txt',
@@ -1138,6 +1143,56 @@ describe('ChatWindow state ownership', () => {
     const linkFiles = screen.getByRole('checkbox', { name: 'Link 1 current attachment' });
     expect(linkFiles).toBeChecked();
     expect(screen.queryByRole('checkbox', { name: 'Link 2 current attachments' })).not.toBeInTheDocument();
+  });
+
+  it('hides case controls and saved guided details when guided support is disabled without deleting history', async () => {
+    const caseId = `case_${'a'.repeat(32)}`;
+    const details = { cards: [{ id: 'check_1', check: 'Check old case', explanation: 'Prior explanation', expected_result: 'Prior result', evidence_ids: [] }] };
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5, conversations: {
+        conv_local: {
+          id: 'conv_local', title: 'Prior case', createdAt: 1000, updatedAt: 2000,
+          mode: 'troubleshoot', supportCaseId: caseId,
+          messages: [{ id: 'saved_answer', role: 'ai', rawContent: 'Existing answer', timestamp: 2000, details }],
+        },
+      }, tombstones: {}, pendingServerDeletions: {}, trimmed: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_local');
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByText('Existing answer');
+    await waitFor(() => expect(apiMocks.getChatCapabilities).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: 'Check old case' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Troubleshoot Windows' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Chat actions'));
+    expect(screen.queryByRole('menuitem', { name: 'Support cases' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Troubleshoot Windows' })).not.toBeInTheDocument();
+    expect(apiMocks.getSupportCase).not.toHaveBeenCalled();
+    expect(apiMocks.listSupportCases).not.toHaveBeenCalled();
+    const saved = JSON.parse(window.localStorage.getItem('chat_store:v5:42') ?? '{}') as {
+      conversations: Record<string, { supportCaseId?: string; messages: Array<{ details?: unknown }> }>;
+    };
+    expect(saved.conversations.conv_local?.supportCaseId).toBe(caseId);
+    expect(saved.conversations.conv_local?.messages[0]?.details).toEqual(details);
+  });
+
+  it('shows retained guided details when guided support is enabled again', async () => {
+    apiMocks.getChatCapabilities.mockResolvedValueOnce({
+      success: true, version: 1, modes: ['chat', 'troubleshoot'],
+      features: { guided_support: true, diagnostics: false, branches: false, support_cards: true },
+      limits: { max_attachments: 4, max_image_bytes: 8388608, max_text_file_bytes: 1048576, max_total_text_bytes: 131072, max_total_image_bytes: 10485760 },
+    });
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5, conversations: {
+        conv_local: {
+          id: 'conv_local', title: 'Prior chat', createdAt: 1000, updatedAt: 2000,
+          messages: [{ id: 'saved_answer', role: 'ai', rawContent: 'Existing answer', timestamp: 2000,
+            details: { cards: [{ id: 'check_1', check: 'Check old case', explanation: 'Prior explanation', expected_result: 'Prior result', evidence_ids: [] }] } }],
+        },
+      }, tombstones: {}, pendingServerDeletions: {}, trimmed: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_local');
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    expect(await screen.findByRole('button', { name: 'Check old case' })).toBeVisible();
   });
 
   it('keeps attachment handles bound to a parked CAPTCHA turn', async () => {
