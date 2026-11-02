@@ -34,6 +34,8 @@ interface HarnessProps {
   onRemoveAttachment?: (attachment: ChatAttachment) => void | Promise<void>;
   diagnosticCapability?: DiagnosticAttachmentCapability;
   conversationId?: string;
+  initialDraft?: string;
+  maxMessageBytes?: number;
 }
 
 const Harness = ({
@@ -44,8 +46,11 @@ const Harness = ({
   onRemoveAttachment,
   diagnosticCapability,
   conversationId = 'conv_current',
+  initialDraft = '',
+  maxMessageBytes,
 }: HarnessProps) => {
   const [attachments, setAttachments] = useState(initial);
+  const [draft, setDraft] = useState(initialDraft);
   return (
     <ThemeProvider theme={theme}>
       <div className={compact ? 'wf-composer-shell' : undefined}>
@@ -58,8 +63,9 @@ const Harness = ({
           onBusyChange={onBusyChange}
           onRemoveAttachment={onRemoveAttachment}
           diagnosticCapability={diagnosticCapability}
+          maxMessageBytes={maxMessageBytes}
         />
-        {compact && <textarea aria-label="Composer text" />}
+        {compact && <textarea aria-label="Composer text" value={draft} onChange={event => setDraft(event.target.value)} />}
       </div>
     </ThemeProvider>
   );
@@ -252,6 +258,142 @@ describe('AttachmentTray', () => {
     composer.dispatchEvent(dropEvent);
     expect(await screen.findByLabelText('Attached files')).toHaveTextContent('dropped.txt');
     expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers long pasted text for explicit review and lets the user select it after success', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment({ name: 'pasted-diagnostic.txt.reviewed.txt' }) });
+    render(<Harness compact diagnosticCapability={diagnostics} initialDraft="prefix suffix" maxMessageBytes={16} />);
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' }) as HTMLTextAreaElement;
+    textarea.setSelectionRange(7, 7);
+    const pasted = 'password=secret\nWindows error';
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: { items: [], getData: () => pasted } });
+    fireEvent(textarea, event);
+    expect(event.defaultPrevented).toBe(false);
+    // jsdom does not carry out the browser's default paste insertion.
+    const expected = `prefix ${pasted}suffix`;
+    fireEvent.change(textarea, { target: { value: expected } });
+    expect(screen.getByRole('button', { name: 'Review pasted text' })).toBeInTheDocument();
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'Review pasted text' }));
+    expect(await screen.findByRole('textbox', { name: 'Reviewed text for pasted-diagnostic.txt' })).toHaveValue(pasted);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply 1 suggested redactions to pasted-diagnostic.txt' }));
+    expect(textarea).toHaveValue(expected);
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    await screen.findByRole('button', { name: 'Select pasted text' });
+    expect(screen.getByText(/Diagnostic attached\. The original text remains/).closest('[role="status"]')).toBeInTheDocument();
+    expect(textarea).toHaveValue(expected);
+    fireEvent.click(await screen.findByRole('button', { name: 'Select pasted text' }));
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe(7);
+    expect(textarea.selectionEnd).toBe(7 + pasted.length);
+    expect(textarea).toHaveValue(expected);
+    const uploaded = apiMocks.uploadChatAttachment.mock.calls[0]![0] as File;
+    expect(await readDiagnosticFile(uploaded, 1024 * 1024)).toBe('password=[REDACTED]\nWindows error');
+    fireEvent.click(screen.getByLabelText('Remove pasted-diagnostic.txt.reviewed.txt'));
+    await waitFor(() => expect(screen.queryByLabelText('Attached files')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Select pasted text' }));
+    expect(screen.getByText(/uploaded diagnostic is no longer available/)).toBeInTheDocument();
+    expect(textarea).toHaveValue(expected);
+  });
+
+  it('preserves the pasted draft on cancelled review and upload failure', async () => {
+    apiMocks.uploadChatAttachment.mockRejectedValue(new Error('Upload unavailable'));
+    render(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} />);
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' }) as HTMLTextAreaElement;
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'long diagnostic' } });
+    fireEvent.change(textarea, { target: { value: 'long diagnostic' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted text' }));
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel review' }));
+    expect(textarea).toHaveValue('long diagnostic');
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'Review pasted text' }));
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    expect(await screen.findByText(/Upload unavailable/)).toBeInTheDocument();
+    expect(textarea).toHaveValue('long diagnostic');
+    expect(screen.queryByRole('button', { name: 'Select pasted text' })).not.toBeInTheDocument();
+  });
+
+  it('never removes later edits and offers no conversion without reviewed-upload capability', async () => {
+    let finish: ((result: { success: true; attachment: ChatAttachment }) => void) | undefined;
+    apiMocks.uploadChatAttachment.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const { rerender } = render(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} />);
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' }) as HTMLTextAreaElement;
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'long diagnostic' } });
+    fireEvent.change(textarea, { target: { value: 'long diagnostic' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted text' }));
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    fireEvent.change(textarea, { target: { value: 'long diagnostic plus later edits' } });
+    finish?.({ success: true, attachment: attachment() });
+    await waitFor(() => expect(screen.getByLabelText('Attached files')).toBeInTheDocument());
+    expect(textarea).toHaveValue('long diagnostic plus later edits');
+    fireEvent.click(await screen.findByRole('button', { name: 'Select pasted text' }));
+    expect(await screen.findByText(/The draft changed after the upload/)).toBeInTheDocument();
+    expect(textarea).toHaveValue('long diagnostic plus later edits');
+
+    rerender(<Harness compact maxMessageBytes={4} />);
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'second long diagnostic' } });
+    expect(screen.queryByRole('button', { name: 'Review pasted text' })).not.toBeInTheDocument();
+  });
+
+  it('compares normalized textarea line endings while preserving the Windows clipboard text for review', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment() });
+    render(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} />);
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' }) as HTMLTextAreaElement;
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'line one\r\nline two' } });
+    fireEvent.change(textarea, { target: { value: 'line one\nline two' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted text' }));
+    expect(await screen.findByRole('textbox', { name: 'Reviewed text for pasted-diagnostic.txt' })).toHaveValue('line one\nline two');
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Select pasted text' }));
+    expect(textarea.selectionStart).toBe(0);
+    expect(textarea.selectionEnd).toBe('line one\nline two'.length);
+  });
+
+  it('leaves pastes untouched for guests and below-limit messages', () => {
+    const { rerender } = render(<Harness compact signedIn={false} diagnosticCapability={diagnostics} maxMessageBytes={4} />);
+    let textarea = screen.getByRole('textbox', { name: 'Composer text' });
+    const guestPaste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(guestPaste, 'clipboardData', { value: { items: [], getData: () => 'long diagnostic' } });
+    fireEvent(textarea, guestPaste);
+    expect(guestPaste.defaultPrevented).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Review pasted text' })).not.toBeInTheDocument();
+    rerender(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} />);
+    textarea = screen.getByRole('textbox', { name: 'Composer text' });
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'short'.slice(0, 4) } });
+    expect(screen.queryByRole('button', { name: 'Review pasted text' })).not.toBeInTheDocument();
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+  });
+
+  it('withdraws a paste offer if reviewed diagnostic capability is revoked', () => {
+    const { rerender } = render(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} />);
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' });
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'long diagnostic' } });
+    fireEvent.change(textarea, { target: { value: 'long diagnostic' } });
+    expect(screen.getByRole('button', { name: 'Review pasted text' })).toBeInTheDocument();
+    rerender(<Harness compact maxMessageBytes={4} />);
+    expect(screen.queryByRole('button', { name: 'Review pasted text' })).not.toBeInTheDocument();
+    expect(textarea).toHaveValue('long diagnostic');
+    expect(apiMocks.uploadChatAttachment).not.toHaveBeenCalled();
+  });
+
+  it('clears the select-paste action when switching conversations', async () => {
+    apiMocks.uploadChatAttachment.mockResolvedValue({ success: true, attachment: attachment() });
+    const { rerender } = render(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} conversationId="conv_a" />);
+    const textarea = screen.getByRole('textbox', { name: 'Composer text' });
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => 'long diagnostic' } });
+    fireEvent.change(textarea, { target: { value: 'long diagnostic' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted text' }));
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    await screen.findByRole('button', { name: 'Select pasted text' });
+    rerender(<Harness compact diagnosticCapability={diagnostics} maxMessageBytes={4} conversationId="conv_b" />);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Select pasted text' })).not.toBeInTheDocument());
+    expect(textarea).toHaveValue('long diagnostic');
   });
 
   it('keeps the maximum compact attachment set in one horizontally scrollable row', () => {

@@ -75,6 +75,20 @@ interface DiagnosticReview {
   files: ReviewFile[];
   omissions: string[];
   conversationId?: string;
+  pastedDraft?: PastedDraft;
+}
+
+interface PastedDraft {
+  text: string;
+  expectedDraft: string;
+  textarea: HTMLTextAreaElement;
+  conversationId?: string;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
+interface UploadedPaste extends PastedDraft {
+  attachmentId: string;
 }
 
 export interface AttachmentTrayProps {
@@ -93,6 +107,8 @@ export interface AttachmentTrayProps {
   compact?: boolean;
   /** Server-advertised reviewed text uploads; absent preserves legacy uploads. */
   diagnosticCapability?: DiagnosticAttachmentCapability;
+  /** Composer's UTF-8 message limit, used only for the optional long-paste offer. */
+  maxMessageBytes?: number;
   /**
    * Optional server cleanup hook. The chip remains when this rejects (for
    * example, when the backend reports that a saved case still uses the file).
@@ -177,6 +193,7 @@ export const AttachmentTray = ({
   onRemoveAttachment,
   compact = false,
   diagnosticCapability,
+  maxMessageBytes,
 }: AttachmentTrayProps) => {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -194,6 +211,8 @@ export const AttachmentTray = ({
   const [error, setError] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [review, setReview] = useState<DiagnosticReview | null>(null);
+  const [pastedDraft, setPastedDraft] = useState<PastedDraft | null>(null);
+  const [uploadedPaste, setUploadedPaste] = useState<UploadedPaste | null>(null);
   const capability = diagnosticCapability?.enabled ? diagnosticCapability : undefined;
   const limit = Math.min(capability?.maxAttachments ?? ATTACHMENT_MAX_COUNT, Math.max(1, Math.floor(maxAttachments)));
   const busy = progress !== null || removingId !== null || preparing || review !== null;
@@ -229,12 +248,14 @@ export const AttachmentTray = ({
       abortRef.current?.abort();
       setPreparing(false);
       setReview(null);
+      setPastedDraft(null);
+      setUploadedPaste(null);
       setProgress(null);
       onBusyChangeRef.current?.(false);
     };
   }, [conversationId, signedIn]);
 
-  const performUploads = useCallback(async (validFiles: readonly File[], validationErrors: readonly string[]) => {
+  const performUploads = useCallback(async (validFiles: readonly File[], validationErrors: readonly string[], onUploaded?: (attachment: ChatAttachment) => void) => {
     const generation = operationGenerationRef.current;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -255,6 +276,7 @@ export const AttachmentTray = ({
           const next = [...latestAttachmentsRef.current, response.attachment];
           latestAttachmentsRef.current = next;
           onChange(next);
+          onUploaded?.(response.attachment);
           setProgress({ completed: index + 1, total: validFiles.length, fileName: file.name });
           reportClientEvent('attachment_uploaded', {
             outcome: attachmentKind(file) ?? 'unknown',
@@ -278,7 +300,7 @@ export const AttachmentTray = ({
     }
   }, [conversationId, onChange]);
 
-  const uploadFiles = useCallback(async (selectedFiles: readonly File[]) => {
+  const uploadFiles = useCallback(async (selectedFiles: readonly File[], paste?: PastedDraft) => {
     if (unavailable || operationRef.current || selectedFiles.length === 0) return;
     const slots = Math.max(0, limit - latestAttachmentsRef.current.length);
     if (slots === 0) {
@@ -320,7 +342,7 @@ export const AttachmentTray = ({
         onBusyChangeRef.current?.(false);
         return;
       }
-      setReview({ files, omissions: validationErrors, conversationId });
+      setReview({ files, omissions: validationErrors, conversationId, pastedDraft: paste });
       return;
     }
     if (capability) {
@@ -410,7 +432,28 @@ export const AttachmentTray = ({
         .filter(item => item.kind === 'file')
         .map(item => item.getAsFile())
         .filter((file): file is File => file !== null);
-      if (files.length === 0) return;
+      if (files.length === 0) {
+        // Let the browser insert the text normally; uploading never edits it.
+        const textarea = event.target;
+        const text = event.clipboardData?.getData?.('text/plain') ?? '';
+        if (!(textarea instanceof HTMLTextAreaElement) || !capability || !maxMessageBytes || !text) return;
+        const before = textarea.value.slice(0, textarea.selectionStart);
+        const after = textarea.value.slice(textarea.selectionEnd);
+        // Textareas normalize pasted CRLF and CR to LF in their value; keep
+        // the original text for review while comparing the browser's value.
+        const expectedDraft = before + text.replace(/\r\n?/g, '\n') + after;
+        setUploadedPaste(null);
+        if (utf8Size(expectedDraft) > maxMessageBytes && utf8Size(text) > capability.maxTextFileBytes) {
+          setPastedDraft(null);
+          setError(`The pasted text exceeds the ${formatAttachmentSize(capability.maxTextFileBytes)} original text file limit. It remains in your draft; shorten the text before attaching it.`);
+          return;
+        }
+        setPastedDraft(utf8Size(expectedDraft) > maxMessageBytes
+          ? { text, expectedDraft, textarea, conversationId,
+            selectionStart: before.length, selectionEnd: expectedDraft.length - after.length }
+          : null);
+        return;
+      }
       event.preventDefault();
       void uploadFiles(files);
     };
@@ -427,7 +470,7 @@ export const AttachmentTray = ({
       composer.removeEventListener('drop', onDrop);
       composer.removeEventListener('paste', onPaste);
     };
-  }, [compact, unavailable, uploadFiles]);
+  }, [compact, unavailable, uploadFiles, capability, maxMessageBytes, conversationId]);
 
   const removeAttachment = async (attachment: ChatAttachment) => {
     if (busy || disabled) return;
@@ -477,7 +520,39 @@ export const AttachmentTray = ({
       .map(({ file }) => `${file.name}: excluded from upload by your selection.`)];
     setError(omissions.length ? omissions.join(' ') : null);
     setReview(null);
-    void performUploads(files, omissions);
+    const paste = review.pastedDraft;
+    void performUploads(files, omissions, paste ? attachment => {
+      setPastedDraft(current => current === paste ? null : current);
+      setUploadedPaste({ ...paste, attachmentId: attachment.id });
+    } : undefined);
+  };
+
+  const selectUploadedPaste = () => {
+    if (!uploadedPaste || uploadedPaste.conversationId !== conversationId) return;
+    const attachment = latestAttachmentsRef.current.find(item => item.id === uploadedPaste.attachmentId);
+    if (!attachment || attachment.expires_at <= Date.now()) {
+      setUploadedPaste(null);
+      setError('The uploaded diagnostic is no longer available. Keep or reattach your pasted text.');
+      return;
+    }
+    const { textarea, expectedDraft, selectionStart, selectionEnd } = uploadedPaste;
+    if (!textarea.isConnected || textarea.value !== expectedDraft) {
+      setUploadedPaste(null);
+      setError('The draft changed after the upload. Remove any pasted diagnostic text you do not want to send.');
+      return;
+    }
+    textarea.focus();
+    textarea.setSelectionRange(selectionStart, selectionEnd);
+  };
+
+  const reviewPastedText = () => {
+    if (!pastedDraft || pastedDraft.conversationId !== conversationId || !capability || unavailable) return;
+    if (!pastedDraft.textarea.isConnected || pastedDraft.textarea.value !== pastedDraft.expectedDraft) {
+      setPastedDraft(null);
+      setError('The draft changed after the paste. Paste the diagnostic text again to review it as a file.');
+      return;
+    }
+    void uploadFiles([new File([pastedDraft.text], 'pasted-diagnostic.txt', { type: 'text/plain' })], pastedDraft);
   };
 
   const reviewDialog = (
@@ -546,7 +621,7 @@ export const AttachmentTray = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={cancelReview}>Cancel review</Button>
-        <Button onClick={approveReview} disabled={reviewErrors.length > 0 || disabled} variant="contained">Upload reviewed selection</Button>
+        <Button onClick={approveReview} disabled={reviewErrors.length > 0 || disabled || !capability} variant="contained">Upload reviewed selection</Button>
       </DialogActions>
     </Dialog>
   );
@@ -651,6 +726,20 @@ export const AttachmentTray = ({
           </Box>
         )}
         {preparing && <Typography role="status" variant="caption" sx={{ flex: '1 0 100%' }}>Preparing local diagnostic preview…</Typography>}
+
+        {pastedDraft && capability && !busy && (
+          <Alert severity="info" onClose={() => setPastedDraft(null)} sx={{ order: 1, flex: '1 0 100%' }}>
+            This draft exceeds the message limit. You can review the pasted text as a diagnostic attachment.
+            {' '}<Button size="small" onClick={reviewPastedText} disabled={unavailable || remaining === 0}>Review pasted text</Button>
+          </Alert>
+        )}
+
+        {uploadedPaste && capability && !busy && (
+          <Alert severity="success" role="status" onClose={() => setUploadedPaste(null)} sx={{ order: 1, flex: '1 0 100%' }}>
+            Diagnostic attached. The original text remains in your draft; remove it if you do not want to send it as a message.
+            {' '}<Button size="small" onClick={selectUploadedPaste}>Select pasted text</Button>
+          </Alert>
+        )}
 
         {error && (
           <Alert severity="error" onClose={() => setError(null)} role="alert" sx={{ order: 1, flex: '1 0 100%' }}>

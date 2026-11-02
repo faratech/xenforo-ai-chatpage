@@ -290,6 +290,11 @@
   word-break: break-word;
 }
 
+#react-chat-container .wf-related-approaches { color: var(--wf-muted); font-size: 13px; }
+#react-chat-container .wf-related-approaches summary { cursor: pointer; width: fit-content; }
+#react-chat-container .wf-related-approaches summary:focus-visible { outline: 2px solid var(--wf-focus-ring); outline-offset: 2px; }
+#react-chat-container .wf-related-approaches ul { list-style: none; margin: 0; padding: 0 0 0 16px; }
+
 /* Links */
 #react-chat-container .message-content a,
 #react-chat-container .message-file-sources a {

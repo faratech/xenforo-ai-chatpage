@@ -164,9 +164,36 @@ const server = createServer({
       response.end(`unknown smoke scenario: ${scenarioName}`);
       return;
     }
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    const payload = JSON.parse(body || '{}');
+    const parts = [];
+    let bodyBytes = 0;
+    for await (const chunk of request) {
+      bodyBytes += chunk.length;
+      if (bodyBytes > 2 * 1024 * 1024) {
+        json(response, 413, { error: 'Synthetic request too large' }, request);
+        return;
+      }
+      parts.push(chunk);
+    }
+    const body = Buffer.concat(parts);
+    if ((request.headers['content-type'] || '').startsWith('multipart/form-data;')) {
+      const form = await new Request('https://browser-smoke.invalid/chat.php', {
+        method: 'POST', headers: { 'content-type': request.headers['content-type'] }, body,
+      }).formData();
+      const action = form.get('action');
+      state.apiPayloads.push({ action, expected_identity_id: form.get('expected_identity_id') });
+      const file = form.get('file');
+      if (state.mode !== 'guided-support' || action !== 'uploadChatAttachment' || !file || typeof file === 'string') {
+        json(response, 400, { error: 'Unexpected synthetic upload' }, request);
+        return;
+      }
+      state.uploads.push({ name: file.name, text: await file.text(), identity: form.get('expected_identity_id') });
+      json(response, 200, { success: true, attachment: {
+        id: 'att_1234567890abcdef1234567890abcdef', name: file.name, mime: file.type,
+        size: file.size, expires_at: Date.now() + 60_000,
+      } }, request);
+      return;
+    }
+    const payload = JSON.parse(body.toString('utf8') || '{}');
     state.apiPayloads.push(payload);
 
     if (payload.action === 'getUserData') {
@@ -285,6 +312,10 @@ const server = createServer({
       json(response, 200, { success: true }, request);
       return;
     }
+    if (payload.action === 'deleteChatAttachment') {
+      json(response, 200, { success: true }, request);
+      return;
+    }
 
     state.chatPayloads.push(payload);
     if (state.mode === 'captcha' && state.chatPayloads.length === 1) {
@@ -363,6 +394,7 @@ const createPage = async (
     optionalChunkRequests: 0,
     streamAborted: false,
     telemetry: [],
+    uploads: [],
     supportCases: new Map([['case_browser_existing', {
       id: 'case_browser_existing', title: 'Existing synthetic update case', description: 'A synthetic update error for browser coverage.',
       status: 'open', revision: 3, pc_profile: { os_name: 'Windows', os_version: 'Windows 11 24H2', build: '26100.1000' },
@@ -791,6 +823,43 @@ try {
     await diagnosticDialog.getByRole('button', { name: 'Cancel review' }).click();
     await diagnosticDialog.waitFor({ state: 'hidden' });
     assert.equal(state.apiPayloads.filter(payload => payload.action === 'uploadChatAttachment').length, 0, 'cancelled diagnostic review must not upload original bytes');
+
+    if (viewport.width > 600) {
+      // A real keyboard paste verifies the browser's default insertion and the
+      // long-paste offer together; the review must never upload on cancel.
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+      const composer = page.getByRole('textbox', { name: 'Type your message' });
+      const pasted = `password=synthetic-secret\n${'diagnostic line\n'.repeat(300)}`;
+      await composer.fill('Please inspect: ');
+      await composer.focus();
+      await page.evaluate(text => globalThis.navigator.clipboard.writeText(text), pasted);
+      await page.keyboard.press('Control+V');
+      assert.equal(await composer.inputValue(), `Please inspect: ${pasted}`);
+      await page.getByRole('button', { name: 'Review pasted text' }).click();
+      await diagnosticDialog.waitFor();
+      assert.equal(await diagnosticDialog.getByRole('textbox', { name: 'Reviewed text for pasted-diagnostic.txt' }).inputValue(), pasted);
+      await diagnosticDialog.getByRole('button', { name: 'Cancel review' }).click();
+      await diagnosticDialog.waitFor({ state: 'hidden' });
+      assert.equal(await composer.inputValue(), `Please inspect: ${pasted}`);
+      assert.equal(state.apiPayloads.filter(payload => payload.action === 'uploadChatAttachment').length, 0);
+
+      await page.getByRole('button', { name: 'Review pasted text' }).click();
+      await diagnosticDialog.waitFor();
+      await diagnosticDialog.getByRole('button', { name: 'Apply 1 suggested redactions to pasted-diagnostic.txt' }).click();
+      await diagnosticDialog.getByRole('button', { name: 'Upload reviewed selection' }).click();
+      await page.getByRole('button', { name: 'Select pasted text' }).click();
+      assert.equal(state.uploads.length, 1);
+      assert.equal(state.uploads[0].identity, identityId);
+      assert.match(state.uploads[0].text, /password=\[REDACTED\]/);
+      assert(!state.uploads[0].text.includes('synthetic-secret'), 'only reviewed text may be uploaded');
+      const selected = await composer.evaluate(element => element.value.slice(element.selectionStart, element.selectionEnd));
+      assert.equal(selected, pasted, 'selection must cover exactly the original pasted text');
+      await page.keyboard.press('Backspace');
+      assert.equal(await composer.inputValue(), 'Please inspect: ');
+      await page.getByRole('button', { name: 'Remove pasted-diagnostic.txt.reviewed.txt' }).press('Delete');
+      await page.getByRole('button', { name: 'Remove pasted-diagnostic.txt.reviewed.txt' }).waitFor({ state: 'hidden' });
+      await composer.fill('');
+    }
 
     const question = 'What should I check next on this synthetic Windows PC?';
     await page.getByRole('textbox', { name: 'Type your message' }).fill(question);

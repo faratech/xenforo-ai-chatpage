@@ -353,6 +353,18 @@ describe('transactional branch operations', () => {
     expect(apiMocks.sendMessage.mock.calls.length).toBe(callsBefore + 1);
   });
 
+  it('keeps a partial new answer and explains how to regenerate it', async () => {
+    await bootWithExchange();
+    apiMocks.sendMessage.mockRejectedValueOnce(
+      new IncompleteStreamError('truncated', 'partial answer', [], undefined, 'stream_truncated'),
+    );
+    sendText('Second question');
+    expect(await screen.findByText(/partial answer is shown above; use Regenerate/)).toBeInTheDocument();
+    expect(messageParagraphs('partial answer')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Regenerate response' })).toBeEnabled();
+    expect(apiMocks.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
   it('replaces the branch when regeneration succeeds', async () => {
     await bootWithExchange();
     apiMocks.sendMessage.mockResolvedValueOnce({ text: 'Second answer', annotations: [] });

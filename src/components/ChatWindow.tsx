@@ -74,6 +74,7 @@ import {
   type SavedConversation,
   type SavedConversationSummary,
 } from '../services/api';
+import { chatErrorText } from '../services/chatErrorPresentation';
 import { AudioService, configureSpeechRecognition } from '../services/speech';
 import {
   enforceConversationCap,
@@ -917,6 +918,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
   const cosmeticTimersRef = useRef<Set<number>>(new Set());
   const scrollPositionsRef = useRef(loadScrollPositions(userId));
   const pendingMessageTargetRef = useRef(safeMessageQuery());
+  const pendingApproachFocusRef = useRef<string | null>(null);
   const spacerFrameRef = useRef<number | null>(null);
   const textFieldRef = useRef<HTMLDivElement>(null);
   const conversationsRef = useRef(conversations);
@@ -1275,8 +1277,12 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     conversationId: string,
     attachments: ChatAttachment[],
   ) => {
+    // A response can settle after a deletion but before its old tray unmounts.
+    // The synchronous tombstone prevents that response restoring deleted state.
+    if (tombstonesRef.current[conversationId] !== undefined) return;
     cloudInitialSelectionResolvedRef.current = true;
     setComposerAttachments(previous => {
+      if (tombstonesRef.current[conversationId] !== undefined) return previous;
       const next = { ...previous };
       if (attachments.length) next[conversationId] = attachments;
       else delete next[conversationId];
@@ -1798,6 +1804,23 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       value: selected?.messages.length,
     });
   }, [abortActiveTurn, cancelPendingCaptcha, stopListening]);
+
+  /** Open only an approach that is still in the current, identity-scoped history. */
+  const openRelatedApproach = useCallback((conversationId: string, messageId?: string) => {
+    const destination = conversationsRef.current[conversationId];
+    if (!destination) {
+      setErrorMessage('That approach is no longer available in this history.');
+      return;
+    }
+    // An edited or regenerated fork may omit the fork-point message. Only
+    // request an anchor when the destination really contains it; otherwise a
+    // stale target could unexpectedly focus a later conversation.
+    pendingMessageTargetRef.current = messageId && destination.messages.some(message => message.id === messageId)
+      ? messageId
+      : null;
+    pendingApproachFocusRef.current = conversationId !== currentConversationIdRef.current ? conversationId : null;
+    handleSelectConversation(conversationId);
+  }, [handleSelectConversation]);
 
   const applyConversationMetadata = useCallback((
     conversationId: string,
@@ -2657,45 +2680,6 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     return () => media.removeEventListener('change', handleChange);
   }, []);
 
-  const getErrorText = useCallback((error: unknown): string => {
-    // A turn id makes a user report traceable to the exact server request
-    // instead of a wall-clock guess across four log files.
-    const reference = error instanceof IncompleteStreamError && error.diagnostics
-      ? ` (ref: ${error.diagnostics.turnId})`
-      : '';
-
-    if (error instanceof IncompleteStreamError) {
-      if (error.code === 'completed_empty') {
-        return `The assistant finished without producing an answer. Please retry.${reference}`;
-      }
-      return `The response was interrupted before completion. You can retry it.${reference}`;
-    }
-    if (error instanceof StreamProtocolError) return 'The server returned an invalid streaming response. Please retry.';
-    if (error instanceof APIError) {
-      if (error.code === 'identity_required' || error.code === 'identity_changed' || error.status === 428) {
-        return 'Your session is being rechecked. Retry after verification completes.';
-      }
-      if (error.code === 'conversation_busy') {
-        const wait = error.retryAfterMs === undefined ? '' : ` Try again in ${Math.max(1, Math.ceil(error.retryAfterMs / 1_000))} seconds.`;
-        return `This conversation is still finishing another operation.${wait}`;
-      }
-      if (error.status === 429 || error.status === 400 || error.status === 413) {
-        // Upstream detail can be long and internal; show a readable prefix only.
-        return error.message.length > 200 ? `${error.message.slice(0, 200)}…` : error.message;
-      }
-      // Session errors are not retryable — telling the user to retry guarantees failure.
-      if (error.status === 401 || error.status === 403) {
-        return 'Your session expired. Reload the page, or sign in, and try again.';
-      }
-      if (error.code === 'timeout') return 'The AI service took too long to respond. Please retry.';
-      if (error.code === 'network_error') return 'Network error. Check your connection and retry.';
-      if (error.code === 'revision_conflict') return 'The support case changed. Reload its saved facts, then retry your message.';
-      if (error.code === 'support_case_required' || error.code === 'support_case_switch_requires_new_chat') return 'Start a new chat or choose another support case to continue troubleshooting.';
-      if (error.retryable) return 'The AI service is temporarily unavailable. Please retry.';
-    }
-    return 'Failed to send the message. Please retry.';
-  }, []);
-
   /**
    * Answers `/usage` locally. It fetches the quota fresh rather than reading
    * the cached value behind the header badge: that value is never populated
@@ -3184,7 +3168,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         outcome: params.kind,
       });
       clearActiveTurn(requestId);
-      setErrorMessage(getErrorText(error));
+      setErrorMessage(chatErrorText(error, !params.rollbackMessages && Boolean(partialText.trim())));
       setUsageRefresh(value => value + 1);
     }
   }, [
@@ -3193,7 +3177,6 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     clearActiveTurn,
     clearSentAttachments,
     enforceCapWithLocalTrim,
-    getErrorText,
     handleUsageCommand,
     requestClearConversation,
     setConversationDraft,
@@ -3676,11 +3659,13 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     setAttachmentBusy(busy);
   }, []);
   const handleComposerAttachmentsChange = useCallback((attachments: ChatAttachment[]) => {
-    setComposerAttachmentsForConversation(currentConversationIdRef.current, attachments);
-  }, [setComposerAttachmentsForConversation]);
+    // Bind the tray to its rendered conversation. A response may arrive after
+    // selection changed synchronously but before React cleans up the old tray.
+    setComposerAttachmentsForConversation(currentConversationId, attachments);
+  }, [currentConversationId, setComposerAttachmentsForConversation]);
   const handleRemoveComposerAttachment = useCallback((attachment: ChatAttachment) => (
-    deleteComposerAttachment(currentConversationIdRef.current, attachment)
-  ), [deleteComposerAttachment]);
+    deleteComposerAttachment(currentConversationId, attachment)
+  ), [currentConversationId, deleteComposerAttachment]);
   const handleRetryCloudHistory = useCallback(() => {
     if (isGuest || !isOnlineRef.current || cloudSyncPausedRef.current) return;
     setCloudStatus('loading');
@@ -3852,6 +3837,8 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       anchoredConversationRef.current = currentConversationId;
       lastAnchoredMessageIdRef.current = lastUserMessageId ?? null;
       if (tailSpacerRef.current) tailSpacerRef.current.style.height = '0px';
+      const focusApproach = pendingApproachFocusRef.current === currentConversationId;
+      pendingApproachFocusRef.current = null;
       const targetMessageId = pendingMessageTargetRef.current;
       const target = targetMessageId
         ? document.getElementById(`wf-message-${targetMessageId}`)
@@ -3880,6 +3867,13 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
       } else {
         pane.scrollTop = pane.scrollHeight;
         setAutoFollow(true);
+      }
+      if (focusApproach) {
+        // Edit/regenerate forks can omit the original message entirely. The
+        // triggering button unmounted with the previous conversation, so give
+        // keyboard and screen-reader users a stable place in this transcript.
+        pendingMessageTargetRef.current = null;
+        pane.focus({ preventScroll: true });
       }
       return;
     }
@@ -4048,6 +4042,17 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
     () => Object.values(conversations).sort((a, b) => b.updatedAt - a.updatedAt),
     [conversations]
   );
+  const relatedApproachesByMessage = useMemo(() => {
+    const related = new Map<string, Conversation[]>();
+    for (const conversation of sortedConversations) {
+      const lineage = conversation.lineage;
+      if (!lineage || lineage.parent_conversation_id !== currentConversationId) continue;
+      const approaches = related.get(lineage.fork_message_id) ?? [];
+      approaches.push(conversation);
+      related.set(lineage.fork_message_id, approaches);
+    }
+    return related;
+  }, [currentConversationId, sortedConversations]);
   const visibleStreamingMessage = streamingState?.conversationId === currentConversationId
     ? streamingState.message
     : null;
@@ -4084,6 +4089,7 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
         onChange={handleComposerAttachmentsChange}
         onBusyChange={handleAttachmentBusyChange}
         onRemoveAttachment={handleRemoveComposerAttachment}
+        maxMessageBytes={MAX_MESSAGE_BYTES}
         disabled={isLoading || showCaptcha || !isOnline}
         diagnosticCapability={{
           enabled: capabilities.features.diagnostics,
@@ -4398,11 +4404,27 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
           sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
         >
           <Box ref={transcriptContentRef}>
+            {currentConversation.lineage && (
+              <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pt: 1 }}>
+                {conversations[currentConversation.lineage.parent_conversation_id] ? (
+                  <Button
+                    size="small"
+                    disabled={isLoading}
+                    onClick={() => openRelatedApproach(currentConversation.lineage!.parent_conversation_id, currentConversation.lineage!.fork_message_id)}
+                  >
+                    {`View original approach: ${conversations[currentConversation.lineage.parent_conversation_id].title}${conversations[currentConversation.lineage.parent_conversation_id].archivedAt ? ' (archived)' : ''}`}
+                  </Button>
+                ) : (
+                  <Typography variant="caption" color="text.secondary">Original approach is not available in this history.</Typography>
+                )}
+              </Box>
+            )}
             <Box role="log" aria-live="off">
               {currentConversation.messages.map((message, index) => {
                 const isLast = index === currentConversation.messages.length - 1
                   && Boolean(lastUserMessageId);
                 const isLastUser = message.id === lastUserMessageId;
+                const relatedApproaches = relatedApproachesByMessage.get(message.id) ?? [];
                 return (
                   <React.Fragment key={message.id}>
                     {/* Where a new turn is scrolled to. Zero-height, so it costs
@@ -4439,6 +4461,29 @@ const InteractiveChatWindow: React.FC<ChatWindowProps> = ({
                       onFeedback={handleSubmitFeedback}
                       onCopyPermalink={handleCopyMessagePermalink}
                     />
+                    {relatedApproaches.length > 0 && (
+                      <Box sx={{ maxWidth: CHAT_CONTENT_MAX_WIDTH, mx: 'auto', px: { xs: 1.5, sm: 2.5, md: 4 }, pb: 1 }}>
+                        <details className="wf-related-approaches">
+                          <summary>
+                            {`${relatedApproaches.length} alternate ${relatedApproaches.length === 1 ? 'approach' : 'approaches'}`}
+                          </summary>
+                          <ul>
+                            {relatedApproaches.map(approach => (
+                              <li key={approach.id}>
+                                <Button
+                                  size="small"
+                                  disabled={isLoading}
+                                  onClick={() => openRelatedApproach(approach.id, message.id)}
+                                  sx={{ textAlign: 'left', textTransform: 'none' }}
+                                >
+                                  {`Open ${approach.title}${approach.archivedAt ? ' (archived)' : ''}`}
+                                </Button>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      </Box>
+                    )}
                   </React.Fragment>
                 );
               })}

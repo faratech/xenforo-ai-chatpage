@@ -161,9 +161,13 @@ const totalJsGzipBytes = [...jsGzipSizes.values()].reduce((total, size) => total
 // 2026-10-22: 292 KiB includes optional guided support and diagnostic review.
 // Same-dependency baseline measured 284865 gzip bytes; the new functionality
 // adds approximately 13 KiB across all routes. Optional evidence UI stays lazy.
+// 2026-11-02: 293 KiB accommodates reviewed diagnostic paste and contextual
+// approach navigation. The same-dependency clean build measured 298305 bytes;
+// the new build measured 299517 bytes. Startup and chat-window caps below are
+// unchanged. Syntax highlighting was evaluated separately and not included.
 // The strict 4 KiB bootstrap and 50 KiB ChatWindow caps below still protect
 // startup cost.
-const totalJsGzipBudget = 292 * 1024;
+const totalJsGzipBudget = 293 * 1024;
 if (totalJsGzipBytes > totalJsGzipBudget) {
   throw new Error(
     `Compressed JavaScript budget exceeded: ${totalJsGzipBytes} bytes gzip > ${totalJsGzipBudget}.`,

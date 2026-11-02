@@ -780,6 +780,190 @@ describe('ChatWindow state ownership', () => {
     });
   });
 
+  it('shows approaches at their fork point and returns to the original message', async () => {
+    const history = {
+      version: 5,
+      conversations: {
+        conv_original: {
+          id: 'conv_original', title: 'Original diagnosis', createdAt: 1000, updatedAt: 2000,
+          messages: [
+            { id: 'msg_question', role: 'user', rawContent: 'Original question', timestamp: 1500 },
+            { id: 'msg_answer', role: 'ai', rawContent: 'Original answer', timestamp: 2000 },
+          ],
+        },
+        conv_edited: {
+          id: 'conv_edited', title: 'Different question', createdAt: 3000, updatedAt: 3000,
+          messages: [{ id: 'msg_edited', role: 'user', rawContent: 'Edited question', timestamp: 3000 }],
+          lineage: { parent_conversation_id: 'conv_original', fork_message_id: 'msg_question', family_id: 'conv_original' },
+        },
+        conv_archived: {
+          id: 'conv_archived', title: 'Archived answer', createdAt: 4000, updatedAt: 4000, archivedAt: 4500,
+          messages: [{ id: 'msg_archived', role: 'ai', rawContent: 'Archived alternative', timestamp: 4000 }],
+          lineage: { parent_conversation_id: 'conv_original', fork_message_id: 'msg_question', family_id: 'conv_original' },
+        },
+        conv_deleted: {
+          id: 'conv_deleted', title: 'Deleted approach', createdAt: 4000, updatedAt: 4000,
+          messages: [{ id: 'msg_deleted', role: 'ai', rawContent: 'Deleted content', timestamp: 4000 }],
+          lineage: { parent_conversation_id: 'conv_original', fork_message_id: 'msg_question', family_id: 'conv_original' },
+        },
+        conv_unrelated: {
+          id: 'conv_unrelated', title: 'Unrelated', createdAt: 4000, updatedAt: 4000,
+          messages: [{ id: 'msg_unrelated', role: 'ai', rawContent: 'Unrelated content', timestamp: 4000 }],
+        },
+      },
+      tombstones: { conv_deleted: 5000 }, pendingServerDeletions: {}, trimmed: {},
+    };
+    window.localStorage.setItem('chat_store:v5:guest_approaches', JSON.stringify(history));
+    window.localStorage.setItem('current_conversation_id:v5:guest_approaches', 'conv_original');
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_approaches" />);
+
+    // Navigation of already-saved branches is available even if creating new
+    // branches is currently disabled or the capability check has not loaded.
+    const summary = await screen.findByText('2 alternate approaches');
+    fireEvent.click(summary);
+    expect(screen.queryByRole('button', { name: /Deleted approach/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open Unrelated/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Archived answer (archived)' }));
+    expect(await screen.findByText('Archived alternative')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'View original approach: Original diagnosis' }));
+    await screen.findByText('Original answer');
+    fireEvent.click(screen.getByText('2 alternate approaches'));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Different question' }));
+    expect(await screen.findByText('Edited question')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Chat messages' })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole('button', { name: 'View original approach: Original diagnosis' }));
+    await screen.findByText('Original answer');
+    await waitFor(() => expect(document.activeElement?.id).toBe('wf-message-msg_question'));
+    expect(window.localStorage.getItem('current_conversation_id:v5:guest_approaches')).toBe('conv_original');
+
+    apiMocks.sendMessage.mockImplementation((_message: string, options: { signal: AbortSignal }) => (
+      new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new StreamCancelledError('cancelled', '')), { once: true });
+      })
+    ));
+    fireEvent.change(screen.getByLabelText('Type your message'), { target: { value: 'Another question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await screen.findByRole('button', { name: 'Stop generation' });
+    fireEvent.click(screen.getByText('2 alternate approaches'));
+    expect(screen.getByRole('button', { name: 'Open Different question' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }));
+  });
+
+  it('explains when an approach’s original is no longer in loaded history', async () => {
+    window.localStorage.setItem('chat_store:v5:guest_missing_approach', JSON.stringify({
+      version: 5,
+      conversations: {
+        conv_alternate: {
+          id: 'conv_alternate', title: 'Alternative', createdAt: 1000, updatedAt: 2000,
+          messages: [{ id: 'msg_alt', role: 'ai', rawContent: 'Alternative answer', timestamp: 2000 }],
+          lineage: { parent_conversation_id: 'conv_missing', fork_message_id: 'msg_missing', family_id: 'conv_missing' },
+        },
+      },
+      tombstones: { conv_missing: 3000 }, pendingServerDeletions: {}, trimmed: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v5:guest_missing_approach', 'conv_alternate');
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Guest" userId="guest_missing_approach" />);
+    expect(await screen.findByText('Original approach is not available in this history.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /View original approach/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the pasted draft and does not overwrite a newer draft from another tab after upload', async () => {
+    apiMocks.getChatCapabilities.mockResolvedValueOnce({
+      success: true, version: 1, modes: ['chat'],
+      features: { guided_support: false, diagnostics: true, branches: false, support_cards: false },
+      limits: { max_attachments: 4, max_image_bytes: 8388608, max_text_file_bytes: 1048576, max_total_text_bytes: 131072, max_total_image_bytes: 10485760 },
+    });
+    const uploaded = {
+      id: 'att_1234567890abcdef1234567890abcdef', name: 'pasted-diagnostic.txt.reviewed.txt',
+      mime: 'text/plain', size: 4100, expires_at: Date.now() + 60_000,
+    };
+    let finishUpload: ((result: { success: true; attachment: typeof uploaded }) => void) | undefined;
+    apiMocks.uploadChatAttachment.mockImplementationOnce(() => new Promise(resolve => { finishUpload = resolve; }));
+    renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByRole('region', { name: 'File attachment drop zone' });
+    const textarea = screen.getByLabelText('Type your message') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Please inspect: ' } });
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    const pasted = 'x'.repeat(4100);
+    // jsdom doesn't perform the browser's default text insertion on paste.
+    fireEvent.paste(textarea, { clipboardData: { items: [], getData: () => pasted } });
+    fireEvent.change(textarea, { target: { value: `Please inspect: ${pasted}` } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Review pasted text' }));
+    await screen.findByRole('dialog', { name: 'Review diagnostic files' });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload reviewed selection' }));
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(1));
+    const storeKey = 'chat_store:v5:42';
+    await waitFor(() => {
+      const saved = JSON.parse(window.localStorage.getItem(storeKey) ?? '{}') as {
+        conversations?: Record<string, { draft?: string }>;
+      };
+      expect(Object.values(saved.conversations ?? {}).some(conversation => conversation.draft === `Please inspect: ${pasted}`)).toBe(true);
+    });
+    const remote = JSON.parse(window.localStorage.getItem(storeKey) ?? '{}') as {
+      conversations: Record<string, { draft?: string; draftUpdatedAt?: number }>;
+    };
+    const conversation = Object.values(remote.conversations).find(item => item.draft === `Please inspect: ${pasted}`)!;
+    conversation.draft = 'Newer draft from the other tab';
+    conversation.draftUpdatedAt = Date.now() + 10_000;
+    const remoteValue = JSON.stringify(remote);
+    act(() => {
+      window.localStorage.setItem(storeKey, remoteValue);
+      window.dispatchEvent(new StorageEvent('storage', { key: storeKey, newValue: remoteValue }));
+    });
+    await act(async () => { finishUpload?.({ success: true, attachment: uploaded }); });
+    expect(textarea).toHaveValue(`Please inspect: ${pasted}`);
+    expect(await screen.findByText(/pasted-diagnostic\.txt\.reviewed\.txt/)).toBeVisible();
+    await waitFor(() => {
+      const store = JSON.parse(window.localStorage.getItem(storeKey) ?? '{}') as {
+        conversations?: Record<string, { draft?: string }>;
+      };
+      expect(Object.values(store.conversations ?? {}).some(item => item.draft === 'Newer draft from the other tab')).toBe(true);
+    });
+  });
+
+  it('keeps an upload bound to the conversation that started it when navigation races completion', async () => {
+    window.localStorage.setItem('chat_store:v5:42', JSON.stringify({
+      version: 5,
+      conversations: {
+        conv_original: {
+          id: 'conv_original', title: 'Original diagnosis', createdAt: 1000, updatedAt: 2000,
+          messages: [{ id: 'msg_question', role: 'user', rawContent: 'Question', timestamp: 1500 }],
+        },
+        conv_alternate: {
+          id: 'conv_alternate', title: 'Alternate diagnosis', createdAt: 3000, updatedAt: 3000,
+          messages: [{ id: 'msg_alt', role: 'user', rawContent: 'Alternate question', timestamp: 3000 }],
+          lineage: { parent_conversation_id: 'conv_original', fork_message_id: 'msg_question', family_id: 'conv_original' },
+        },
+      },
+      tombstones: {}, pendingServerDeletions: {}, trimmed: {},
+    }));
+    window.localStorage.setItem('current_conversation_id:v5:42', 'conv_original');
+    const uploaded = { id: 'att_1234567890abcdef1234567890abcdef', name: 'race.png', mime: 'image/png', size: 10, expires_at: Date.now() + 60_000 };
+    let finishUpload: ((result: { success: true; attachment: typeof uploaded }) => void) | undefined;
+    apiMocks.uploadChatAttachment.mockImplementationOnce(() => new Promise(resolve => { finishUpload = resolve; }));
+
+    const { container } = renderThemed(<ChatWindow userAvatar="/avatar.webp" userName="Member" userId="42" />);
+    await screen.findByRole('region', { name: 'File attachment drop zone' });
+    fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+      target: { files: [new File(['imagebytes'], 'race.png', { type: 'image/png' })] },
+    });
+    await waitFor(() => expect(apiMocks.uploadChatAttachment).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByText('1 alternate approach'));
+    const navigate = screen.getByRole('button', { name: 'Open Alternate diagnosis' });
+    await act(async () => {
+      // Native click and completion run inside one React batch, before the
+      // original tray's unmount effect can abort its pending request.
+      finishUpload?.({ success: true, attachment: uploaded });
+      navigate.click();
+      await Promise.resolve();
+    });
+    await screen.findByText('Alternate question');
+    expect(screen.queryByText(/race\.png ·/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'View original approach: Original diagnosis' }));
+    expect(await screen.findByText(/race\.png ·/)).toBeInTheDocument();
+  });
+
   it('persists visible uploaded metadata but does not copy a bound handle into a branch', async () => {
     const uploaded = {
       id: 'att_1234567890abcdef1234567890abcdef',
