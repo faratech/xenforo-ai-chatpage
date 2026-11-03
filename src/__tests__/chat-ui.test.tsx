@@ -98,6 +98,7 @@ vi.mock('../services/telemetry', async importOriginal => {
 
 import { APIError, CaptchaRequiredError, StreamCancelledError } from '../services/api';
 import { ChatWindow } from '../components/ChatWindow';
+import { AdSlot } from '../components/AdSlot';
 import { InputArea } from '../components/InputArea';
 import { Message } from '../components/Message';
 
@@ -3169,7 +3170,10 @@ describe('the relocated forum ad', () => {
 
   afterEach(() => {
     document.querySelectorAll('script[src*="adsbygoogle.js"]').forEach(s => s.remove());
+    document.getElementById('wf-ad-breadcrumb')?.remove();
     delete window.adsbygoogle;
+    delete (window as Window & { __wfAdGate?: unknown }).__wfAdGate;
+    vi.useRealTimers();
   });
 
   it('renders for a guest on the embed and enqueues the slot exactly once', async () => {
@@ -3193,6 +3197,175 @@ describe('the relocated forum ad', () => {
     expect(slot.querySelector('ins.adsbygoogle')?.getAttribute('data-ad-format')).toBe('horizontal');
     expect(pushed).toHaveLength(1);
     cleanup();
+  });
+
+  it('renders when the host inserts its approved loader after the chat mounts', async () => {
+    const pushed: Record<string, unknown>[] = [];
+    window.adsbygoogle = { push: (config: Record<string, unknown>) => { pushed.push(config); } } as never;
+    renderThemed(<StrictMode><AdSlot isGuest /></StrictMode>);
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    const removeLoader = withAdSenseLoader();
+    expect(await screen.findByLabelText('Advertisement')).toBeInTheDocument();
+    expect(pushed).toHaveLength(1);
+    removeLoader();
+  });
+
+  it('reacquires the host hold under StrictMode while enqueueing only once', () => {
+    const removeLoader = withAdSenseLoader();
+    const push = vi.fn();
+    window.adsbygoogle = { push } as never;
+    const breadcrumb = document.createElement('div');
+    breadcrumb.id = 'wf-ad-breadcrumb';
+    document.body.appendChild(breadcrumb);
+    const view = renderThemed(<StrictMode><AdSlot isGuest /></StrictMode>);
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(breadcrumb.dataset.wfChatHeld).toBe('1');
+    expect(breadcrumb.style.height).toBe('0px');
+    view.unmount();
+    expect(breadcrumb.dataset.wfChatHeld).toBeUndefined();
+    removeLoader();
+  });
+
+  it.each([
+    { load: 'error', lateDeny: 0 },
+    { load: 'withheld', lateDeny: 0 },
+    { load: 'loaded', lateDeny: 1 },
+  ])('does not enqueue when the host gate is failed or denied: %j', async gate => {
+    const push = vi.fn();
+    window.adsbygoogle = { push } as never;
+    (window as Window & { __wfAdGate?: unknown }).__wfAdGate = gate;
+    const removeLoader = withAdSenseLoader();
+    renderThemed(<AdSlot isGuest />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
+    removeLoader();
+  });
+
+  it('does not create an ad when the host has not approved its loader', async () => {
+    const push = vi.fn();
+    window.adsbygoogle = { push } as never;
+    renderThemed(<AdSlot isGuest />);
+    const unrelated = document.createElement('script');
+    unrelated.src = 'https://example.invalid/unrelated.js';
+    document.head.appendChild(unrelated);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
+    unrelated.remove();
+  });
+
+  it('does not create an ad for members when the host inserts a loader', async () => {
+    const push = vi.fn();
+    window.adsbygoogle = { push } as never;
+    renderThemed(<AdSlot isGuest={false} />);
+    const removeLoader = withAdSenseLoader();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
+    removeLoader();
+  });
+
+  it('does not enqueue an ad if the component unmounts before host approval', async () => {
+    const push = vi.fn();
+    window.adsbygoogle = { push } as never;
+    const view = renderThemed(<AdSlot isGuest />);
+    view.unmount();
+    const removeLoader = withAdSenseLoader();
+    await act(async () => { await Promise.resolve(); });
+    expect(push).not.toHaveBeenCalled();
+    removeLoader();
+  });
+
+  it('keeps an unresolved unit long enough for a fill after 20 seconds', async () => {
+    vi.useFakeTimers();
+    const removeLoader = withAdSenseLoader();
+    window.adsbygoogle = { push: vi.fn() } as never;
+    renderThemed(<AdSlot isGuest />);
+    const slot = screen.getByLabelText('Advertisement');
+    const unit = slot.querySelector('ins.adsbygoogle')!;
+    act(() => { vi.advanceTimersByTime(20_000); });
+    expect(slot).toBeInTheDocument();
+    await act(async () => { unit.setAttribute('data-ad-status', 'filled'); });
+    act(() => { vi.advanceTimersByTime(11_000); });
+    expect(slot).toBeInTheDocument();
+    removeLoader();
+  });
+
+  it('keeps Google rendered fallback content when the status is unfill-optimized', async () => {
+    const removeLoader = withAdSenseLoader();
+    window.adsbygoogle = { push: vi.fn() } as never;
+    renderThemed(<AdSlot isGuest />);
+    const slot = screen.getByLabelText('Advertisement');
+    await act(async () => { slot.querySelector('ins')!.setAttribute('data-ad-status', 'unfill-optimized'); });
+    expect(slot).toBeInTheDocument();
+    removeLoader();
+  });
+
+  it('keeps a filled creative if the host queue throws after processing it', () => {
+    const removeLoader = withAdSenseLoader();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    window.adsbygoogle = { push: () => {
+      document.querySelector('ins.adsbygoogle')!.setAttribute('data-ad-status', 'filled');
+      throw new Error('unit already processed');
+    } } as never;
+    renderThemed(<AdSlot isGuest />);
+    expect(screen.getByLabelText('Advertisement').querySelector('ins')).toHaveAttribute('data-ad-status', 'filled');
+    removeLoader();
+  });
+
+  it('removes an explicitly unfilled unit without reviving it later', async () => {
+    const removeLoader = withAdSenseLoader();
+    window.adsbygoogle = { push: vi.fn() } as never;
+    renderThemed(<AdSlot isGuest />);
+    const unit = screen.getByLabelText('Advertisement').querySelector('ins')!;
+    await act(async () => { unit.setAttribute('data-ad-status', 'unfilled'); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    await act(async () => { unit.setAttribute('data-ad-status', 'filled'); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    removeLoader();
+  });
+
+  it('treats unknown status as pending until the deadline and never revives it', async () => {
+    vi.useFakeTimers();
+    const removeLoader = withAdSenseLoader();
+    window.adsbygoogle = { push: vi.fn() } as never;
+    renderThemed(<AdSlot isGuest />);
+    const slot = screen.getByLabelText('Advertisement');
+    const unit = slot.querySelector('ins')!;
+    unit.appendChild(document.createElement('iframe')); // An unsized iframe is not a rendered creative.
+    await act(async () => { unit.setAttribute('data-ad-status', 'pending-other'); });
+    act(() => { vi.advanceTimersByTime(29_999); });
+    expect(slot).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    await act(async () => { unit.setAttribute('data-ad-status', 'filled'); });
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    removeLoader();
+  });
+
+  it('keeps a sized iframe without a status at the pending deadline', () => {
+    vi.useFakeTimers();
+    const removeLoader = withAdSenseLoader();
+    window.adsbygoogle = { push: vi.fn() } as never;
+    renderThemed(<AdSlot isGuest />);
+    const slot = screen.getByLabelText('Advertisement');
+    const frame = document.createElement('iframe');
+    vi.spyOn(frame, 'getBoundingClientRect').mockReturnValue({ width: 320, height: 50 } as DOMRect);
+    slot.querySelector('ins')!.appendChild(frame);
+    act(() => { vi.advanceTimersByTime(30_000); });
+    expect(slot).toBeInTheDocument();
+    removeLoader();
+  });
+
+  it('removes a pending unit when the approved loader errors', () => {
+    const removeLoader = withAdSenseLoader();
+    window.adsbygoogle = { push: vi.fn() } as never;
+    renderThemed(<AdSlot isGuest />);
+    expect(screen.getByLabelText('Advertisement')).toBeInTheDocument();
+    fireEvent.error(document.querySelector('script[src*="adsbygoogle.js"]')!);
+    expect(screen.queryByLabelText('Advertisement')).not.toBeInTheDocument();
+    removeLoader();
   });
 
   it('never renders for a member, who has never seen this unit', async () => {

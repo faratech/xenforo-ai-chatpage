@@ -7,9 +7,9 @@ import Box from '@mui/material/Box';
  * On /pages/ai the page is a full-viewport app shell that does not scroll, so
  * the 280px unit that used to sit above the chat (390px on a phone) would come
  * straight out of the conversation — it was 451px of the first screen on
- * desktop and 60% of it on mobile. `_ads.html` no longer emits it for
- * `page-313`; this renders the same slot as the last row of the shell instead,
- * where a fixed band cannot push the transcript around.
+ * desktop and 60% of it on mobile. The page-313 template hides the host's
+ * breadcrumb copy; this renders the same slot as the last row of the shell
+ * instead, where a fixed band cannot push the transcript around.
  *
  * Two gates, both deliberately mirroring the host rather than duplicating its
  * policy:
@@ -21,32 +21,30 @@ import Box from '@mui/material/Box';
  *    "we are embedded in the forum at all". On the standalone /chatpage route
  *    there is no loader and this renders nothing.
  *
- * The forum copy is held collapsed until our own unit proves itself; see
- * holdBreadcrumbCollapsed for why the decision is no longer made up front.
+ * The host copy is held collapsed while this unit is pending on embeds that
+ * expose it. On page-313 it is hidden by the page template, so it is not a
+ * visible fallback if this unit does not fill.
  */
 const AD_CLIENT = 'ca-pub-7455498979488414';
 const AD_SLOT = '6778196821';
 
-const adsEnabledOnHost = (): boolean =>
-  typeof document !== 'undefined'
-  && !!document.querySelector('script[src*="adsbygoogle.js"]');
+const adsEnabledOnHost = (): boolean => {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return false;
+  const gate = (window as Window & { __wfAdGate?: { load?: string; lateDeny?: number } }).__wfAdGate;
+  return !!document.querySelector('script[src*="adsbygoogle.js"]')
+    && gate?.load !== 'error' && gate?.load !== 'withheld' && gate?.lateDeny !== 1;
+};
 
-/** How long to wait for a creative before giving the space back to the chat. */
-const UNFILLED_GRACE_MS = 4_000;
+/** A pending creative has been observed to fill about 20 seconds after loading. */
+const UNFILLED_GRACE_MS = 30_000;
 
 /**
  * Hold the forum's breadcrumb copy collapsed (zero-height, not display:none)
  * while our own unit decides whether it will fill.
  *
- * The old behaviour deleted the breadcrumb up front, before knowing our own
- * fate; measured on production, ~5 cold sessions in 6 never reach
- * data-ad-status within the grace period, so the band unmounted and the
- * deleted breadcrumb left the guest with no unit at all. Holding instead of
- * deleting keeps every ending covered:
- *   - ours fills      -> the held copy is deleted outright (as before);
- *   - ours unfills    -> this component unmounts and the cleanup un-collapses
- *                        the breadcrumb, so the guest sees the forum's unit;
- *   - app tears down  -> same cleanup path.
+ * If ours fills, the held copy is removed. If it does not, cleanup releases
+ * this inline hold. Whether the host copy is visible afterward is controlled
+ * by the host template; page-313 explicitly keeps it hidden.
  * Zero-height overflow-hidden keeps both units from being visually live at
  * once without display:none-ing a serving <ins>, which is the thing AdSense
  * asks you not to do.
@@ -71,25 +69,48 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
   const pushedRef = useRef(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const [abandoned, setAbandoned] = useState(false);
-  const show = isGuest && adsEnabledOnHost() && !abandoned;
+  const [hostLoaderPresent, setHostLoaderPresent] = useState(adsEnabledOnHost);
+  const show = isGuest && hostLoaderPresent && adsEnabledOnHost() && !abandoned;
 
   useEffect(() => {
-    if (!show || pushedRef.current) return;
+    if (!isGuest || hostLoaderPresent || abandoned || !document.head) return;
+    // The host injects the loader only after its ad gate approves. The chat
+    // may mount first, so watch its insertion rather than treating a one-time
+    // absence as a permanent denial. The host appends the loader to <head>.
+    const observer = new MutationObserver(() => {
+      if (adsEnabledOnHost()) {
+        observer.disconnect();
+        setHostLoaderPresent(true);
+      }
+    });
+    observer.observe(document.head, { childList: true, subtree: true });
+    // Close the gap between the first render and observer registration.
+    if (adsEnabledOnHost()) {
+      observer.disconnect();
+      setHostLoaderPresent(true);
+    }
+    return () => observer.disconnect();
+  }, [isGuest, hostLoaderPresent, abandoned]);
+
+  useEffect(() => {
+    if (!show) return;
+    // Gate state can change between render and this effect.
+    if (!adsEnabledOnHost()) {
+      setAbandoned(true);
+      return;
+    }
+    holdBreadcrumbCollapsed();
     // StrictMode mounts twice in development, and AdSense throws
     // "All ins elements in the DOM with class=adsbygoogle already have ads in
     // them" on a second push into the same <ins>.
-    pushedRef.current = true;
-
-    // Hold the forum's breadcrumb copy collapsed while ours decides (see
-    // holdBreadcrumbCollapsed). It is outside this repo's deployable template
-    // surface, so it cannot be suppressed at source from here.
-    holdBreadcrumbCollapsed();
-
-    try {
-      (window.adsbygoogle = window.adsbygoogle || []).push({});
-    } catch (error) {
-      // A failed ad must never take the chat down with it.
-      console.error('AdSense slot failed to initialise:', error);
+    if (!pushedRef.current) {
+      pushedRef.current = true;
+      try {
+        (window.adsbygoogle = window.adsbygoogle || []).push({});
+      } catch (error) {
+        // A failed ad must never take the chat down with it.
+        console.error('AdSense slot failed to initialise:', error);
+      }
     }
 
     return () => releaseHeldBreadcrumb();
@@ -100,12 +121,11 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
    * for good.
    *
    * The band reserves space inside a viewport that no longer scrolls, so an
-   * empty 90px strip above the composer is a permanent cost and the live unit
-   * reports `unfill-optimized` often enough to matter. But a band that
-   * collapses and then comes back is worse than either: measured on
-   * production, the slot collapsed as unfilled and filled ~20s later, resizing
-   * the transcript by 90px mid-conversation. That is the same class of
-   * layout shift this whole change exists to remove.
+   * empty 90px strip below the composer is a permanent cost. An unresolved
+   * slot can fill later, so allow a bounded 30 seconds; explicit unfilled status
+   * and loader errors still release the band immediately. The host treats
+   * `unfill-optimized` and a sized iframe as rendered content; keep those
+   * visible too without assuming that they are paid ads.
    *
    * So the decision is final. Unfilled unmounts the slot outright rather than
    * hiding it, which also puts it beyond the reach of the site-wide
@@ -118,27 +138,35 @@ export const AdSlot = memo<{ isGuest: boolean }>(({ isGuest }) => {
 
     const settle = () => {
       const status = ins.getAttribute('data-ad-status');
-      if (!status) return false;
-      if (status === 'filled') {
+      const frame = ins.querySelector('iframe');
+      const frameRect = frame?.getBoundingClientRect();
+      const rendered = !!frameRect && frameRect.width > 1 && frameRect.height > 1;
+      if (status === 'filled' || status === 'unfill-optimized' || (status !== 'unfilled' && rendered)) {
         // Ours won: retire the forum's held copy for good.
         document.getElementById('wf-ad-breadcrumb')?.remove();
-      } else {
-        setAbandoned(true);
+        return true;
       }
-      return true;
+      if (status === 'unfilled') {
+        setAbandoned(true);
+        return true;
+      }
+      return false;
     };
 
     if (settle()) return;
     const observer = new MutationObserver(() => { if (settle()) observer.disconnect(); });
     observer.observe(ins, { attributes: true, attributeFilter: ['data-ad-status'] });
-    // AdSense does not always set a status — a blocked or failed request simply
-    // leaves the slot untouched, so the band needs a deadline of its own.
+    const loader = document.querySelector<HTMLScriptElement>('script[src*="adsbygoogle.js"]');
+    const loaderFailed = () => { if (!settle()) setAbandoned(true); };
+    loader?.addEventListener('error', loaderFailed);
+    // AdSense does not always set a status, so an unresolved band also needs
+    // a deadline. Once abandoned it never returns during this mount.
     const timer = window.setTimeout(() => {
       if (!settle()) setAbandoned(true);
       observer.disconnect();
     }, UNFILLED_GRACE_MS);
 
-    return () => { observer.disconnect(); window.clearTimeout(timer); };
+    return () => { observer.disconnect(); loader?.removeEventListener('error', loaderFailed); window.clearTimeout(timer); };
   }, [show]);
 
   if (!show) return null;

@@ -165,9 +165,12 @@ const totalJsGzipBytes = [...jsGzipSizes.values()].reduce((total, size) => total
 // approach navigation. The same-dependency clean build measured 298305 bytes;
 // the new build measured 299517 bytes. Startup and chat-window caps below are
 // unchanged. Syntax highlighting was evaluated separately and not included.
+// 2026-11-03: 294 KiB covers the marked patch update and guest ad-slot timing
+// fix. With the same dependencies the clean build was 300031 gzip bytes and
+// the fix measured 300257 bytes. Per-entry limits remain unchanged.
 // The strict 4 KiB bootstrap and 50 KiB ChatWindow caps below still protect
 // startup cost.
-const totalJsGzipBudget = 293 * 1024;
+const totalJsGzipBudget = 294 * 1024;
 if (totalJsGzipBytes > totalJsGzipBudget) {
   throw new Error(
     `Compressed JavaScript budget exceeded: ${totalJsGzipBytes} bytes gzip > ${totalJsGzipBudget}.`,
