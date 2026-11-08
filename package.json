@@ -52,6 +52,8 @@
     "verify:dist": "node scripts/verify-dist.mjs",
     "check": "npm run lint && npm run typecheck && npm run test && npm run test:ops && npm run build && npm run verify:dist && npm run test:release && npm run test:browser",
     "deploy": "./deploy.sh",
-    "test:support-eval": "node scripts/evaluate-support.mjs"
+    "test:support-eval": "node scripts/evaluate-support.mjs",
+    "test:public": "node --test scripts/__tests__/evaluate-support.node.mjs",
+    "check:ci": "npm run lint && npm run typecheck && npm run test && npm run test:public && npm run build && npm run verify:dist && npm run test:browser"
   }
 }
