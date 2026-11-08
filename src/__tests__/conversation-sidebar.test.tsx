@@ -8,6 +8,12 @@ import { ConversationSidebar } from '../components/ConversationSidebar';
 import type { Conversation, ConversationSidebarProps } from '../types';
 
 const theme = createTheme();
+// jsdom 31 evaluates stylesheet media queries against a fixed 1024x768 viewport that a test
+// cannot resize, so mobile cases also move the md breakpoint above it: the drawers'
+// `display: { xs: ..., md: ... }` rules then agree with the mocked matchMedia.
+const mobileTheme = createTheme({
+  breakpoints: { values: { ...theme.breakpoints.values, md: 1100, lg: 1200, xl: 1536 } },
+});
 let mobileViewport = false;
 
 const conversation = (
@@ -70,7 +76,7 @@ const Harness = ({
   const onToggleDesktopCollapsed = useCallback(() => setCollapsed(value => !value), []);
 
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={mobileViewport ? mobileTheme : theme}>
       <div id="wf-chat-window">
         <ConversationSidebar
           open={open}
@@ -449,7 +455,7 @@ describe('ConversationSidebar library organization', () => {
       const [open, setOpen] = useState(false);
       const openerRef = useRef<HTMLButtonElement | null>(null);
       return (
-        <ThemeProvider theme={theme}>
+        <ThemeProvider theme={mobileTheme}>
           <div id="wf-chat-window">
             <button ref={openerRef} type="button" onClick={() => setOpen(true)}>Open chat history</button>
             <ConversationSidebar
