@@ -55,3 +55,4 @@ yarn-error.log*
 /scripts/verify-xenforo-compiled-templates.mjs
 /scripts/verify-xenforo-templates.mjs
 /scripts/release-tests/
+.claude/settings.local.json
